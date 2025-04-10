@@ -1,0 +1,570 @@
+use std::future::poll_fn;
+use std::io::{Error as IoError, ErrorKind, IoSliceMut, Read, Result as IoResult};
+use std::pin::Pin;
+use std::task::Context;
+use std::task::Poll::*;
+
+use futures_io::AsyncRead;
+
+use crate::errors;
+
+/// Helper for read buffers.
+///
+/// Useful for sans-io reader.
+///
+/// # [`Read`] Behavior
+///
+/// [`Buffer`] acts like a non-blocking reader.
+/// When trying to read past it's end and it's not EOF, it will return [`ErrorKind::WouldBlock`] error.
+pub struct Buffer<'a> {
+    buf: &'a [u8],
+    consumed: usize,
+    eof: bool,
+}
+
+impl<'a> Buffer<'a> {
+    /// Create new `Buffer`.
+    pub fn new(buf: &'a [u8]) -> Self {
+        Self {
+            buf,
+            consumed: 0,
+            eof: false,
+        }
+    }
+
+    /// Mark buffer as EOF.
+    pub fn set_eof(mut self) -> Self {
+        self.eof = true;
+        self
+    }
+
+    /// Finalize buffer and returns how many bytes have been consumed.
+    pub fn finalize(self) -> usize {
+        self.consumed
+    }
+
+    fn consume_all(&mut self) -> usize {
+        let n = self.buf.len();
+        self.buf = &[];
+        self.consumed += n;
+        n
+    }
+}
+
+impl Read for Buffer<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let n = buf.len().min(self.buf.len());
+        match n {
+            0 if !self.eof => return Err(ErrorKind::WouldBlock.into()),
+            0 => (),
+            1 => {
+                buf[0] = self.buf[0];
+                self.buf = &self.buf[1..];
+            }
+            n => {
+                let src;
+                (src, self.buf) = self.buf.split_at(n);
+                buf[..n].copy_from_slice(src);
+            }
+        }
+
+        self.consumed += n;
+        Ok(n)
+    }
+
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> IoResult<usize> {
+        let mut is_empty = true;
+        let mut r = 0;
+        for buf in bufs {
+            if buf.is_empty() {
+                continue;
+            }
+            is_empty = false;
+
+            let n = buf.len().min(self.buf.len());
+            match n {
+                0 => break,
+                1 => {
+                    buf[0] = self.buf[0];
+                    self.buf = &self.buf[1..];
+                }
+                n => {
+                    let src;
+                    (src, self.buf) = self.buf.split_at(n);
+                    buf[..n].copy_from_slice(src);
+                }
+            }
+
+            self.consumed += n;
+            r += n;
+        }
+
+        if !is_empty && r == 0 && !self.eof {
+            return Err(ErrorKind::WouldBlock.into());
+        }
+        Ok(r)
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> IoResult<usize> {
+        buf.extend_from_slice(self.buf);
+        let n = self.consume_all();
+        if !self.eof {
+            return Err(ErrorKind::WouldBlock.into());
+        }
+        Ok(n)
+    }
+
+    fn read_to_string(&mut self, buf: &mut String) -> IoResult<usize> {
+        let Ok(s) = std::str::from_utf8(self.buf) else {
+            self.consume_all();
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                errors::StreamUtf8Error,
+            ));
+        };
+        buf.push_str(s);
+        let n = self.consume_all();
+        if !self.eof {
+            return Err(ErrorKind::WouldBlock.into());
+        }
+        Ok(n)
+    }
+
+    fn read_exact(&mut self, buf: &mut [u8]) -> IoResult<()> {
+        if buf.is_empty() {
+            return Ok(());
+        } else if self.buf.len() < buf.len() {
+            return Err(if self.buf.is_empty() && !self.eof {
+                ErrorKind::WouldBlock
+            } else {
+                self.consume_all();
+                ErrorKind::UnexpectedEof
+            }
+            .into());
+        } else if buf.len() == 1 {
+            buf[0] = self.buf[0];
+            self.consumed += 1;
+            return Ok(());
+        }
+
+        let b;
+        (b, self.buf) = self.buf.split_at(buf.len());
+        buf.copy_from_slice(b);
+        self.consumed += buf.len();
+        Ok(())
+    }
+}
+
+pub(crate) struct AsyncReadWrapper<'a, 'b, R> {
+    cx: &'a mut Context<'b>,
+    reader: Pin<&'a mut R>,
+}
+
+impl<R: AsyncRead> Read for AsyncReadWrapper<'_, '_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+        match self.reader.as_mut().poll_read(self.cx, buf) {
+            Ready(v) => v,
+            Pending => Err(ErrorKind::WouldBlock.into()),
+        }
+    }
+}
+
+pub(crate) async fn async_reader<S, R, F>(mut reader: Pin<&mut S>, mut f: F) -> IoResult<R>
+where
+    S: AsyncRead,
+    for<'a, 'b> F: FnMut(&mut AsyncReadWrapper<'a, 'b, S>) -> IoResult<R>,
+{
+    poll_fn(|cx| {
+        match f(&mut AsyncReadWrapper {
+            cx,
+            reader: reader.as_mut(),
+        }) {
+            Err(e) if e.kind() == ErrorKind::WouldBlock => Pending,
+            v => Ready(v),
+        }
+    })
+    .await
+}
+
+#[cfg(test)]
+pub(crate) fn test_read_helper<T>(
+    data: &[u8],
+    steps: Vec<usize>,
+    mut f: impl FnMut(&mut Buffer<'_>) -> IoResult<T>,
+) -> T {
+    let mut it = steps.into_iter();
+    let mut n = 0;
+    while n < data.len() {
+        let t = n
+            .saturating_add(it.next().unwrap_or(usize::MAX))
+            .min(data.len());
+        let b = &data[n..t];
+        let l = b.len();
+        let mut buf = Buffer::new(b);
+        match f(&mut buf) {
+            Ok(v) => return v,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => (),
+            Err(e) => panic!("IO error: {e}"),
+        }
+        assert_eq!(buf.finalize(), l);
+        n += l;
+    }
+    panic!("buffer finished but value isn't yet produced");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Arc;
+
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+    use proptest_state_machine::*;
+
+    static EXAMPLE_DATA: &[u8] = b"Never gonna give you up";
+
+    #[test]
+    fn test_buffer_empty() {
+        let mut buf = Buffer::new(&[]);
+
+        assert_eq!(buf.read(&mut []).unwrap(), 0);
+        assert_eq!(
+            buf.read(&mut [0]).unwrap_err().kind(),
+            ErrorKind::WouldBlock
+        );
+
+        assert_eq!(buf.finalize(), 0);
+    }
+
+    #[test]
+    fn test_buffer_empty_eof() {
+        let mut buf = Buffer::new(&[]).set_eof();
+
+        assert_eq!(buf.read(&mut []).unwrap(), 0);
+        assert_eq!(buf.read(&mut [0]).unwrap(), 0);
+
+        assert_eq!(buf.finalize(), 0);
+    }
+
+    #[test]
+    fn test_buffer_read() {
+        for i in 0..=EXAMPLE_DATA.len() * 2 {
+            println!("Trying: {i}");
+            let mut buf = Buffer::new(EXAMPLE_DATA);
+
+            let n = i.min(EXAMPLE_DATA.len());
+            let mut v = vec![0; i];
+            assert_eq!(buf.read(&mut v).unwrap(), n);
+            assert_eq!(&v[..n], &EXAMPLE_DATA[..n]);
+
+            assert_eq!(buf.finalize(), n);
+        }
+    }
+
+    #[test]
+    fn test_buffer_read_exact() {
+        for i in 0..=EXAMPLE_DATA.len() {
+            println!("Trying: {i}");
+            let mut buf = Buffer::new(EXAMPLE_DATA);
+
+            let mut v = vec![0; i];
+            buf.read_exact(&mut v).unwrap();
+            assert_eq!(v, &EXAMPLE_DATA[..i]);
+
+            assert_eq!(buf.finalize(), i);
+        }
+    }
+
+    #[test]
+    fn test_buffer_read_exact_fail() {
+        for i in EXAMPLE_DATA.len() + 1..=EXAMPLE_DATA.len() * 2 {
+            println!("Trying: {i}");
+            let mut buf = Buffer::new(EXAMPLE_DATA);
+
+            let mut v = vec![0; i];
+            assert_eq!(
+                buf.read_exact(&mut v).unwrap_err().kind(),
+                ErrorKind::UnexpectedEof
+            );
+
+            assert_eq!(buf.finalize(), EXAMPLE_DATA.len());
+        }
+    }
+
+    #[test]
+    fn test_buffer_read_vec() {
+        let mut buf = Buffer::new(EXAMPLE_DATA).set_eof();
+
+        let mut v = Vec::new();
+        assert_eq!(buf.read_to_end(&mut v).unwrap(), EXAMPLE_DATA.len());
+        assert_eq!(v, EXAMPLE_DATA);
+
+        assert_eq!(buf.finalize(), EXAMPLE_DATA.len());
+    }
+
+    #[test]
+    fn test_buffer_read_string() {
+        let mut buf = Buffer::new(EXAMPLE_DATA).set_eof();
+
+        let mut s = String::new();
+        assert_eq!(buf.read_to_string(&mut s).unwrap(), EXAMPLE_DATA.len());
+        assert_eq!(s.as_bytes(), EXAMPLE_DATA);
+
+        assert_eq!(buf.finalize(), EXAMPLE_DATA.len());
+    }
+
+    #[test]
+    fn test_buffer_read_end_nonblock() {
+        let mut buf = Buffer::new(EXAMPLE_DATA);
+
+        assert_eq!(
+            buf.read_to_end(&mut Vec::new()).unwrap_err().kind(),
+            ErrorKind::WouldBlock
+        );
+
+        assert_eq!(buf.finalize(), EXAMPLE_DATA.len());
+    }
+
+    #[derive(Debug, Clone)]
+    enum SliceLikeOp {
+        Read(usize),
+        ReadExact(usize),
+        ReadVectored(Vec<usize>),
+        ReadToEnd,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum LastResult {
+        Nothing,
+        Err(ErrorKind),
+        Data(Vec<u8>),
+        DataVector(Box<[Box<[u8]>]>),
+    }
+
+    #[derive(Debug, Clone)]
+    struct SliceLike {
+        data: Arc<[u8]>,
+        index: usize,
+        last_res: LastResult,
+    }
+
+    impl SliceLike {
+        fn apply(&mut self, trans: &SliceLikeOp) {
+            let mut s = &self.data[self.index..];
+
+            self.last_res = match trans {
+                SliceLikeOp::Read(n) => {
+                    let mut v = vec![0; *n];
+                    match s.read(&mut v) {
+                        Err(e) => LastResult::Err(e.kind()),
+                        Ok(n) => {
+                            v.truncate(n);
+                            LastResult::Data(v)
+                        }
+                    }
+                }
+                SliceLikeOp::ReadExact(n) => {
+                    let mut v = vec![0; *n];
+                    match s.read_exact(&mut v) {
+                        Err(e) => LastResult::Err(e.kind()),
+                        Ok(()) => LastResult::Data(v),
+                    }
+                }
+                SliceLikeOp::ReadVectored(n) => {
+                    let mut vecs = n
+                        .iter()
+                        .map(|n| vec![0; *n].into_boxed_slice())
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice();
+                    let r = {
+                        let mut p = vecs
+                            .iter_mut()
+                            .map(|v| IoSliceMut::new(v))
+                            .collect::<Vec<_>>();
+                        s.read_vectored(&mut p)
+                    };
+                    match r {
+                        Err(e) => LastResult::Err(e.kind()),
+                        Ok(n) => {
+                            let mut t = 0;
+                            for v in &mut vecs {
+                                let e = t + v.len();
+                                if e > n {
+                                    v[n.saturating_sub(t)..].fill(0);
+                                }
+                                t = e;
+                            }
+                            LastResult::DataVector(vecs)
+                        }
+                    }
+                }
+                SliceLikeOp::ReadToEnd => {
+                    let mut v = Vec::new();
+                    match s.read_to_end(&mut v) {
+                        Err(e) => LastResult::Err(e.kind()),
+                        Ok(n) => {
+                            v.truncate(n);
+                            LastResult::Data(v)
+                        }
+                    }
+                }
+            };
+
+            self.index = self.data.len() - s.len();
+        }
+    }
+
+    struct SliceLikeRef;
+
+    impl ReferenceStateMachine for SliceLikeRef {
+        type State = SliceLike;
+        type Transition = SliceLikeOp;
+
+        fn init_state() -> BoxedStrategy<Self::State> {
+            vec(any::<u8>(), 0..=1024)
+                .prop_map(|v| SliceLike {
+                    data: v.into(),
+                    index: 0,
+                    last_res: LastResult::Nothing,
+                })
+                .boxed()
+        }
+
+        fn transitions(_: &Self::State) -> BoxedStrategy<Self::Transition> {
+            prop_oneof![
+                (0..256usize).prop_map(SliceLikeOp::Read),
+                (0..256usize).prop_map(SliceLikeOp::ReadExact),
+                vec(0..256usize, 0..=16).prop_map(SliceLikeOp::ReadVectored),
+                Just(SliceLikeOp::ReadToEnd),
+            ]
+            .boxed()
+        }
+
+        fn apply(mut state: Self::State, trans: &Self::Transition) -> Self::State {
+            state.apply(trans);
+            state
+        }
+    }
+
+    struct BufferSliceLike {
+        data: Arc<[u8]>,
+        index: usize,
+        last_res: LastResult,
+        eof: bool,
+    }
+
+    impl BufferSliceLike {
+        fn apply(&mut self, trans: SliceLikeOp) {
+            let mut buf = Buffer {
+                buf: &self.data[self.index..],
+                consumed: self.index,
+                eof: self.eof,
+            };
+
+            self.last_res = match trans {
+                SliceLikeOp::Read(n) => {
+                    let mut v = vec![0; n];
+                    match buf.read(&mut v) {
+                        Err(e) => LastResult::Err(e.kind()),
+                        Ok(n) => {
+                            v.truncate(n);
+                            LastResult::Data(v)
+                        }
+                    }
+                }
+                SliceLikeOp::ReadExact(n) => {
+                    let mut v = vec![0; n];
+                    match buf.read_exact(&mut v) {
+                        Err(e) => LastResult::Err(e.kind()),
+                        Ok(()) => LastResult::Data(v),
+                    }
+                }
+                SliceLikeOp::ReadVectored(n) => {
+                    let mut vecs = n
+                        .into_iter()
+                        .map(|n| vec![0; n].into_boxed_slice())
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice();
+                    let r = {
+                        let mut p = vecs
+                            .iter_mut()
+                            .map(|v| IoSliceMut::new(v))
+                            .collect::<Vec<_>>();
+                        buf.read_vectored(&mut p)
+                    };
+                    match r {
+                        Err(e) => LastResult::Err(e.kind()),
+                        Ok(n) => {
+                            let mut t = 0;
+                            for v in &mut vecs {
+                                let e = t + v.len();
+                                if e > n {
+                                    v[n.saturating_sub(t)..].fill(0);
+                                }
+                                t = e;
+                            }
+                            LastResult::DataVector(vecs)
+                        }
+                    }
+                }
+                SliceLikeOp::ReadToEnd => {
+                    let mut v = Vec::new();
+                    match buf.read_to_end(&mut v) {
+                        Err(e) => LastResult::Err(e.kind()),
+                        Ok(n) => {
+                            v.truncate(n);
+                            LastResult::Data(v)
+                        }
+                    }
+                }
+            };
+
+            self.index = buf.finalize();
+        }
+    }
+
+    struct BufferSliceLikeTest;
+
+    impl StateMachineTest for BufferSliceLikeTest {
+        type SystemUnderTest = BufferSliceLike;
+        type Reference = SliceLikeRef;
+
+        fn init_test(
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        ) -> Self::SystemUnderTest {
+            BufferSliceLike {
+                data: ref_state.data.clone(),
+                index: 0,
+                last_res: LastResult::Nothing,
+                eof: true,
+            }
+        }
+
+        fn apply(
+            mut state: Self::SystemUnderTest,
+            _: &<Self::Reference as ReferenceStateMachine>::State,
+            trans: <Self::Reference as ReferenceStateMachine>::Transition,
+        ) -> Self::SystemUnderTest {
+            state.apply(trans);
+            state
+        }
+
+        fn check_invariants(
+            state: &Self::SystemUnderTest,
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        ) {
+            assert_eq!(state.last_res, ref_state.last_res);
+            assert_eq!(state.index, ref_state.index);
+        }
+    }
+
+    prop_state_machine! {
+        #[test]
+        fn test_buffer_statemachine_slicelike(sequential 1..32 => BufferSliceLikeTest);
+    }
+}

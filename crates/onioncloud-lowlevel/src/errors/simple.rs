@@ -21,3 +21,9 @@ impl From<cipher::InvalidLength> for InvalidLength {
         Self
     }
 }
+
+#[derive(Error)]
+#[error("cannot convert stream data into UTF-8")]
+pub(crate) struct StreamUtf8Error;
+
+display2debug! {StreamUtf8Error}

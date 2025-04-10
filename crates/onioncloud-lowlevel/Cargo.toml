@@ -8,4 +8,10 @@ publish.workspace = true
 
 [dependencies]
 cipher.workspace = true
+futures-core.workspace = true
+futures-io.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+proptest-state-machine.workspace = true
