@@ -280,6 +280,11 @@ impl Cell {
         }
     }
 
+    /// Reads fixed-sized cell from a [`AsyncRead`] stream.
+    ///
+    /// # Parameters
+    /// - `header` : Cell header.
+    /// - `cached` : [`FixedCell`] to use. Use [`FixedCell::default`] to create a new one or reuse cached one.
     pub async fn read_fixed<R: AsyncRead>(
         reader: Pin<&mut R>,
         header: CellHeader,
@@ -289,6 +294,10 @@ impl Cell {
         util::async_reader(reader, move |s| r.handle_read(s)).await
     }
 
+    /// Reads variable-sized cell from a [`AsyncRead`] stream.
+    ///
+    /// # Parameters
+    /// - `header` : Cell header.
     pub async fn read_variable<R: AsyncRead>(
         reader: Pin<&mut R>,
         header: CellHeader,
@@ -407,6 +416,11 @@ impl VariableCellReader {
     }
 }
 
+/// Cell header.
+///
+/// The typical way to create it is by reading from stream (see [`CellHeader::read`]).
+/// It is then passed to functions like [`Cell::read_fixed`] and [`Cell::read_variable`],
+/// depending on the header command.
 #[derive(Default)]
 #[non_exhaustive]
 pub struct CellHeader {
@@ -472,9 +486,10 @@ impl CellHeader {
         Self { ..*self }
     }
 
-    /// Handle reading header from buffer.
+    /// Reads cell header from a [`AsyncRead`] stream.
     ///
-    /// If returns [`None`], then buffer needs to read more data.
+    /// # Parameters
+    /// - `circuit_4bytes` : `true` if circuit ID length is 4 bytes.
     pub async fn read<R: AsyncRead>(reader: Pin<&mut R>, circuit_4bytes: bool) -> IoResult<Self> {
         let mut r = CellHeaderReader::new(circuit_4bytes);
         util::async_reader(reader, move |s| r.handle_read(s)).await
