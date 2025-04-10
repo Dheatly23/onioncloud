@@ -487,6 +487,13 @@ impl CellHeaderReader {
 }
 
 impl CellHeader {
+    /// Creates new header.
+    ///
+    /// Useful for manually creating [`Cell`] (see [`Cell::from_fixed`] and [`Cell::from_variable`]).
+    pub fn new(circuit: u32, command: u8) -> Self {
+        Self { circuit, command }
+    }
+
     pub(crate) fn dup(&self) -> Self {
         Self { ..*self }
     }
