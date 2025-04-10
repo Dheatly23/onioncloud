@@ -420,6 +420,13 @@ pub(crate) struct CellHeaderReader {
 }
 
 impl CellHeaderReader {
+    pub(crate) fn new(circuit_4bytes: bool) -> Self {
+        Self {
+            buf: [0; 5],
+            flags: if circuit_4bytes { 1 << 7 } else { 0 },
+        }
+    }
+
     /// Handle reading from reader.
     pub(crate) fn handle_read<R: Read>(&mut self, reader: &mut R) -> IoResult<CellHeader> {
         Ok(if self.flags & (1 << 7) != 0 {
@@ -469,11 +476,7 @@ impl CellHeader {
     ///
     /// If returns [`None`], then buffer needs to read more data.
     pub async fn read<R: AsyncRead>(reader: Pin<&mut R>, circuit_4bytes: bool) -> IoResult<Self> {
-        let mut r = CellHeaderReader {
-            buf: [0; 5],
-            flags: if circuit_4bytes { 1 << 7 } else { 0 },
-        };
-
+        let mut r = CellHeaderReader::new(circuit_4bytes);
         util::async_reader(reader, move |s| r.handle_read(s)).await
     }
 }
@@ -514,13 +517,7 @@ mod tests {
             };
 
             let res = {
-                let mut r = CellHeaderReader {
-                    buf: [0; 5],
-                    flags: if is_4bytes { 1 << 7 } else {
-                        assert!(circuit <= u16::MAX.into());
-                        0
-                    },
-                };
+                let mut r = CellHeaderReader::new(is_4bytes);
                 test_read_helper(buf, steps, |s| r.handle_read(s))
             };
 
@@ -557,13 +554,7 @@ mod tests {
                 Header(FixedCellReader),
             }
 
-            let mut r = Reader::Init(CellHeaderReader {
-                buf: [0; 5],
-                flags: if is_4bytes { 1 << 7 } else {
-                    assert!(circuit <= u16::MAX.into());
-                    0
-                },
-            });
+            let mut r = Reader::Init(CellHeaderReader::new(is_4bytes));
             let cell = test_read_helper(buf, steps, |s| loop {
                 r = match &mut r {
                     Reader::Init(r) => Reader::Header(FixedCellReader::new(r.handle_read(s)?, FixedCell::default())),
@@ -608,13 +599,7 @@ mod tests {
                 Header(VariableCellReader),
             }
 
-            let mut r = Reader::Init(CellHeaderReader {
-                buf: [0; 5],
-                flags: if is_4bytes { 1 << 7 } else {
-                    assert!(circuit <= u16::MAX.into());
-                    0
-                },
-            });
+            let mut r = Reader::Init(CellHeaderReader::new(is_4bytes));
             let cell = test_read_helper(&buf, steps, |s| loop {
                 r = match &mut r {
                     Reader::Init(r) => Reader::Header(VariableCellReader::new(r.handle_read(s)?)),
