@@ -131,6 +131,11 @@ impl VariableCell {
         self.inner
     }
 
+    /// Returns [`true`] if cell is empty.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
     /// Returns cell data length.
     pub fn len(&self) -> usize {
         self.inner.len()
