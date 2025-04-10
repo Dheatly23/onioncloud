@@ -159,31 +159,51 @@ impl Read for Buffer<'_> {
     }
 }
 
+/// Wrapper for [`AsyncRead`] into ordinary non-blocking [`Read`].
+///
+/// # How it works
+///
+/// If the reader returns [`Pending`], it will set it's pending flag to [`true`] and returns [`ErrorKind::WouldBlock`].
+/// Then the outer [`async_reader`] can detect when the inner reader is pending and yields.
 pub(crate) struct AsyncReadWrapper<'a, 'b, R> {
     cx: &'a mut Context<'b>,
     reader: Pin<&'a mut R>,
+    pending: bool,
 }
 
 impl<R: AsyncRead> Read for AsyncReadWrapper<'_, '_, R> {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+        if self.pending {
+            // Immediately returns WouldBlock
+            return Err(ErrorKind::WouldBlock.into());
+        }
+
         match self.reader.as_mut().poll_read(self.cx, buf) {
             Ready(v) => v,
-            Pending => Err(ErrorKind::WouldBlock.into()),
+            Pending => {
+                self.pending = true;
+                Err(ErrorKind::WouldBlock.into())
+            }
         }
     }
 }
 
+/// Wraps an ordinary stream reading function into [`AsyncRead`].
 pub(crate) async fn async_reader<S, R, F>(mut reader: Pin<&mut S>, mut f: F) -> IoResult<R>
 where
     S: AsyncRead,
     for<'a, 'b> F: FnMut(&mut AsyncReadWrapper<'a, 'b, S>) -> IoResult<R>,
 {
     poll_fn(|cx| {
-        match f(&mut AsyncReadWrapper {
+        let mut s = AsyncReadWrapper {
             cx,
             reader: reader.as_mut(),
-        }) {
-            Err(e) if e.kind() == ErrorKind::WouldBlock => Pending,
+            pending: false,
+        };
+
+        match f(&mut s) {
+            // Check if pending is true to ensure there isn't spurious WouldBlock.
+            Err(e) if e.kind() == ErrorKind::WouldBlock && s.pending => Pending,
             v => Ready(v),
         }
     })
