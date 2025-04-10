@@ -131,6 +131,11 @@ impl VariableCell {
         self.inner
     }
 
+    /// Returns cell data length.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
     /// Try to cast into [`FixedCell`].
     ///
     /// If cast fails, returns itself.
@@ -146,12 +151,14 @@ impl VariableCell {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Cell {
     pub circuit: u32,
     pub command: u8,
     data: CellData,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum CellData {
     Fixed(FixedCell),
     Variable(VariableCell),
@@ -213,6 +220,16 @@ impl Cell {
             CellData::Fixed(v) => &mut v.data_mut()[..],
             CellData::Variable(v) => v.data_mut(),
         }
+    }
+
+    /// Returns [`true`] if cell is fixed-sized.
+    pub fn is_fixed(&self) -> bool {
+        matches!(self.data, CellData::Fixed(_))
+    }
+
+    /// Returns [`true`] if cell is variable-sized.
+    pub fn is_variable(&self) -> bool {
+        matches!(self.data, CellData::Variable(_))
     }
 
     /// Try to get [`FixedCell`] reference.
