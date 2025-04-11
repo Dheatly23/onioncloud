@@ -1,3 +1,6 @@
+use std::mem::size_of;
+use std::slice::{from_raw_parts, from_raw_parts_mut};
+
 use zerocopy::FromBytes;
 use zerocopy::byteorder::big_endian::U16;
 
@@ -85,14 +88,18 @@ impl Versions {
 
     /// Gets reference into versions data.
     pub fn data(&self) -> &[U16] {
+        let s = self.0.data();
         // SAFETY: Data has been checked
-        unsafe { <[U16]>::ref_from_bytes(self.0.data()).unwrap_unchecked() }
+        // XXX: Use zerocopy instead?
+        unsafe { from_raw_parts((s as *const [u8]).cast::<U16>(), s.len() / size_of::<U16>()) }
     }
 
     /// Gets mutable reference into versions data.
     pub fn data_mut(&mut self) -> &mut [U16] {
+        let s = self.0.data_mut();
         // SAFETY: Data has been checked
-        unsafe { <[U16]>::mut_from_bytes(self.0.data_mut()).unwrap_unchecked() }
+        // XXX: Use zerocopy instead?
+        unsafe { from_raw_parts_mut((s as *mut [u8]).cast::<U16>(), s.len() / size_of::<U16>()) }
     }
 
     /// Unwraps into inner [`VariableCell`].
