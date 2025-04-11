@@ -191,6 +191,7 @@ dependencies = [
  "proptest-state-machine",
  "rand 0.9.0",
  "thiserror",
+ "zerocopy",
 ]
 
 [[package]]

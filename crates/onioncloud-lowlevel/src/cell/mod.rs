@@ -1,5 +1,6 @@
 pub mod dispatch;
 pub mod padding;
+pub mod versions;
 
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::io::{ErrorKind, Read, Result as IoResult};
@@ -328,6 +329,13 @@ impl Cell {
         let mut r = VariableCellReader::new(header);
         util::async_reader(reader, move |s| r.handle_read(s)).await
     }
+
+    fn into_variable_with(self, f: impl FnOnce(&[u8]) -> bool) -> Result<VariableCell, Self> {
+        match self.data {
+            CellData::Variable(v) if f(v.data()) => Ok(v),
+            _ => Err(self),
+        }
+    }
 }
 
 /// Trait to cast from a cell.
@@ -384,6 +392,20 @@ pub(crate) fn to_variable(
 ) -> Result<Option<VariableCell>, errors::CellFormatError> {
     cell.take()
         .map(|v| v.into_variable())
+        .transpose()
+        .map_err(|v| {
+            *cell = Some(v);
+            errors::CellFormatError
+        })
+}
+
+/// Helper to take a [`VariableCell`] with check function.
+pub(crate) fn to_variable_with(
+    cell: &mut Option<Cell>,
+    check: impl FnOnce(&[u8]) -> bool,
+) -> Result<Option<VariableCell>, errors::CellFormatError> {
+    cell.take()
+        .map(|v| v.into_variable_with(check))
         .transpose()
         .map_err(|v| {
             *cell = Some(v);
