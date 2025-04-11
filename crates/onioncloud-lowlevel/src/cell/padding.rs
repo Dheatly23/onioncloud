@@ -1,6 +1,8 @@
 use rand::prelude::*;
 
-use super::{Cell, FIXED_CELL_SIZE, FixedCell, TryFromCell, VariableCell, to_fixed, to_variable};
+use super::{
+    Cell, CellHeader, FIXED_CELL_SIZE, FixedCell, TryFromCell, VariableCell, to_fixed, to_variable,
+};
 use crate::errors;
 
 /// Represents a PADDING cell.
@@ -16,6 +18,12 @@ impl AsRef<FixedCell> for Padding {
 impl AsMut<FixedCell> for Padding {
     fn as_mut(&mut self) -> &mut FixedCell {
         &mut self.0
+    }
+}
+
+impl From<Padding> for Cell {
+    fn from(v: Padding) -> Cell {
+        Cell::from_fixed(CellHeader::new(0, 0), v.into_inner())
     }
 }
 
@@ -71,6 +79,12 @@ impl AsRef<VariableCell> for VPadding {
 impl AsMut<VariableCell> for VPadding {
     fn as_mut(&mut self) -> &mut VariableCell {
         &mut self.0
+    }
+}
+
+impl From<VPadding> for Cell {
+    fn from(v: VPadding) -> Cell {
+        Cell::from_variable(CellHeader::new(0, 128), v.into_inner())
     }
 }
 
