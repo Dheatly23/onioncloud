@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 cipher.workspace = true
+crossbeam-queue.workspace = true
 futures-core.workspace = true
 futures-io.workspace = true
 thiserror.workspace = true
