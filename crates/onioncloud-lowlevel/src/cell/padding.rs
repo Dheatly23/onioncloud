@@ -4,7 +4,7 @@ use super::{Cell, FIXED_CELL_SIZE, FixedCell, TryFromCell, VariableCell, to_fixe
 use crate::errors;
 
 /// Represents a PADDING cell.
-#[derive(Default, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct Padding(FixedCell);
 
 impl AsRef<FixedCell> for Padding {
@@ -59,7 +59,7 @@ impl TryFromCell for Padding {
 }
 
 /// Represents a VPADDING cell.
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VPadding(VariableCell);
 
 impl AsRef<VariableCell> for VPadding {

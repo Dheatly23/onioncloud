@@ -1,6 +1,7 @@
 pub mod dispatch;
 pub mod padding;
 
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::io::{ErrorKind, Read, Result as IoResult};
 use std::mem::replace;
 use std::pin::Pin;
@@ -56,6 +57,13 @@ impl<'a> TryFrom<&'a [u8]> for FixedCell {
     }
 }
 
+impl Debug for FixedCell {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        // Filters out cell content
+        f.debug_struct("FixedCell").finish_non_exhaustive()
+    }
+}
+
 impl FixedCell {
     /// Creates new `FixedCell`.
     pub const fn new(inner: Box<[u8; FIXED_CELL_SIZE]>) -> Self {
@@ -105,6 +113,13 @@ impl<'a> From<&'a [u8]> for VariableCell {
 impl From<Vec<u8>> for VariableCell {
     fn from(v: Vec<u8>) -> Self {
         Self::new(v.into_boxed_slice())
+    }
+}
+
+impl Debug for VariableCell {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        // Filters out cell content
+        f.debug_struct("VariableCell").finish_non_exhaustive()
     }
 }
 
@@ -159,14 +174,14 @@ impl VariableCell {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Cell {
     pub circuit: u32,
     pub command: u8,
     data: CellData,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CellData {
     Fixed(FixedCell),
     Variable(VariableCell),
