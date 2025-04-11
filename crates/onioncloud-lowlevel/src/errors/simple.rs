@@ -55,3 +55,9 @@ impl InvalidCellHeader {
         }
     }
 }
+
+#[derive(Error)]
+#[error("bad cell format")]
+pub struct CellFormatError;
+
+display2debug! {CellFormatError}

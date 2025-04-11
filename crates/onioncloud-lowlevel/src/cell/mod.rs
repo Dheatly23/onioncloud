@@ -1,4 +1,5 @@
 pub mod dispatch;
+pub mod padding;
 
 use std::io::{ErrorKind, Read, Result as IoResult};
 use std::mem::replace;
@@ -312,6 +313,67 @@ impl Cell {
         let mut r = VariableCellReader::new(header);
         util::async_reader(reader, move |s| r.handle_read(s)).await
     }
+}
+
+/// Trait to cast from a cell.
+pub trait TryFromCell: Sized {
+    /// Checks cell content, take it, then cast it into `Self`.
+    ///
+    /// Returns a [`None`] value if the checks are failed, but can be passed onto the next type.
+    /// Error result only happens when the format of the cell itself is invalid.
+    ///
+    /// This method **should** not mutate the cell, it's only allowed to inspect it.
+    /// If the checks are good, then use the [`Option::take`] method to pop cell out of it.
+    fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, errors::CellFormatError>;
+}
+
+/// Convenient function wrapping [`TryFromCell`].
+///
+/// ```
+/// use onioncloud_lowlevel::cell::{cast, Cell, CellHeader, FixedCell};
+/// use onioncloud_lowlevel::cell::padding::{Padding, VPadding};
+///
+/// // A cell
+/// let cell = Cell::from_fixed(CellHeader::new(0, 0), FixedCell::default());
+///
+/// // Dispatch cell
+/// let mut cell = Some(cell);
+/// if let Some(cell) = cast::<Padding>(&mut cell).unwrap() {
+///     // Handle padding cell
+/// } else if let Some(cell) = cast::<VPadding>(&mut cell).unwrap() {
+///     // Handle variable padding cell
+/// } else if let Some(cell) = cell {
+///     panic!("unknown cell ID {}!", cell.command);
+/// }
+/// ```
+pub fn cast<T: TryFromCell>(cell: &mut Option<Cell>) -> Result<Option<T>, errors::CellFormatError> {
+    T::try_from_cell(cell)
+}
+
+/// Helper to take a [`FixedCell`].
+pub(crate) fn to_fixed(
+    cell: &mut Option<Cell>,
+) -> Result<Option<FixedCell>, errors::CellFormatError> {
+    cell.take()
+        .map(|v| v.into_fixed())
+        .transpose()
+        .map_err(|v| {
+            *cell = Some(v);
+            errors::CellFormatError
+        })
+}
+
+/// Helper to take a [`VariableCell`].
+pub(crate) fn to_variable(
+    cell: &mut Option<Cell>,
+) -> Result<Option<VariableCell>, errors::CellFormatError> {
+    cell.take()
+        .map(|v| v.into_variable())
+        .transpose()
+        .map_err(|v| {
+            *cell = Some(v);
+            errors::CellFormatError
+        })
 }
 
 pub(crate) struct FixedCellReader {
