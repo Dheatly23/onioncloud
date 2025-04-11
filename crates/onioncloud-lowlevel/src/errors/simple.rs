@@ -1,10 +1,14 @@
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+
 use thiserror::Error;
+
+use crate::cell::CellHeader;
 
 macro_rules! display2debug {
     ($i:ident) => {
-        impl std::fmt::Debug for $i {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                std::fmt::Display::fmt(self, f)
+        impl Debug for $i {
+            fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+                Display::fmt(self, f)
             }
         }
     };
@@ -27,3 +31,27 @@ impl From<cipher::InvalidLength> for InvalidLength {
 pub(crate) struct StreamUtf8Error;
 
 display2debug! {StreamUtf8Error}
+
+#[derive(Error, Debug)]
+#[error("invalid cell header")]
+pub struct InvalidCellHeader {
+    header: Option<CellHeader>,
+}
+
+impl Default for InvalidCellHeader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl InvalidCellHeader {
+    pub fn new() -> Self {
+        Self { header: None }
+    }
+
+    pub fn with_header(header: &CellHeader) -> Self {
+        Self {
+            header: Some(header.dup()),
+        }
+    }
+}

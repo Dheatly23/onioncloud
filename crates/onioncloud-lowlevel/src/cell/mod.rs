@@ -1,3 +1,5 @@
+pub mod dispatch;
+
 use std::io::{ErrorKind, Read, Result as IoResult};
 use std::mem::replace;
 use std::pin::Pin;
@@ -426,7 +428,7 @@ impl VariableCellReader {
 /// The typical way to create it is by reading from stream (see [`CellHeader::read`]).
 /// It is then passed to functions like [`Cell::read_fixed`] and [`Cell::read_variable`],
 /// depending on the header command.
-#[derive(Default)]
+#[derive(Default, Debug)]
 #[non_exhaustive]
 pub struct CellHeader {
     pub circuit: u32,
@@ -585,7 +587,7 @@ mod tests {
             let cell = test_read_helper(buf, steps, |s| loop {
                 r = match &mut r {
                     Reader::Init(r) => Reader::Header(FixedCellReader::new(r.handle_read(s)?, FixedCell::default())),
-                    Reader::Header(r) => return Ok(r.handle_read(s)?),
+                    Reader::Header(r) => return r.handle_read(s),
                 };
             });
 
@@ -630,7 +632,7 @@ mod tests {
             let cell = test_read_helper(&buf, steps, |s| loop {
                 r = match &mut r {
                     Reader::Init(r) => Reader::Header(VariableCellReader::new(r.handle_read(s)?)),
-                    Reader::Header(r) => return Ok(r.handle_read(s)?),
+                    Reader::Header(r) => return r.handle_read(s),
                 };
             });
 
