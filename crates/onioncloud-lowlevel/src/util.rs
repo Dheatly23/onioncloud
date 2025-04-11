@@ -352,6 +352,7 @@ mod tests {
 
     #[derive(Debug, Clone)]
     enum SliceLikeOp {
+        Nothing,
         Read(usize),
         ReadExact(usize),
         ReadVectored(Vec<usize>),
@@ -378,6 +379,7 @@ mod tests {
             let mut s = &self.data[self.index..];
 
             self.last_res = match trans {
+                SliceLikeOp::Nothing => LastResult::Nothing,
                 SliceLikeOp::Read(n) => {
                     let mut v = vec![0; *n];
                     match s.read(&mut v) {
@@ -487,6 +489,7 @@ mod tests {
             };
 
             self.last_res = match trans {
+                SliceLikeOp::Nothing => LastResult::Nothing,
                 SliceLikeOp::Read(n) => {
                     let mut v = vec![0; n];
                     match buf.read(&mut v) {
@@ -583,8 +586,93 @@ mod tests {
         }
     }
 
+    struct SliceLikeNBRef(SliceLikeRef);
+
+    impl ReferenceStateMachine for SliceLikeNBRef {
+        type State = SliceLike;
+        type Transition = SliceLikeOp;
+
+        fn init_state() -> BoxedStrategy<Self::State> {
+            SliceLikeRef::init_state()
+        }
+
+        fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
+            let l = state.data.len() - state.index;
+            match l {
+                0 => prop_oneof![
+                    Just(SliceLikeOp::Nothing),
+                    Just(SliceLikeOp::Read(0)),
+                    Just(SliceLikeOp::ReadExact(0)),
+                    vec(Just(0), 0..=16).prop_map(SliceLikeOp::ReadVectored),
+                ]
+                .boxed(),
+                1..=4 => prop_oneof![
+                    (0..=l).prop_map(SliceLikeOp::Read),
+                    (0..=l).prop_map(SliceLikeOp::ReadExact),
+                    Just(SliceLikeOp::ReadVectored(Vec::new())),
+                    (0..=l).prop_map(|a| SliceLikeOp::ReadVectored(vec![a])),
+                ]
+                .boxed(),
+                _ => prop_oneof![
+                    (0..=l).prop_map(SliceLikeOp::Read),
+                    (0..=l).prop_map(SliceLikeOp::ReadExact),
+                    Just(SliceLikeOp::ReadVectored(Vec::new())),
+                    (0..=l).prop_map(|a| SliceLikeOp::ReadVectored(vec![a])),
+                    std::array::from_fn::<_, 2, _>(|_| 0..=l / 2)
+                        .prop_map(|v| SliceLikeOp::ReadVectored(Vec::from(v))),
+                    std::array::from_fn::<_, 3, _>(|_| 0..=l / 3)
+                        .prop_map(|v| SliceLikeOp::ReadVectored(Vec::from(v))),
+                    std::array::from_fn::<_, 4, _>(|_| 0..=l / 4)
+                        .prop_map(|v| SliceLikeOp::ReadVectored(Vec::from(v))),
+                ]
+                .boxed(),
+            }
+        }
+
+        fn apply(state: Self::State, trans: &Self::Transition) -> Self::State {
+            SliceLikeRef::apply(state, trans)
+        }
+    }
+
+    struct BufferSliceLikeNBTest;
+
+    impl StateMachineTest for BufferSliceLikeNBTest {
+        type SystemUnderTest = BufferSliceLike;
+        type Reference = SliceLikeNBRef;
+
+        fn init_test(
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        ) -> Self::SystemUnderTest {
+            BufferSliceLike {
+                data: ref_state.data.clone(),
+                index: 0,
+                last_res: LastResult::Nothing,
+                eof: false,
+            }
+        }
+
+        fn apply(
+            mut state: Self::SystemUnderTest,
+            _: &<Self::Reference as ReferenceStateMachine>::State,
+            trans: <Self::Reference as ReferenceStateMachine>::Transition,
+        ) -> Self::SystemUnderTest {
+            state.apply(trans);
+            state
+        }
+
+        fn check_invariants(
+            state: &Self::SystemUnderTest,
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        ) {
+            assert_eq!(state.last_res, ref_state.last_res);
+            assert_eq!(state.index, ref_state.index);
+        }
+    }
+
     prop_state_machine! {
         #[test]
-        fn test_buffer_statemachine_slicelike(sequential 1..32 => BufferSliceLikeTest);
+        fn test_buffer_sm_slicelike(sequential 1..32 => BufferSliceLikeTest);
+        #[test]
+        fn test_buffer_sm_slicelike_nb(sequential 1..32 => BufferSliceLikeNBTest);
     }
 }
