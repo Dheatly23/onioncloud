@@ -11,6 +11,7 @@ cipher.workspace = true
 crossbeam-queue.workspace = true
 futures-core.workspace = true
 futures-io.workspace = true
+rand.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

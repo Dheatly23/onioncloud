@@ -1,3 +1,5 @@
+use rand::prelude::*;
+
 use super::{Cell, FIXED_CELL_SIZE, FixedCell, TryFromCell, VariableCell, to_fixed, to_variable};
 use crate::errors;
 
@@ -37,6 +39,11 @@ impl Padding {
     pub fn into_inner(self) -> FixedCell {
         self.0
     }
+
+    /// Randomize cell content.
+    pub fn fill(&mut self) {
+        ThreadRng::default().fill(self.data_mut());
+    }
 }
 
 impl TryFromCell for Padding {
@@ -73,6 +80,25 @@ impl VPadding {
         Self(data)
     }
 
+    /// Create new VPADDING cell filled with random bytes.
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::cell::padding::VPadding;
+    ///
+    /// let cell = VPadding::with_size(16);
+    ///
+    /// assert_eq!(cell.data().len(), 16);
+    ///
+    /// // Cell content are randomized
+    /// println!("{:?}", cell.data());
+    /// ```
+    pub fn with_size(n: usize) -> Self {
+        // SAFETY: It will be filled by RNG. RNG should not depends on slice content.
+        let mut data: Box<[u8]> = unsafe { Box::new_uninit_slice(n).assume_init() };
+        ThreadRng::default().fill(&mut data[..]);
+        Self::new(VariableCell::new(data))
+    }
+
     /// Gets reference into padding data.
     pub fn data(&self) -> &[u8] {
         self.0.data()
@@ -86,6 +112,11 @@ impl VPadding {
     /// Unwraps into inner [`VariableCell`].
     pub fn into_inner(self) -> VariableCell {
         self.0
+    }
+
+    /// Randomize cell content.
+    pub fn fill(&mut self) {
+        ThreadRng::default().fill(self.data_mut());
     }
 }
 
