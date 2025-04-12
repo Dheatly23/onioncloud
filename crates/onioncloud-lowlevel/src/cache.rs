@@ -118,6 +118,8 @@ impl StandardCellCache {
 
 impl CellCache for StandardCellCache {
     fn get_cached(&self) -> FixedCell {
+        // Needs it for test harness
+        #[allow(clippy::manual_unwrap_or_default)]
         match self.buf.pop() {
             Some(v) => v,
             None => {
