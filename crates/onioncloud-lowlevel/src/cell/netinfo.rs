@@ -78,6 +78,13 @@ impl Netinfo {
     /// - `time` : Timestamp.
     /// - `other_addr` : Peer IP address.
     /// - `this_addr` : This IP addresses. Excessive addresses will be discared.
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::cell::FixedCell;
+    /// use onioncloud_lowlevel::cell::netinfo::Netinfo;
+    ///
+    /// let cell = Netinfo::new(FixedCell::default(), 0, [0; 4].into(), []);
+    /// ```
     pub fn new(
         mut cell: FixedCell,
         time: u32,
