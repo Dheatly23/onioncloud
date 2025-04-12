@@ -112,7 +112,7 @@ impl Certs {
             };
         }
 
-        data.is_empty()
+        true
     }
 }
 
