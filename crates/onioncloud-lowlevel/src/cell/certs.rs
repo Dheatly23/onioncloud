@@ -212,11 +212,27 @@ impl<'a> IntoIterator for &'a Certs {
 mod tests {
     use super::*;
 
+    use std::iter::repeat;
+
     use proptest::collection::vec;
     use proptest::prelude::*;
 
     fn certs_strat() -> impl Strategy<Value = Vec<(u8, Vec<u8>)>> {
         vec((any::<u8>(), vec(any::<u8>(), 0..256)), 0..256)
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_certs_too_long() {
+        static DATA: &[u8] = &[0; 65536];
+
+        Certs::from_iter([(0, DATA)]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_certs_too_many() {
+        Certs::from_iter(repeat((0, [])));
     }
 
     proptest! {
