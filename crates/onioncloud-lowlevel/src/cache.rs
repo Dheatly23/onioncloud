@@ -205,6 +205,14 @@ impl<T: Into<FixedCell> + Ord, C: CellCache> Ord for WithCached<T, C> {
 }
 
 impl<T: Into<FixedCell>, C: CellCache> WithCached<T, C> {
+    /// Create new [`WithCached`].
+    pub fn new(cache: C, value: T) -> Self {
+        Self {
+            cache,
+            cell: ManuallyDrop::new(value),
+        }
+    }
+
     /// Get reference to cell cache.
     ///
     /// Useful for using cache for other cells.
