@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod certs;
 pub mod dispatch;
 pub mod netinfo;
