@@ -1,5 +1,6 @@
 pub mod certs;
 pub mod dispatch;
+pub mod netinfo;
 pub mod padding;
 pub mod versions;
 
@@ -331,6 +332,16 @@ impl Cell {
         util::async_reader(reader, move |s| r.handle_read(s)).await
     }
 
+    fn into_fixed_with(
+        self,
+        f: impl FnOnce(&[u8; FIXED_CELL_SIZE]) -> bool,
+    ) -> Result<FixedCell, Self> {
+        match self.data {
+            CellData::Fixed(v) if f(v.data()) => Ok(v),
+            _ => Err(self),
+        }
+    }
+
     fn into_variable_with(self, f: impl FnOnce(&[u8]) -> bool) -> Result<VariableCell, Self> {
         match self.data {
             CellData::Variable(v) if f(v.data()) => Ok(v),
@@ -393,6 +404,20 @@ pub(crate) fn to_variable(
 ) -> Result<Option<VariableCell>, errors::CellFormatError> {
     cell.take()
         .map(|v| v.into_variable())
+        .transpose()
+        .map_err(|v| {
+            *cell = Some(v);
+            errors::CellFormatError
+        })
+}
+
+/// Helper to take a [`FixedCell`] with check function.
+pub(crate) fn to_fixed_with(
+    cell: &mut Option<Cell>,
+    check: impl FnOnce(&[u8; FIXED_CELL_SIZE]) -> bool,
+) -> Result<Option<FixedCell>, errors::CellFormatError> {
+    cell.take()
+        .map(|v| v.into_fixed_with(check))
         .transpose()
         .map_err(|v| {
             *cell = Some(v);
