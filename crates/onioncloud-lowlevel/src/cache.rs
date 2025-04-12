@@ -225,6 +225,7 @@ impl<T: Into<FixedCell>, C: CellCache> WithCached<T, C> {
 mod tests {
     use super::*;
 
+    use std::iter::repeat_with;
     use std::sync::Barrier;
     use std::thread::spawn;
 
@@ -295,5 +296,52 @@ mod tests {
 
         assert_eq!(data.0.alloc_count.load(Acquire), 0);
         assert_eq!(data.0.drop_count.load(Acquire), 0);
+    }
+
+    struct TestCache {
+        alloc: AtomicUsize,
+        drop: AtomicUsize,
+    }
+
+    impl TestCache {
+        fn new() -> Self {
+            Self {
+                alloc: AtomicUsize::new(0),
+                drop: AtomicUsize::new(0),
+            }
+        }
+
+        fn as_inner(&self) -> (usize, usize) {
+            (self.alloc.load(Acquire), self.drop.load(Acquire))
+        }
+    }
+
+    impl CellCache for TestCache {
+        fn get_cached(&self) -> FixedCell {
+            self.alloc.fetch_add(1, AcqRel);
+            FixedCell::default()
+        }
+
+        fn cache_cell(&self, _: FixedCell) {
+            self.drop.fetch_add(1, AcqRel);
+        }
+    }
+
+    #[test]
+    fn test_with_cached() {
+        let data = Arc::new((TestCache::new(), Barrier::new(N_THREADS)));
+
+        helper_spawn_threads(data.clone(), |data| {
+            let mut v = repeat_with(|| WithCached::new(&data.0, data.0.get_cached()))
+                .take(10)
+                .collect::<Vec<_>>();
+            data.1.wait();
+            v.truncate(5);
+            data.1.wait();
+            v.resize_with(15, || WithCached::new(&data.0, data.0.get_cached()));
+            data.1.wait();
+        });
+
+        assert_eq!(data.0.as_inner(), (20 * N_THREADS, 20 * N_THREADS));
     }
 }
