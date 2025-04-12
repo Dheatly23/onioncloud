@@ -225,7 +225,7 @@ impl<'a> IntoIterator for &'a Netinfo {
 mod tests {
     use super::*;
 
-    use std::iter::repeat_n;
+    use std::iter::repeat;
     use std::net::Ipv4Addr;
 
     use proptest::collection::vec;
@@ -241,9 +241,10 @@ mod tests {
             FixedCell::default(),
             0,
             Ipv4Addr::UNSPECIFIED.into(),
-            repeat_n(Ipv4Addr::UNSPECIFIED.into(), 1000),
+            repeat(Ipv4Addr::UNSPECIFIED.into()),
         );
 
+        // 1000 should be way too many
         assert!(cell.into_iter().count() < 1000);
     }
 
