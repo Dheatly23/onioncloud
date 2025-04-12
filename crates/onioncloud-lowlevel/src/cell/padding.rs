@@ -23,11 +23,14 @@ impl AsMut<FixedCell> for Padding {
 
 impl From<Padding> for Cell {
     fn from(v: Padding) -> Cell {
-        Cell::from_fixed(CellHeader::new(0, 0), v.into_inner())
+        Cell::from_fixed(CellHeader::new(0, Padding::ID), v.into_inner())
     }
 }
 
 impl Padding {
+    /// PADDING command ID.
+    pub const ID: u8 = 0;
+
     /// Create new PADDING cell.
     pub fn new(data: FixedCell) -> Self {
         Self(data)
@@ -56,7 +59,12 @@ impl Padding {
 
 impl TryFromCell for Padding {
     fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, errors::CellFormatError> {
-        let Some(c @ Cell { command: 0, .. }) = cell.as_ref() else {
+        let Some(
+            c @ Cell {
+                command: Self::ID, ..
+            },
+        ) = cell.as_ref()
+        else {
             return Ok(None);
         };
         if c.circuit != 0 {
@@ -84,11 +92,14 @@ impl AsMut<VariableCell> for VPadding {
 
 impl From<VPadding> for Cell {
     fn from(v: VPadding) -> Cell {
-        Cell::from_variable(CellHeader::new(0, 128), v.into_inner())
+        Cell::from_variable(CellHeader::new(0, VPadding::ID), v.into_inner())
     }
 }
 
 impl VPadding {
+    /// VPADDING command ID.
+    pub const ID: u8 = 128;
+
     /// Create new VPADDING cell.
     pub fn new(data: VariableCell) -> Self {
         Self(data)
@@ -136,7 +147,12 @@ impl VPadding {
 
 impl TryFromCell for VPadding {
     fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, errors::CellFormatError> {
-        let Some(c @ Cell { command: 128, .. }) = cell.as_ref() else {
+        let Some(
+            c @ Cell {
+                command: Self::ID, ..
+            },
+        ) = cell.as_ref()
+        else {
             return Ok(None);
         };
         if c.circuit != 0 {
