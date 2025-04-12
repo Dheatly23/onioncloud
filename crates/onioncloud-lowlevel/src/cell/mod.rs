@@ -109,12 +109,14 @@ impl AsMut<[u8]> for VariableCell {
 
 impl<'a> From<&'a [u8]> for VariableCell {
     fn from(data: &'a [u8]) -> Self {
+        assert!(data.len() < 65536, "variable cell length is too long!");
         Self::new(Box::from(data))
     }
 }
 
 impl From<Vec<u8>> for VariableCell {
     fn from(v: Vec<u8>) -> Self {
+        assert!(v.len() < 65536, "variable cell length is too long!");
         Self::new(v.into_boxed_slice())
     }
 }
@@ -129,6 +131,7 @@ impl Debug for VariableCell {
 impl VariableCell {
     /// Creates new `VariableCell`.
     pub const fn new(inner: Box<[u8]>) -> Self {
+        assert!(inner.len() < 65536, "variable cell length is too long!");
         Self { inner }
     }
 

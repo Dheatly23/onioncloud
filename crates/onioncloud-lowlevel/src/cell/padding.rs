@@ -117,9 +117,9 @@ impl VPadding {
     /// // Cell content are randomized
     /// println!("{:?}", cell.data());
     /// ```
-    pub fn with_size(n: usize) -> Self {
+    pub fn with_size(n: u16) -> Self {
         // SAFETY: It will be filled by RNG. RNG should not depends on slice content.
-        let mut data: Box<[u8]> = unsafe { Box::new_uninit_slice(n).assume_init() };
+        let mut data: Box<[u8]> = unsafe { Box::new_uninit_slice(n.into()).assume_init() };
         ThreadRng::default().fill(&mut data[..]);
         Self::new(VariableCell::new(data))
     }
@@ -159,5 +159,20 @@ impl TryFromCell for VPadding {
             return Err(errors::CellFormatError);
         }
         to_variable(cell).map(|v| v.map(Self::new))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_vpadding_size(length in any::<u16>()) {
+            let cell = VPadding::with_size(length);
+            assert_eq!(cell.data().len(), length as usize);
+        }
     }
 }
