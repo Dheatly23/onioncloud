@@ -120,18 +120,24 @@ mod tests {
 
     proptest! {
         #[test]
-        fn test_version_from_list(versions: Vec<u16>) {
+        fn test_versions_from_list(versions: Vec<u16>) {
             let cell = Versions::from_list(&versions);
             assert_eq!(cell.data(), versions);
         }
 
         #[test]
-        fn test_version_from_iter(mut versions: Vec<u16>) {
+        fn test_versions_from_iter(mut versions: Vec<u16>) {
             let cell = Versions::from_iter(versions.iter().map(|v| v.reverse_bits()));
             for v in &mut versions {
                 *v = v.reverse_bits();
             }
             assert_eq!(cell.data(), versions);
+        }
+
+        #[test]
+        fn test_versions_content(versions: Vec<u16>) {
+            let data = Versions::from_list(&versions).into_inner();
+            assert_eq!(data.data(), versions.into_iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>());
         }
     }
 }
