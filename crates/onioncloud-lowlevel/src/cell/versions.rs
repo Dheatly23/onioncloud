@@ -11,15 +11,15 @@ use crate::errors;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Versions(VariableCell);
 
-impl AsRef<VariableCell> for Versions {
-    fn as_ref(&self) -> &VariableCell {
-        &self.0
+impl AsRef<[U16]> for Versions {
+    fn as_ref(&self) -> &[U16] {
+        self.data()
     }
 }
 
-impl AsMut<VariableCell> for Versions {
-    fn as_mut(&mut self) -> &mut VariableCell {
-        &mut self.0
+impl AsMut<[U16]> for Versions {
+    fn as_mut(&mut self) -> &mut [U16] {
+        self.data_mut()
     }
 }
 
