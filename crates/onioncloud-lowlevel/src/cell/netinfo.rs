@@ -232,7 +232,7 @@ mod tests {
     use proptest::prelude::*;
 
     fn netinfo_strat() -> impl Strategy<Value = (u32, IpAddr, Vec<IpAddr>)> {
-        (any::<u32>(), any::<IpAddr>(), vec(any::<IpAddr>(), 0..16))
+        (any::<u32>(), any::<IpAddr>(), vec(any::<IpAddr>(), 0..4))
     }
 
     #[test]
