@@ -13,6 +13,12 @@ impl From<Netinfo> for Cell {
     }
 }
 
+impl From<Netinfo> for FixedCell {
+    fn from(v: Netinfo) -> FixedCell {
+        v.into_inner()
+    }
+}
+
 impl TryFromCell for Netinfo {
     fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, errors::CellFormatError> {
         let Some(

@@ -27,6 +27,12 @@ impl From<Padding> for Cell {
     }
 }
 
+impl From<Padding> for FixedCell {
+    fn from(v: Padding) -> FixedCell {
+        v.into_inner()
+    }
+}
+
 impl Padding {
     /// PADDING command ID.
     pub const ID: u8 = 0;
