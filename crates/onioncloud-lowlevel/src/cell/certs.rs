@@ -212,7 +212,7 @@ impl<'a> IntoIterator for &'a Certs {
 mod tests {
     use super::*;
 
-    use std::iter::repeat;
+    use std::iter::{repeat, repeat_n};
 
     use proptest::collection::vec;
     use proptest::prelude::*;
@@ -232,6 +232,12 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_certs_too_many() {
+        Certs::from_iter(repeat_n((0, []), 256));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_certs_infinity() {
         Certs::from_iter(repeat((0, [])));
     }
 
