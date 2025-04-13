@@ -398,6 +398,9 @@ pub enum CellRef<'a> {
 }
 
 /// Trait for everything that behaves like a cell.
+///
+/// It is important that the return values **must not** change between invocation.
+/// Basically, don't use interior mutability, as it can cause problems downstream on writing.
 pub trait CellLike {
     /// Get circuit ID.
     fn circuit(&self) -> u32;
