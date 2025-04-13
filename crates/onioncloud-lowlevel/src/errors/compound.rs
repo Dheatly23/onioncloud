@@ -10,4 +10,6 @@ pub enum CellError {
     Io(#[from] IoError),
     #[error("invalid cell header")]
     InvalidCellHeader(#[from] super::InvalidCellHeader),
+    #[error("cell format error")]
+    CellFormatError(#[from] super::CellFormatError),
 }

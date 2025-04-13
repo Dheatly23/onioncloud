@@ -1,3 +1,6 @@
+pub mod sans_io;
+
+use std::error::Error;
 use std::future::poll_fn;
 use std::io::{Error as IoError, ErrorKind, IoSliceMut, Read, Result as IoResult};
 use std::pin::Pin;
@@ -165,13 +168,13 @@ impl Read for Buffer<'_> {
 ///
 /// If the reader returns [`Pending`], it will set it's pending flag to [`true`] and returns [`ErrorKind::WouldBlock`].
 /// Then the outer [`async_reader`] can detect when the inner reader is pending and yields.
-pub(crate) struct AsyncReadWrapper<'a, 'b, R> {
+pub(crate) struct AsyncReadWrapper<'a, 'b> {
     cx: &'a mut Context<'b>,
-    reader: Pin<&'a mut R>,
+    reader: Pin<&'a mut dyn AsyncRead>,
     pending: bool,
 }
 
-impl<R: AsyncRead> Read for AsyncReadWrapper<'_, '_, R> {
+impl Read for AsyncReadWrapper<'_, '_> {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
         if self.pending {
             // Immediately returns WouldBlock
@@ -188,11 +191,29 @@ impl<R: AsyncRead> Read for AsyncReadWrapper<'_, '_, R> {
     }
 }
 
-/// Wraps an ordinary stream reading function into [`AsyncRead`].
-pub(crate) async fn async_reader<S, R, F>(mut reader: Pin<&mut S>, mut f: F) -> IoResult<R>
+fn err_is_would_block(e: &(dyn Error + 'static)) -> bool {
+    let mut p = Some(e);
+    while let Some(e) = p {
+        if let Some(e) = e.downcast_ref::<IoError>() {
+            if e.kind() == ErrorKind::WouldBlock {
+                return true;
+            }
+            break;
+        }
+        p = e.source();
+    }
+
+    false
+}
+
+/// Wraps an ordinary [`Read`] handling data into [`AsyncRead`].
+pub async fn async_reader<R, E, H>(
+    mut reader: Pin<&mut dyn AsyncRead>,
+    mut handle: H,
+) -> Result<R, E>
 where
-    S: AsyncRead,
-    for<'a, 'b> F: FnMut(&mut AsyncReadWrapper<'a, 'b, S>) -> IoResult<R>,
+    for<'a> H: sans_io::Handle<&'a mut dyn Read, Return = Result<R, E>>,
+    E: Error + 'static,
 {
     poll_fn(|cx| {
         let mut s = AsyncReadWrapper {
@@ -201,9 +222,9 @@ where
             pending: false,
         };
 
-        match f(&mut s) {
+        match handle.handle(&mut s) {
             // Check if pending is true to ensure there isn't spurious WouldBlock.
-            Err(e) if e.kind() == ErrorKind::WouldBlock && s.pending => Pending,
+            Err(e) if s.pending && err_is_would_block(&e) => Pending,
             v => Ready(v),
         }
     })
@@ -211,11 +232,11 @@ where
 }
 
 #[cfg(test)]
-pub(crate) fn test_read_helper<T>(
-    data: &[u8],
-    steps: Vec<usize>,
-    mut f: impl FnMut(&mut Buffer<'_>) -> IoResult<T>,
-) -> T {
+pub(crate) fn test_read_helper<T, E, H>(data: &[u8], steps: Vec<usize>, mut h: H) -> T
+where
+    for<'a> H: sans_io::Handle<&'a mut dyn Read, Return = Result<T, E>>,
+    E: Error + 'static,
+{
     let mut it = steps.into_iter();
     let mut n = 0;
     while n < data.len() {
@@ -225,9 +246,9 @@ pub(crate) fn test_read_helper<T>(
         let b = &data[n..t];
         let l = b.len();
         let mut buf = Buffer::new(b);
-        match f(&mut buf) {
+        match h.handle(&mut buf) {
             Ok(v) => return v,
-            Err(e) if e.kind() == ErrorKind::WouldBlock => (),
+            Err(e) if err_is_would_block(&e) => (),
             Err(e) => panic!("IO error: {e}"),
         }
         assert_eq!(buf.finalize(), l);
