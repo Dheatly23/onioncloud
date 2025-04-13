@@ -3,7 +3,7 @@ use std::slice::from_raw_parts;
 use zerocopy::FromBytes;
 use zerocopy::byteorder::big_endian::U16;
 
-use super::{Cell, CellHeader, TryFromCell, VariableCell, to_variable_with};
+use super::{Cell, CellHeader, CellLike, CellRef, TryFromCell, VariableCell, to_variable_with};
 use crate::errors;
 
 /// Represents a AUTH_CHALLENGE cell.
@@ -30,6 +30,20 @@ impl TryFromCell for AuthChallenge {
             return Err(errors::CellFormatError);
         }
         to_variable_with(cell, Self::check).map(|v| v.map(|v| unsafe { Self::from_cell(v) }))
+    }
+}
+
+impl CellLike for AuthChallenge {
+    fn circuit(&self) -> u32 {
+        0
+    }
+
+    fn command(&self) -> u8 {
+        Self::ID
+    }
+
+    fn cell(&self) -> CellRef<'_> {
+        CellRef::Variable(&self.0)
     }
 }
 
@@ -131,6 +145,20 @@ impl TryFromCell for Authenticate {
             return Err(errors::CellFormatError);
         }
         to_variable_with(cell, Self::check).map(|v| v.map(|v| unsafe { Self::from_cell(v) }))
+    }
+}
+
+impl CellLike for Authenticate {
+    fn circuit(&self) -> u32 {
+        0
+    }
+
+    fn command(&self) -> u8 {
+        Self::ID
+    }
+
+    fn cell(&self) -> CellRef<'_> {
+        CellRef::Variable(&self.0)
     }
 }
 

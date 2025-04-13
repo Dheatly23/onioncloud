@@ -1,7 +1,8 @@
 use rand::prelude::*;
 
 use super::{
-    Cell, CellHeader, FIXED_CELL_SIZE, FixedCell, TryFromCell, VariableCell, to_fixed, to_variable,
+    Cell, CellHeader, CellLike, CellRef, FIXED_CELL_SIZE, FixedCell, TryFromCell, VariableCell,
+    to_fixed, to_variable,
 };
 use crate::errors;
 
@@ -30,6 +31,20 @@ impl From<Padding> for Cell {
 impl From<Padding> for FixedCell {
     fn from(v: Padding) -> FixedCell {
         v.into_inner()
+    }
+}
+
+impl CellLike for Padding {
+    fn circuit(&self) -> u32 {
+        0
+    }
+
+    fn command(&self) -> u8 {
+        Self::ID
+    }
+
+    fn cell(&self) -> CellRef<'_> {
+        CellRef::Fixed(&self.0)
     }
 }
 
@@ -99,6 +114,20 @@ impl AsMut<VariableCell> for VPadding {
 impl From<VPadding> for Cell {
     fn from(v: VPadding) -> Cell {
         Cell::from_variable(CellHeader::new(0, VPadding::ID), v.into_inner())
+    }
+}
+
+impl CellLike for VPadding {
+    fn circuit(&self) -> u32 {
+        0
+    }
+
+    fn command(&self) -> u8 {
+        Self::ID
+    }
+
+    fn cell(&self) -> CellRef<'_> {
+        CellRef::Variable(&self.0)
     }
 }
 

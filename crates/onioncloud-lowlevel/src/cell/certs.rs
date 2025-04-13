@@ -1,4 +1,6 @@
-use crate::cell::{Cell, CellHeader, TryFromCell, VariableCell, to_variable_with};
+use crate::cell::{
+    Cell, CellHeader, CellLike, CellRef, TryFromCell, VariableCell, to_variable_with,
+};
 use crate::errors;
 
 /// Represents a CERTS cell.
@@ -53,6 +55,20 @@ impl TryFromCell for Certs {
             return Err(errors::CellFormatError);
         }
         to_variable_with(cell, Self::check).map(|v| v.map(|v| unsafe { Self::new(v) }))
+    }
+}
+
+impl CellLike for Certs {
+    fn circuit(&self) -> u32 {
+        0
+    }
+
+    fn command(&self) -> u8 {
+        Self::ID
+    }
+
+    fn cell(&self) -> CellRef<'_> {
+        CellRef::Variable(&self.0)
     }
 }
 

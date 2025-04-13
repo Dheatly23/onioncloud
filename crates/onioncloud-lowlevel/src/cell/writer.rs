@@ -29,6 +29,56 @@ impl<C: CellLike> CellWriter<C> {
     }
 }
 
+/// Wraps a [`Cached`] cell to be written.
+///
+/// ```
+/// use onioncloud_lowlevel::cell::writer::CellWriter;
+/// use onioncloud_lowlevel::cell::padding::Padding;
+/// use onioncloud_lowlevel::cell::dispatch::{CellType, WithCellConfig};
+/// use onioncloud_lowlevel::cell::{CellHeader, FixedCell};
+/// use onioncloud_lowlevel::cache::{Cached, NullCellCache, CellCache};
+/// use onioncloud_lowlevel::errors::InvalidCellHeader;
+///
+/// #[derive(Default)]
+/// struct TestConfig {
+///     circ_4bytes: bool,
+///     cache: NullCellCache,
+/// }
+///
+/// impl TestConfig {
+///     fn new(circ_4bytes: bool) -> Self {
+///         Self {
+///             circ_4bytes,
+///             cache: NullCellCache,
+///         }
+///     }
+/// }
+///
+/// impl CellCache for TestConfig {
+///     fn get_cached(&self) -> FixedCell {
+///         self.cache.get_cached()
+///     }
+///
+///     fn cache_cell(&self, cell: FixedCell) {
+///         self.cache.cache_cell(cell);
+///     }
+/// }
+///
+/// impl WithCellConfig for TestConfig {
+///     fn is_circ_id_4bytes(&self) -> bool {
+///         self.circ_4bytes
+///     }
+///
+///     fn cell_type(&self, header: &CellHeader) -> Result<CellType, InvalidCellHeader> {
+///         match header.command {
+///             Padding::ID => Ok(CellType::Fixed),
+///             _ => Err(InvalidCellHeader::with_header(header)),
+///         }
+///     }
+/// }
+///
+/// CellWriter::try_from(Cached::new(TestConfig::new(true), Padding::new(FixedCell::default()))).unwrap();
+/// ```
 impl<T, C> TryFrom<Cached<T, C>> for CellWriter<Cached<T, C>>
 where
     T: CellLike + Into<FixedCell>,

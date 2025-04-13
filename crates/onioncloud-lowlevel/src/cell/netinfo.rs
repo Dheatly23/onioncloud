@@ -1,6 +1,8 @@
 use std::net::IpAddr;
 
-use super::{Cell, CellHeader, FIXED_CELL_SIZE, FixedCell, TryFromCell, to_fixed_with};
+use super::{
+    Cell, CellHeader, CellLike, CellRef, FIXED_CELL_SIZE, FixedCell, TryFromCell, to_fixed_with,
+};
 use crate::errors;
 
 /// Represents a NETINFO cell.
@@ -33,6 +35,20 @@ impl TryFromCell for Netinfo {
             return Err(errors::CellFormatError);
         }
         to_fixed_with(cell, Self::check).map(|v| v.map(|v| unsafe { Self::from_cell(v) }))
+    }
+}
+
+impl CellLike for Netinfo {
+    fn circuit(&self) -> u32 {
+        0
+    }
+
+    fn command(&self) -> u8 {
+        Self::ID
+    }
+
+    fn cell(&self) -> CellRef<'_> {
+        CellRef::Fixed(&self.0)
     }
 }
 
