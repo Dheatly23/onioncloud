@@ -145,12 +145,12 @@ impl CellCache for StandardCellCache {
 ///
 /// When it drops, automatically caches cell.
 #[derive(Clone)]
-pub struct WithCached<T: Into<FixedCell>, C: CellCache> {
+pub struct Cached<T: Into<FixedCell>, C: CellCache> {
     cache: C,
     cell: ManuallyDrop<T>,
 }
 
-impl<T: Into<FixedCell>, C: CellCache> Drop for WithCached<T, C> {
+impl<T: Into<FixedCell>, C: CellCache> Drop for Cached<T, C> {
     fn drop(&mut self) {
         // SAFETY: cell will not be accessed again.
         let cell = unsafe { ManuallyDrop::take(&mut self.cell) };
@@ -158,7 +158,7 @@ impl<T: Into<FixedCell>, C: CellCache> Drop for WithCached<T, C> {
     }
 }
 
-impl<T: Into<FixedCell>, C: CellCache> Deref for WithCached<T, C> {
+impl<T: Into<FixedCell>, C: CellCache> Deref for Cached<T, C> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -166,46 +166,46 @@ impl<T: Into<FixedCell>, C: CellCache> Deref for WithCached<T, C> {
     }
 }
 
-impl<T: Into<FixedCell>, C: CellCache> DerefMut for WithCached<T, C> {
+impl<T: Into<FixedCell>, C: CellCache> DerefMut for Cached<T, C> {
     fn deref_mut(&mut self) -> &mut T {
         &mut self.cell
     }
 }
 
-impl<T: Into<FixedCell> + PartialEq, C: CellCache> PartialEq for WithCached<T, C> {
+impl<T: Into<FixedCell> + PartialEq, C: CellCache> PartialEq for Cached<T, C> {
     fn eq(&self, rhs: &Self) -> bool {
         self.cell.eq(&rhs.cell)
     }
 }
 
-impl<T: Into<FixedCell> + PartialEq, C: CellCache> PartialEq<T> for WithCached<T, C> {
+impl<T: Into<FixedCell> + PartialEq, C: CellCache> PartialEq<T> for Cached<T, C> {
     fn eq(&self, rhs: &T) -> bool {
         (*self.cell).eq(rhs)
     }
 }
 
-impl<T: Into<FixedCell> + Eq, C: CellCache> Eq for WithCached<T, C> {}
+impl<T: Into<FixedCell> + Eq, C: CellCache> Eq for Cached<T, C> {}
 
-impl<T: Into<FixedCell> + PartialOrd, C: CellCache> PartialOrd for WithCached<T, C> {
+impl<T: Into<FixedCell> + PartialOrd, C: CellCache> PartialOrd for Cached<T, C> {
     fn partial_cmp(&self, rhs: &Self) -> Option<Ordering> {
         self.cell.partial_cmp(&rhs.cell)
     }
 }
 
-impl<T: Into<FixedCell> + PartialOrd, C: CellCache> PartialOrd<T> for WithCached<T, C> {
+impl<T: Into<FixedCell> + PartialOrd, C: CellCache> PartialOrd<T> for Cached<T, C> {
     fn partial_cmp(&self, rhs: &T) -> Option<Ordering> {
         (*self.cell).partial_cmp(rhs)
     }
 }
 
-impl<T: Into<FixedCell> + Ord, C: CellCache> Ord for WithCached<T, C> {
+impl<T: Into<FixedCell> + Ord, C: CellCache> Ord for Cached<T, C> {
     fn cmp(&self, rhs: &Self) -> Ordering {
         self.cell.cmp(&rhs.cell)
     }
 }
 
-impl<T: Into<FixedCell>, C: CellCache> WithCached<T, C> {
-    /// Create new [`WithCached`].
+impl<T: Into<FixedCell>, C: CellCache> Cached<T, C> {
+    /// Create new [`Cached`].
     pub fn new(cache: C, value: T) -> Self {
         Self {
             cache,
@@ -328,17 +328,17 @@ mod tests {
     }
 
     #[test]
-    fn test_with_cached() {
+    fn test_cached() {
         let data = Arc::new((TestCache::new(), Barrier::new(N_THREADS)));
 
         helper_spawn_threads(data.clone(), |data| {
-            let mut v = repeat_with(|| WithCached::new(&data.0, data.0.get_cached()))
+            let mut v = repeat_with(|| Cached::new(&data.0, data.0.get_cached()))
                 .take(10)
                 .collect::<Vec<_>>();
             data.1.wait();
             v.truncate(5);
             data.1.wait();
-            v.resize_with(15, || WithCached::new(&data.0, data.0.get_cached()));
+            v.resize_with(15, || Cached::new(&data.0, data.0.get_cached()));
             data.1.wait();
         });
 
