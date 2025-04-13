@@ -2,14 +2,21 @@ pub mod sans_io;
 
 use std::error::Error;
 use std::future::poll_fn;
-use std::io::{Error as IoError, ErrorKind, IoSliceMut, Read, Result as IoResult};
+use std::io::{Error as IoError, ErrorKind, IoSliceMut, Read, Result as IoResult, Write};
 use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll::*;
 
-use futures_io::AsyncRead;
+use futures_io::{AsyncRead, AsyncWrite};
 
 use crate::errors;
+
+pub(crate) fn wrap_eof(v: IoResult<usize>) -> IoResult<usize> {
+    match v {
+        Ok(0) => Err(ErrorKind::UnexpectedEof.into()),
+        v => v,
+    }
+}
 
 /// Helper for read buffers.
 ///
@@ -191,6 +198,50 @@ impl Read for AsyncReadWrapper<'_, '_> {
     }
 }
 
+/// Wrapper for [`AsyncWrite`] into ordinary non-blocking [`Write`].
+///
+/// # How it works
+///
+/// If the writer returns [`Pending`], it will set it's pending flag to [`true`] and returns [`ErrorKind::WouldBlock`].
+/// Then the outer [`async_writer`] can detect when the inner writer is pending and yields.
+pub(crate) struct AsyncWriteWrapper<'a, 'b> {
+    cx: &'a mut Context<'b>,
+    writer: Pin<&'a mut dyn AsyncWrite>,
+    pending: bool,
+}
+
+impl Write for AsyncWriteWrapper<'_, '_> {
+    fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+        if self.pending {
+            // Immediately returns WouldBlock
+            return Err(ErrorKind::WouldBlock.into());
+        }
+
+        match self.writer.as_mut().poll_write(self.cx, buf) {
+            Ready(v) => v,
+            Pending => {
+                self.pending = true;
+                Err(ErrorKind::WouldBlock.into())
+            }
+        }
+    }
+
+    fn flush(&mut self) -> IoResult<()> {
+        if self.pending {
+            // Immediately returns WouldBlock
+            return Err(ErrorKind::WouldBlock.into());
+        }
+
+        match self.writer.as_mut().poll_flush(self.cx) {
+            Ready(v) => v,
+            Pending => {
+                self.pending = true;
+                Err(ErrorKind::WouldBlock.into())
+            }
+        }
+    }
+}
+
 fn err_is_would_block(e: &(dyn Error + 'static)) -> bool {
     let mut p = Some(e);
     while let Some(e) = p {
@@ -219,6 +270,31 @@ where
         let mut s = AsyncReadWrapper {
             cx,
             reader: reader.as_mut(),
+            pending: false,
+        };
+
+        match handle.handle(&mut s) {
+            // Check if pending is true to ensure there isn't spurious WouldBlock.
+            Err(e) if s.pending && err_is_would_block(&e) => Pending,
+            v => Ready(v),
+        }
+    })
+    .await
+}
+
+/// Wraps an ordinary [`Write`] handling data into [`AsyncWrite`].
+pub async fn async_writer<R, E, H>(
+    mut writer: Pin<&mut dyn AsyncWrite>,
+    mut handle: H,
+) -> Result<R, E>
+where
+    for<'a> H: sans_io::Handle<&'a mut dyn Write, Return = Result<R, E>>,
+    E: Error + 'static,
+{
+    poll_fn(|cx| {
+        let mut s = AsyncWriteWrapper {
+            cx,
+            writer: writer.as_mut(),
             pending: false,
         };
 

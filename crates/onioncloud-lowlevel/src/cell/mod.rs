@@ -3,16 +3,17 @@ pub mod certs;
 pub mod dispatch;
 pub mod netinfo;
 pub mod padding;
+pub mod reader;
 pub mod versions;
+pub mod writer;
 
 use std::fmt::{Debug, Formatter, Result as FmtResult};
-use std::io::{ErrorKind, Read, Result as IoResult};
-use std::mem::replace;
+use std::io::Result as IoResult;
+use std::ops::Deref;
 use std::pin::Pin;
 
 use futures_io::AsyncRead;
 
-use crate::util::sans_io::Handle;
 use crate::{errors, util};
 
 /// Size of [`FixedCell`] content.
@@ -320,7 +321,7 @@ impl Cell {
         header: CellHeader,
         cached: FixedCell,
     ) -> IoResult<Self> {
-        util::async_reader(reader, FixedCellReader::new(header, cached)).await
+        util::async_reader(reader, reader::FixedCellReader::new(header, cached)).await
     }
 
     /// Reads variable-sized cell from a [`AsyncRead`] stream.
@@ -331,7 +332,7 @@ impl Cell {
         reader: Pin<&mut R>,
         header: CellHeader,
     ) -> IoResult<Self> {
-        util::async_reader(reader, VariableCellReader::new(header)).await
+        util::async_reader(reader, reader::VariableCellReader::new(header)).await
     }
 
     fn into_fixed_with(
@@ -385,6 +386,62 @@ pub trait TryFromCell: Sized {
 /// ```
 pub fn cast<T: TryFromCell>(cell: &mut Option<Cell>) -> Result<Option<T>, errors::CellFormatError> {
     T::try_from_cell(cell)
+}
+
+/// Reference to cell content.
+///
+/// Used for [`CellLike::cell`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CellRef<'a> {
+    Fixed(&'a FixedCell),
+    Variable(&'a VariableCell),
+}
+
+/// Trait for everything that behaves like a cell.
+pub trait CellLike {
+    /// Get circuit ID.
+    fn circuit(&self) -> u32;
+
+    /// Get cell command.
+    fn command(&self) -> u8;
+
+    /// Get cell content.
+    fn cell(&self) -> CellRef<'_>;
+}
+
+impl<T> CellLike for T
+where
+    T: Deref,
+    T::Target: CellLike,
+{
+    fn circuit(&self) -> u32 {
+        <T as Deref>::Target::circuit(self)
+    }
+
+    fn command(&self) -> u8 {
+        <T as Deref>::Target::command(self)
+    }
+
+    fn cell(&self) -> CellRef<'_> {
+        <T as Deref>::Target::cell(self)
+    }
+}
+
+impl CellLike for Cell {
+    fn circuit(&self) -> u32 {
+        self.circuit
+    }
+
+    fn command(&self) -> u8 {
+        self.command
+    }
+
+    fn cell(&self) -> CellRef<'_> {
+        match &self.data {
+            CellData::Fixed(v) => CellRef::Fixed(v),
+            CellData::Variable(v) => CellRef::Variable(v),
+        }
+    }
 }
 
 /// Helper to take a [`FixedCell`].
@@ -441,149 +498,6 @@ pub(crate) fn to_variable_with(
         })
 }
 
-/// Reader for [`FixedCell`].
-pub struct FixedCellReader {
-    header: CellHeader,
-    data: Option<FixedCell>,
-    index: usize,
-}
-
-impl FixedCellReader {
-    /// Create a new [`FixedCellReader`].
-    ///
-    /// # Parameter
-    /// - `header` : Cell header.
-    /// - `cached` : Cached cell data. It's content will be overwritten.
-    pub fn new(header: CellHeader, cached: FixedCell) -> Self {
-        Self {
-            header,
-            data: Some(cached),
-            index: 0,
-        }
-    }
-}
-
-/// Handle reading from a stream reader.
-///
-/// Reader **should not** be polled after successfully reading, otherwise it will panic.
-impl Handle<&mut dyn Read> for FixedCellReader {
-    type Return = IoResult<Cell>;
-
-    fn handle(&mut self, reader: &mut dyn Read) -> Self::Return {
-        let data = self
-            .data
-            .as_mut()
-            .expect("reader got polled after producing result");
-        while self.index < FIXED_CELL_SIZE {
-            let n = reader.read(&mut data.data_mut()[self.index..])?;
-            if n == 0 {
-                return Err(ErrorKind::UnexpectedEof.into());
-            }
-            self.index += n;
-        }
-
-        Ok(Cell::from_fixed(
-            self.header.dup(),
-            self.data
-                .take()
-                .expect("reader got polled after producing result"),
-        ))
-    }
-}
-
-/// Reader for [`VariableCell`].
-#[repr(transparent)]
-pub struct VariableCellReader(VariableCellReaderInner);
-
-impl VariableCellReader {
-    /// Create new [`VariableCellReader`].
-    pub fn new(header: CellHeader) -> Self {
-        Self(VariableCellReaderInner::new(header))
-    }
-}
-
-/// Handle reading from a stream reader.
-///
-/// Reader **should not** be polled after successfully reading, otherwise it will panic.
-impl Handle<&mut dyn Read> for VariableCellReader {
-    type Return = IoResult<Cell>;
-
-    fn handle(&mut self, reader: &mut dyn Read) -> Self::Return {
-        self.0.handle(reader)
-    }
-}
-
-pub(crate) enum VariableCellReaderInner {
-    Initial {
-        header: CellHeader,
-        buf: [u8; 2],
-        index: u8,
-    },
-    Data {
-        header: CellHeader,
-        data: VariableCell,
-        index: usize,
-    },
-    End,
-}
-
-impl VariableCellReaderInner {
-    pub(crate) fn new(header: CellHeader) -> Self {
-        Self::Initial {
-            header,
-            buf: [0; 2],
-            index: 0,
-        }
-    }
-
-    /// Handle reading from reader.
-    pub(crate) fn handle(&mut self, reader: &mut dyn Read) -> IoResult<Cell> {
-        loop {
-            match self {
-                Self::Initial { header, buf, index } => {
-                    while usize::from(*index) < buf.len() {
-                        let n = reader.read(&mut buf[usize::from(*index)..])?;
-                        if n == 0 {
-                            return Err(ErrorKind::UnexpectedEof.into());
-                        }
-                        debug_assert!(n <= buf.len());
-                        *index += n as u8;
-                    }
-                    debug_assert_eq!(usize::from(*index), buf.len());
-
-                    let n = u16::from_be_bytes(*buf) as usize;
-                    let header = header.dup();
-                    *self = Self::Data {
-                        header,
-                        data: VariableCell::from(vec![0; n]),
-                        index: 0,
-                    };
-                }
-                Self::Data {
-                    header,
-                    data,
-                    index,
-                } => {
-                    let buf = data.data_mut();
-                    while *index != buf.len() {
-                        let n = reader.read(&mut buf[*index..])?;
-                        if n == 0 {
-                            return Err(ErrorKind::UnexpectedEof.into());
-                        }
-                        *index += n;
-                    }
-
-                    let header = header.dup();
-                    let data = replace(data, VariableCell::empty());
-                    *self = Self::End;
-                    return Ok(Cell::from_variable(header, data));
-                }
-                Self::End => panic!("reader got polled after producing result"),
-            }
-        }
-    }
-}
-
 /// Cell header.
 ///
 /// The typical way to create it is by reading from stream (see [`CellHeader::read`]).
@@ -594,70 +508,6 @@ impl VariableCellReaderInner {
 pub struct CellHeader {
     pub circuit: u32,
     pub command: u8,
-}
-
-/// Reader for [`CellHeader`].
-pub struct CellHeaderReader {
-    buf: [u8; 5],
-    flags: u8,
-}
-
-impl CellHeaderReader {
-    /// Create new [`CellHeaderReader`].
-    ///
-    /// # Parameter
-    /// - `circuit_4bytes` : [`true`] if circuit ID is 4 bytes long. (See [`dispatch::WithCellConfig::is_circ_id_4bytes`]).
-    pub fn new(circuit_4bytes: bool) -> Self {
-        Self {
-            buf: [0; 5],
-            flags: if circuit_4bytes { 1 << 7 } else { 0 },
-        }
-    }
-}
-
-/// Handle reading from a stream reader.
-///
-/// Reader **should not** be polled after successfully reading, otherwise it will panic.
-impl Handle<&mut dyn Read> for CellHeaderReader {
-    type Return = IoResult<CellHeader>;
-
-    fn handle(&mut self, reader: &mut dyn Read) -> Self::Return {
-        Ok(if self.flags & (1 << 7) != 0 {
-            while self.flags != (1 << 7) | 5 {
-                let n = reader.read(&mut self.buf[(self.flags & !(1 << 7)) as usize..])?;
-                if n == 0 {
-                    return Err(ErrorKind::UnexpectedEof.into());
-                }
-                debug_assert!(n <= 5, "{n} > 5");
-                self.flags += n as u8;
-                debug_assert!(self.flags & !(1 << 7) <= 5);
-            }
-
-            self.flags = 1 << 7;
-            let [a, b, c, d, e] = self.buf;
-            CellHeader {
-                circuit: u32::from_be_bytes([a, b, c, d]),
-                command: e,
-            }
-        } else {
-            while self.flags != 3 {
-                let n = reader.read(&mut self.buf[self.flags as usize..3])?;
-                if n == 0 {
-                    return Err(ErrorKind::UnexpectedEof.into());
-                }
-                debug_assert!(n <= 3, "{n} > 3");
-                self.flags += n as u8;
-                debug_assert!(self.flags <= 3);
-            }
-
-            self.flags = 0;
-            let [a, b, c, ..] = self.buf;
-            CellHeader {
-                circuit: u16::from_be_bytes([a, b]).into(),
-                command: c,
-            }
-        })
-    }
 }
 
 impl CellHeader {
@@ -677,162 +527,6 @@ impl CellHeader {
     /// # Parameters
     /// - `circuit_4bytes` : `true` if circuit ID length is 4 bytes.
     pub async fn read<R: AsyncRead>(reader: Pin<&mut R>, circuit_4bytes: bool) -> IoResult<Self> {
-        util::async_reader(reader, CellHeaderReader::new(circuit_4bytes)).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use proptest::collection::vec;
-    use proptest::prelude::*;
-
-    use crate::util::test_read_helper;
-
-    fn steps() -> impl Strategy<Value = Vec<usize>> {
-        vec(0..=256usize, 0..32)
-    }
-
-    proptest! {
-        #[test]
-        fn test_header_read(
-            steps in steps(),
-            (is_4bytes, circuit) in any::<bool>().prop_flat_map(|v| (Just(v), 0..=if v {
-                u32::MAX
-            } else {
-                u16::MAX.into()
-            })),
-            command: u8,
-        ) {
-            let mut buf = [0; 5];
-            let buf = if is_4bytes {
-                *<&mut [u8; 4]>::try_from(&mut buf[..4]).unwrap() = circuit.to_be_bytes();
-                buf[4] = command;
-                &buf[..]
-            } else {
-                *<&mut [u8; 2]>::try_from(&mut buf[..2]).unwrap() = (circuit as u16).to_be_bytes();
-                buf[2] = command;
-                &buf[..3]
-            };
-
-            let res = test_read_helper(
-                buf,
-                steps,
-                CellHeaderReader::new(is_4bytes),
-            );
-
-            assert_eq!(res.circuit, circuit);
-            assert_eq!(res.command, command);
-        }
-
-        #[test]
-        fn test_circuit_read_fixed(
-            steps in steps(),
-            (is_4bytes, circuit) in any::<bool>().prop_flat_map(|v| (Just(v), 0..=if v {
-                u32::MAX
-            } else {
-                u16::MAX.into()
-            })),
-            command: u8,
-            data: [u8; FIXED_CELL_SIZE],
-        ) {
-            let mut buf = [0; FIXED_CELL_SIZE + 5];
-            let buf = if is_4bytes {
-                *<&mut [u8; 4]>::try_from(&mut buf[..4]).unwrap() = circuit.to_be_bytes();
-                buf[4] = command;
-                *<&mut [u8; FIXED_CELL_SIZE]>::try_from(&mut buf[5..]).unwrap() = data;
-                &buf[..]
-            } else {
-                *<&mut [u8; 2]>::try_from(&mut buf[..2]).unwrap() = (circuit as u16).to_be_bytes();
-                buf[2] = command;
-                *<&mut [u8; FIXED_CELL_SIZE]>::try_from(&mut buf[3..3 + FIXED_CELL_SIZE]).unwrap() = data;
-                &buf[..3 + FIXED_CELL_SIZE]
-            };
-
-            enum Reader {
-                Init(CellHeaderReader),
-                Header(FixedCellReader),
-            }
-
-            impl Handle<&mut dyn Read> for Reader {
-                type Return = IoResult<Cell>;
-
-                fn handle(&mut self, s: &mut dyn Read) -> Self::Return {
-                    loop {
-                        *self = match self {
-                            Self::Init(r) => Self::Header(FixedCellReader::new(r.handle(s)?, FixedCell::default())),
-                            Self::Header(r) => return r.handle(s),
-                        };
-                    }
-                }
-            }
-
-            let cell = test_read_helper(
-                buf,
-                steps,
-                Reader::Init(CellHeaderReader::new(is_4bytes)),
-            );
-
-            assert_eq!(cell.circuit, circuit);
-            assert_eq!(cell.command, command);
-            assert_eq!(cell.data(), data);
-        }
-
-        #[test]
-        fn test_circuit_read_variable(
-            steps in steps(),
-            (is_4bytes, circuit) in any::<bool>().prop_flat_map(|v| (Just(v), 0..=if v {
-                u32::MAX
-            } else {
-                u16::MAX.into()
-            })),
-            command: u8,
-            data in vec(any::<u8>(), 0..=u16::MAX as usize),
-        ) {
-            let mut buf;
-            let t = if is_4bytes {
-                buf = vec![0; 7 + data.len()];
-                *<&mut [u8; 4]>::try_from(&mut buf[..4]).unwrap() = circuit.to_be_bytes();
-                buf[4] = command;
-                &mut buf[5..]
-            } else {
-                buf = vec![0; 5 + data.len()];
-                *<&mut [u8; 2]>::try_from(&mut buf[..2]).unwrap() = (circuit as u16).to_be_bytes();
-                buf[2] = command;
-                *<&mut [u8; 2]>::try_from(&mut buf[3..5]).unwrap() = (data.len() as u16).to_be_bytes();
-                &mut buf[3..]
-            };
-            *<&mut [u8; 2]>::try_from(&mut t[..2]).unwrap() = (data.len() as u16).to_be_bytes();
-            t[2..].copy_from_slice(&data);
-
-            enum Reader {
-                Init(CellHeaderReader),
-                Header(VariableCellReader),
-            }
-
-            impl Handle<&mut dyn Read> for Reader {
-                type Return = IoResult<Cell>;
-
-                fn handle(&mut self, s: &mut dyn Read) -> Self::Return {
-                    loop {
-                        *self = match self {
-                            Self::Init(r) => Self::Header(VariableCellReader::new(r.handle(s)?)),
-                            Self::Header(r) => return r.handle(s),
-                        };
-                    }
-                }
-            }
-
-            let cell = test_read_helper(
-                &buf,
-                steps,
-                Reader::Init(CellHeaderReader::new(is_4bytes)),
-            );
-
-            assert_eq!(cell.circuit, circuit);
-            assert_eq!(cell.command, command);
-            assert_eq!(cell.data(), data);
-        }
+        util::async_reader(reader, reader::CellHeaderReader::new(circuit_4bytes)).await
     }
 }

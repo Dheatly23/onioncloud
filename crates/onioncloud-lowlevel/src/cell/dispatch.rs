@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use futures_io::AsyncRead;
 
-use super::{Cell, CellHeader, CellHeaderReader, FixedCellReader, VariableCellReader};
+use super::reader::{CellHeaderReader, FixedCellReader, VariableCellReader};
+use super::{Cell, CellHeader};
 use crate::cache::CellCache;
 use crate::util::sans_io::Handle;
 use crate::{errors, util};
