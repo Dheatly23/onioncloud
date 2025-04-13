@@ -411,7 +411,7 @@ pub trait CellLike {
 
 impl<T> CellLike for T
 where
-    T: Deref,
+    T: Deref + ?Sized,
     T::Target: CellLike,
 {
     fn circuit(&self) -> u32 {

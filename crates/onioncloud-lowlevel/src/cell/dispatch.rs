@@ -1,6 +1,6 @@
 use std::io::Read;
+use std::ops::Deref;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use futures_io::AsyncRead;
 
@@ -38,33 +38,17 @@ pub trait WithCellConfig {
     fn cell_type(&self, header: &CellHeader) -> Result<CellType, errors::InvalidCellHeader>;
 }
 
-impl<T: WithCellConfig + ?Sized> WithCellConfig for &T {
+impl<T> WithCellConfig for T
+where
+    T: Deref + ?Sized,
+    T::Target: WithCellConfig,
+{
     fn is_circ_id_4bytes(&self) -> bool {
-        T::is_circ_id_4bytes(self)
+        <T as Deref>::Target::is_circ_id_4bytes(self)
     }
 
     fn cell_type(&self, header: &CellHeader) -> Result<CellType, errors::InvalidCellHeader> {
-        T::cell_type(self, header)
-    }
-}
-
-impl<T: WithCellConfig + ?Sized> WithCellConfig for Box<T> {
-    fn is_circ_id_4bytes(&self) -> bool {
-        T::is_circ_id_4bytes(self)
-    }
-
-    fn cell_type(&self, header: &CellHeader) -> Result<CellType, errors::InvalidCellHeader> {
-        T::cell_type(self, header)
-    }
-}
-
-impl<T: WithCellConfig + ?Sized> WithCellConfig for Arc<T> {
-    fn is_circ_id_4bytes(&self) -> bool {
-        T::is_circ_id_4bytes(self)
-    }
-
-    fn cell_type(&self, header: &CellHeader) -> Result<CellType, errors::InvalidCellHeader> {
-        T::cell_type(self, header)
+        <T as Deref>::Target::cell_type(self, header)
     }
 }
 

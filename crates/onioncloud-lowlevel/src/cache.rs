@@ -1,7 +1,6 @@
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering::*};
 
@@ -27,33 +26,17 @@ pub trait CellCache: Sync {
     fn cache_cell(&self, cell: FixedCell);
 }
 
-impl<T: CellCache + ?Sized> CellCache for &T {
+impl<T> CellCache for T
+where
+    T: Deref + ?Sized + Sync,
+    T::Target: CellCache,
+{
     fn get_cached(&self) -> FixedCell {
-        T::get_cached(self)
+        <T as Deref>::Target::get_cached(self)
     }
 
     fn cache_cell(&self, cell: FixedCell) {
-        T::cache_cell(self, cell)
-    }
-}
-
-impl<T: CellCache + ?Sized> CellCache for Box<T> {
-    fn get_cached(&self) -> FixedCell {
-        T::get_cached(self)
-    }
-
-    fn cache_cell(&self, cell: FixedCell) {
-        T::cache_cell(self, cell)
-    }
-}
-
-impl<T: CellCache + Send + ?Sized> CellCache for Arc<T> {
-    fn get_cached(&self) -> FixedCell {
-        T::get_cached(self)
-    }
-
-    fn cache_cell(&self, cell: FixedCell) {
-        T::cache_cell(self, cell)
+        <T as Deref>::Target::cache_cell(self, cell)
     }
 }
 
@@ -226,7 +209,7 @@ mod tests {
     use super::*;
 
     use std::iter::repeat_with;
-    use std::sync::Barrier;
+    use std::sync::{Arc, Barrier};
     use std::thread::spawn;
 
     const N_THREADS: usize = 12;
