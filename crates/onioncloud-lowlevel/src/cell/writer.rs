@@ -1,7 +1,7 @@
 use std::io::{Result as IoResult, Write};
 
 use super::dispatch::{CellType, WithCellConfig};
-use super::{CellHeader, CellLike, CellRef, FIXED_CELL_SIZE, FixedCell};
+use super::{CellHeader, CellLike, CellRef, FixedCell};
 use crate::cache::{Cached, CellCache};
 use crate::errors;
 use crate::util::sans_io::Handle;
@@ -59,7 +59,7 @@ fn write_cell(
     cell: &dyn CellLike,
     ix: &mut usize,
     is_4bytes: bool,
-) -> IoResult<bool> {
+) -> IoResult<()> {
     // Write header
     let mut i = match (is_4bytes, *ix) {
         (false, 0..3) => {
@@ -90,9 +90,7 @@ fn write_cell(
     };
 
     // Write cell data
-    Ok(match cell.cell() {
-        // Overflow
-        CellRef::Fixed(_) if i >= FIXED_CELL_SIZE => true,
+    match cell.cell() {
         // Fixed data
         CellRef::Fixed(b) => {
             let b = b.data();
@@ -102,8 +100,6 @@ fn write_cell(
                 i += n;
                 *ix += n;
             }
-
-            true
         }
         CellRef::Variable(b) => {
             let b = b.data();
@@ -117,25 +113,20 @@ fn write_cell(
                     i += n;
                     *ix += n;
                 }
+            }
 
-                false
-            } else if i - 2 < b.len() {
-                // Variable data
-                i -= 2;
+            // Variable data
+            i -= 2;
 
-                while i < b.len() {
-                    let n = wrap_eof(writer.write(&b[i..]))?;
-                    i += n;
-                    *ix += n;
-                }
-
-                true
-            } else {
-                // Overflow
-                true
+            while i < b.len() {
+                let n = wrap_eof(writer.write(&b[i..]))?;
+                i += n;
+                *ix += n;
             }
         }
-    })
+    }
+
+    Ok(())
 }
 
 /// Handle a [`Write`] stream.
@@ -145,10 +136,9 @@ impl<C: CellLike> Handle<&mut dyn Write> for CellWriter<C> {
     type Return = IoResult<()>;
 
     fn handle(&mut self, writer: &mut dyn Write) -> Self::Return {
-        while let Some(cell) = self.cell.as_ref() {
-            if write_cell(writer, cell, &mut self.index, self.is_4bytes)? {
-                self.cell = None;
-            }
+        if let Some(cell) = self.cell.as_ref() {
+            write_cell(writer, cell, &mut self.index, self.is_4bytes)?;
+            self.cell = None;
         }
 
         Ok(())
@@ -163,9 +153,9 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use crate::cell::VariableCell;
     use crate::cell::padding::{Padding, VPadding};
-    use crate::util::{TestConfig, var_cell_strat};
+    use crate::cell::{Cell, FIXED_CELL_SIZE, VariableCell};
+    use crate::util::{TestConfig, circ_id_strat, var_cell_strat};
 
     proptest! {
         #[test]
@@ -221,6 +211,53 @@ mod tests {
             CellWriter::new(VPadding::new(VariableCell::from(data)), is_4bytes)
                 .handle(&mut r)
                 .unwrap();
+            assert_eq!(r, v);
+        }
+
+        #[test]
+        fn test_writer_cell_fixed(
+            (is_4bytes, circ_id) in circ_id_strat(),
+            command: u8,
+            data: [u8; FIXED_CELL_SIZE],
+        ) {
+            let mut v = Vec::with_capacity(FIXED_CELL_SIZE + if is_4bytes { 5 } else { 3 });
+            if is_4bytes {
+                v.extend_from_slice(&circ_id.to_be_bytes());
+            } else {
+                v.extend_from_slice(&(circ_id as u16).to_be_bytes());
+            }
+            v.push(command);
+            v.extend_from_slice(&data);
+
+            let mut r = Vec::new();
+            CellWriter::new(
+                Cell::from_fixed(CellHeader::new(circ_id, command), FixedCell::new(Box::new(data))),
+                is_4bytes,
+            ).handle(&mut r).unwrap();
+            assert_eq!(r, v);
+        }
+
+        #[test]
+        fn test_writer_cell_variable(
+            (is_4bytes, circ_id) in circ_id_strat(),
+            command: u8,
+            data in var_cell_strat(),
+        ) {
+            let mut v = Vec::with_capacity(FIXED_CELL_SIZE + if is_4bytes { 5 } else { 3 });
+            if is_4bytes {
+                v.extend_from_slice(&circ_id.to_be_bytes());
+            } else {
+                v.extend_from_slice(&(circ_id as u16).to_be_bytes());
+            }
+            v.push(command);
+            v.extend_from_slice(&(data.len() as u16).to_be_bytes());
+            v.extend_from_slice(&data);
+
+            let mut r = Vec::new();
+            CellWriter::new(
+                Cell::from_variable(CellHeader::new(circ_id, command), VariableCell::from(data)),
+                is_4bytes,
+            ).handle(&mut r).unwrap();
             assert_eq!(r, v);
         }
     }
