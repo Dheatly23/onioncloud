@@ -6,10 +6,10 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum CellError {
-    #[error("network error")]
+    #[error("network error: {0}")]
     Io(#[from] IoError),
-    #[error("invalid cell header")]
+    #[error(transparent)]
     InvalidCellHeader(#[from] super::InvalidCellHeader),
-    #[error("cell format error")]
+    #[error(transparent)]
     CellFormatError(#[from] super::CellFormatError),
 }
