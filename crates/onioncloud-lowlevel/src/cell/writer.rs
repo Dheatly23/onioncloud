@@ -30,55 +30,6 @@ impl<C: CellLike> CellWriter<C> {
 }
 
 /// Wraps a [`Cached`] cell to be written.
-///
-/// ```
-/// use onioncloud_lowlevel::cell::writer::CellWriter;
-/// use onioncloud_lowlevel::cell::padding::Padding;
-/// use onioncloud_lowlevel::cell::dispatch::{CellType, WithCellConfig};
-/// use onioncloud_lowlevel::cell::{CellHeader, FixedCell};
-/// use onioncloud_lowlevel::cache::{Cached, NullCellCache, CellCache};
-/// use onioncloud_lowlevel::errors::InvalidCellHeader;
-///
-/// #[derive(Default)]
-/// struct TestConfig {
-///     circ_4bytes: bool,
-///     cache: NullCellCache,
-/// }
-///
-/// impl TestConfig {
-///     fn new(circ_4bytes: bool) -> Self {
-///         Self {
-///             circ_4bytes,
-///             cache: NullCellCache,
-///         }
-///     }
-/// }
-///
-/// impl CellCache for TestConfig {
-///     fn get_cached(&self) -> FixedCell {
-///         self.cache.get_cached()
-///     }
-///
-///     fn cache_cell(&self, cell: FixedCell) {
-///         self.cache.cache_cell(cell);
-///     }
-/// }
-///
-/// impl WithCellConfig for TestConfig {
-///     fn is_circ_id_4bytes(&self) -> bool {
-///         self.circ_4bytes
-///     }
-///
-///     fn cell_type(&self, header: &CellHeader) -> Result<CellType, InvalidCellHeader> {
-///         match header.command {
-///             Padding::ID => Ok(CellType::Fixed),
-///             _ => Err(InvalidCellHeader::with_header(header)),
-///         }
-///     }
-/// }
-///
-/// CellWriter::try_from(Cached::new(TestConfig::new(true), Padding::new(FixedCell::default()))).unwrap();
-/// ```
 impl<T, C> TryFrom<Cached<T, C>> for CellWriter<Cached<T, C>>
 where
     T: CellLike + Into<FixedCell>,
@@ -163,8 +114,8 @@ fn write_cell(
 
                 while i < 2 {
                     let n = wrap_eof(writer.write(&b[i..]))?;
-                    i = n;
-                    *ix = n;
+                    i += n;
+                    *ix += n;
                 }
 
                 false
@@ -201,5 +152,76 @@ impl<C: CellLike> Handle<&mut dyn Write> for CellWriter<C> {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Arc;
+
+    use proptest::prelude::*;
+
+    use crate::cell::VariableCell;
+    use crate::cell::padding::{Padding, VPadding};
+    use crate::util::{TestConfig, var_cell_strat};
+
+    proptest! {
+        #[test]
+        fn test_writer_cached_fixed(
+            is_4bytes: bool,
+            data: [u8; FIXED_CELL_SIZE],
+        ) {
+            let cfg = Arc::new(TestConfig::new(is_4bytes));
+
+            let mut v = Vec::with_capacity(FIXED_CELL_SIZE + if is_4bytes { 5 } else { 3 });
+            v.resize(
+                if is_4bytes {
+                    4
+                } else {
+                    2
+                },
+                0,
+            );
+            v.push(Padding::ID);
+            v.extend_from_slice(&data);
+
+            let mut r = Vec::new();
+            CellWriter::try_from(Cached::new(
+                cfg.clone(),
+                Padding::new(FixedCell::new(Box::new(data))),
+            ))
+                .unwrap()
+                .handle(&mut r)
+                .unwrap();
+            assert_eq!(r, v);
+            assert_eq!(cfg.cache.as_inner(), (0, 1));
+        }
+
+        #[test]
+        fn test_writer_variable(
+            is_4bytes: bool,
+            data in var_cell_strat(),
+        ) {
+            let mut v = Vec::with_capacity(FIXED_CELL_SIZE + if is_4bytes { 5 } else { 3 });
+            v.resize(
+                if is_4bytes {
+                    4
+                } else {
+                    2
+                },
+                0,
+            );
+            v.push(VPadding::ID);
+            v.extend_from_slice(&(data.len() as u16).to_be_bytes());
+            v.extend_from_slice(&data);
+
+            let mut r = Vec::new();
+            CellWriter::new(VPadding::new(VariableCell::from(data)), is_4bytes)
+                .handle(&mut r)
+                .unwrap();
+            assert_eq!(r, v);
+        }
     }
 }

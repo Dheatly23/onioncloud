@@ -308,30 +308,7 @@ where
 }
 
 #[cfg(test)]
-pub(crate) fn test_read_helper<T, E, H>(data: &[u8], steps: Vec<usize>, mut h: H) -> T
-where
-    for<'a> H: sans_io::Handle<&'a mut dyn Read, Return = Result<T, E>>,
-    E: Error + 'static,
-{
-    let mut it = steps.into_iter();
-    let mut n = 0;
-    while n < data.len() {
-        let t = n
-            .saturating_add(it.next().unwrap_or(usize::MAX))
-            .min(data.len());
-        let b = &data[n..t];
-        let l = b.len();
-        let mut buf = Buffer::new(b);
-        match h.handle(&mut buf) {
-            Ok(v) => return v,
-            Err(e) if err_is_would_block(&e) => (),
-            Err(e) => panic!("IO error: {e}"),
-        }
-        assert_eq!(buf.finalize(), l);
-        n += l;
-    }
-    panic!("buffer finished but value isn't yet produced");
-}
+pub(crate) use tests::*;
 
 #[cfg(test)]
 mod tests {
@@ -343,7 +320,87 @@ mod tests {
     use proptest::prelude::*;
     use proptest_state_machine::*;
 
+    use crate::cache::{CellCache, TestCache};
+    use crate::cell::dispatch::{CellType, WithCellConfig};
+    use crate::cell::{CellHeader, FixedCell};
+    use crate::errors::InvalidCellHeader;
+
     static EXAMPLE_DATA: &[u8] = b"Never gonna give you up";
+
+    pub(crate) fn test_read_helper<T, E, H>(data: &[u8], steps: Vec<usize>, mut h: H) -> T
+    where
+        for<'a> H: sans_io::Handle<&'a mut dyn Read, Return = Result<T, E>>,
+        E: Error + 'static,
+    {
+        let mut it = steps.into_iter();
+        let mut n = 0;
+        while n < data.len() {
+            let t = n
+                .saturating_add(it.next().unwrap_or(usize::MAX))
+                .min(data.len());
+            let b = &data[n..t];
+            let l = b.len();
+            let mut buf = Buffer::new(b);
+            match h.handle(&mut buf) {
+                Ok(v) => return v,
+                Err(e) if err_is_would_block(&e) => (),
+                Err(e) => panic!("IO error: {e}"),
+            }
+            assert_eq!(buf.finalize(), l);
+            n += l;
+        }
+        panic!("buffer finished but value isn't yet produced");
+    }
+
+    pub(crate) struct TestConfig {
+        circ_4bytes: bool,
+        pub(crate) cache: TestCache,
+    }
+
+    impl TestConfig {
+        pub(crate) fn new(circ_4bytes: bool) -> Self {
+            Self {
+                circ_4bytes,
+                cache: TestCache::new(),
+            }
+        }
+    }
+
+    impl WithCellConfig for TestConfig {
+        fn is_circ_id_4bytes(&self) -> bool {
+            self.circ_4bytes
+        }
+
+        fn cell_type(&self, header: &CellHeader) -> Result<CellType, InvalidCellHeader> {
+            match header.command {
+                8 | 128..=254 => Ok(CellType::Variable),
+                0..128 => Ok(CellType::Fixed),
+                _ => Err(InvalidCellHeader::with_header(header)),
+            }
+        }
+    }
+
+    impl CellCache for TestConfig {
+        fn get_cached(&self) -> FixedCell {
+            self.cache.get_cached()
+        }
+
+        fn cache_cell(&self, cell: FixedCell) {
+            self.cache.cache_cell(cell);
+        }
+    }
+
+    pub(crate) fn steps() -> impl Strategy<Value = Vec<usize>> {
+        vec(0..=256usize, 0..32)
+    }
+
+    pub(crate) fn circ_id_strat() -> impl Strategy<Value = (bool, u32)> {
+        any::<bool>().prop_flat_map(|v| (Just(v), 0..=if v { u32::MAX } else { u16::MAX.into() }))
+    }
+
+    pub(crate) fn var_cell_strat() -> impl Strategy<Value = Vec<u8>> {
+        vec(any::<u8>(), 0..=1024)
+    }
 
     #[test]
     fn test_buffer_empty() {

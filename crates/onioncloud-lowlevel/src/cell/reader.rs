@@ -199,24 +199,15 @@ impl Handle<&mut dyn Read> for CellHeaderReader {
 mod tests {
     use super::*;
 
-    use proptest::collection::vec;
     use proptest::prelude::*;
 
-    use crate::util::test_read_helper;
-
-    fn steps() -> impl Strategy<Value = Vec<usize>> {
-        vec(0..=256usize, 0..32)
-    }
+    use crate::util::{circ_id_strat, steps, test_read_helper, var_cell_strat};
 
     proptest! {
         #[test]
         fn test_header_read(
             steps in steps(),
-            (is_4bytes, circuit) in any::<bool>().prop_flat_map(|v| (Just(v), 0..=if v {
-                u32::MAX
-            } else {
-                u16::MAX.into()
-            })),
+            (is_4bytes, circuit) in circ_id_strat(),
             command: u8,
         ) {
             let mut buf = [0; 5];
@@ -243,11 +234,7 @@ mod tests {
         #[test]
         fn test_circuit_read_fixed(
             steps in steps(),
-            (is_4bytes, circuit) in any::<bool>().prop_flat_map(|v| (Just(v), 0..=if v {
-                u32::MAX
-            } else {
-                u16::MAX.into()
-            })),
+            (is_4bytes, circuit) in circ_id_strat(),
             command: u8,
             data: [u8; FIXED_CELL_SIZE],
         ) {
@@ -296,13 +283,9 @@ mod tests {
         #[test]
         fn test_circuit_read_variable(
             steps in steps(),
-            (is_4bytes, circuit) in any::<bool>().prop_flat_map(|v| (Just(v), 0..=if v {
-                u32::MAX
-            } else {
-                u16::MAX.into()
-            })),
+            (is_4bytes, circuit) in circ_id_strat(),
             command: u8,
-            data in vec(any::<u8>(), 0..=u16::MAX as usize),
+            data in var_cell_strat(),
         ) {
             let mut buf;
             let t = if is_4bytes {

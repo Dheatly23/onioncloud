@@ -132,59 +132,17 @@ mod tests {
     use proptest::collection::vec;
     use proptest::prelude::*;
 
-    use crate::cache::{CellCache, NullCellCache};
-    use crate::cell::{FIXED_CELL_SIZE, FixedCell};
-    use crate::util::test_read_helper;
-
-    #[derive(Default)]
-    struct TestConfig {
-        circ_4bytes: bool,
-        cache: NullCellCache,
-    }
-
-    impl TestConfig {
-        fn new(circ_4bytes: bool) -> Self {
-            Self {
-                circ_4bytes,
-                cache: NullCellCache,
-            }
-        }
-    }
-
-    impl WithCellConfig for TestConfig {
-        fn is_circ_id_4bytes(&self) -> bool {
-            self.circ_4bytes
-        }
-
-        fn cell_type(&self, header: &CellHeader) -> Result<CellType, errors::InvalidCellHeader> {
-            match header.command {
-                1 => Ok(CellType::Fixed),
-                2 => Ok(CellType::Variable),
-                _ => Err(errors::InvalidCellHeader::with_header(header)),
-            }
-        }
-    }
-
-    impl CellCache for TestConfig {
-        fn get_cached(&self) -> FixedCell {
-            self.cache.get_cached()
-        }
-
-        fn cache_cell(&self, cell: FixedCell) {
-            self.cache.cache_cell(cell);
-        }
-    }
-
-    fn steps() -> impl Strategy<Value = Vec<usize>> {
-        vec(0..=256usize, 0..32)
-    }
+    use crate::cell::FIXED_CELL_SIZE;
+    use crate::util::{TestConfig, steps, test_read_helper};
 
     #[test]
     fn test_parse_header_fail() {
-        let r = CellReader::new(TestConfig::new(false)).handle(&mut util::Buffer::new(&[0; 3]));
+        let r =
+            CellReader::new(TestConfig::new(false)).handle(&mut util::Buffer::new(&[0, 0, 255]));
         assert!(matches!(r, Err(errors::CellError::InvalidCellHeader(_))));
 
-        let r = CellReader::new(TestConfig::new(true)).handle(&mut util::Buffer::new(&[0; 5]));
+        let r = CellReader::new(TestConfig::new(true))
+            .handle(&mut util::Buffer::new(&[0, 0, 0, 0, 255]));
         assert!(matches!(r, Err(errors::CellError::InvalidCellHeader(_))));
     }
 
@@ -220,7 +178,7 @@ mod tests {
             } else {
                 2
             }]);
-            buf.push(2);
+            buf.push(128);
             buf.extend_from_slice(&(data.len() as u16).to_be_bytes());
             buf.extend_from_slice(&data);
 

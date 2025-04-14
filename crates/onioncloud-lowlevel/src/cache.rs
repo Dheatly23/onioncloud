@@ -205,6 +205,9 @@ impl<T: Into<FixedCell>, C: CellCache> Cached<T, C> {
 }
 
 #[cfg(test)]
+pub(crate) use tests::*;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -281,20 +284,20 @@ mod tests {
         assert_eq!(data.0.drop_count.load(Acquire), 0);
     }
 
-    struct TestCache {
+    pub(crate) struct TestCache {
         alloc: AtomicUsize,
         drop: AtomicUsize,
     }
 
     impl TestCache {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self {
                 alloc: AtomicUsize::new(0),
                 drop: AtomicUsize::new(0),
             }
         }
 
-        fn as_inner(&self) -> (usize, usize) {
+        pub(crate) fn as_inner(&self) -> (usize, usize) {
             (self.alloc.load(Acquire), self.drop.load(Acquire))
         }
     }
