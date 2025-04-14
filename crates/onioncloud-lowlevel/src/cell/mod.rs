@@ -392,6 +392,7 @@ pub fn cast<T: TryFromCell>(cell: &mut Option<Cell>) -> Result<Option<T>, errors
 ///
 /// Used for [`CellLike::cell`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum CellRef<'a> {
     Fixed(&'a FixedCell),
     Variable(&'a VariableCell),
