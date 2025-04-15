@@ -1,6 +1,7 @@
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
+use std::ptr::drop_in_place;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering::*};
 
@@ -124,24 +125,43 @@ impl CellCache for StandardCellCache {
     }
 }
 
+/// Trait for cacheable types.
+pub trait Cachable {
+    /// Maybe unwraps self into [`FixedCell`].
+    ///
+    /// If it returns [`None`], then the internal value is not cachable.
+    fn maybe_into_fixed(self) -> Option<FixedCell>;
+}
+
+/// Auto-impl for [`Into`].
+impl<T: Into<FixedCell>> Cachable for T {
+    fn maybe_into_fixed(self) -> Option<FixedCell> {
+        Some(self.into())
+    }
+}
+
 /// Type that wraps a cell to be cached.
 ///
 /// When it drops, automatically caches cell.
 #[derive(Clone)]
-pub struct Cached<T: Into<FixedCell>, C: CellCache> {
-    cache: C,
+pub struct Cached<T: Cachable, C: CellCache> {
+    cache: ManuallyDrop<C>,
     cell: ManuallyDrop<T>,
 }
 
-impl<T: Into<FixedCell>, C: CellCache> Drop for Cached<T, C> {
+impl<T: Cachable, C: CellCache> Drop for Cached<T, C> {
     fn drop(&mut self) {
-        // SAFETY: cell will not be accessed again.
+        // SAFETY: cell will not be accessed nor moved.
         let cell = unsafe { ManuallyDrop::take(&mut self.cell) };
-        self.cache.cache_cell(cell.into());
+        if let Some(cell) = cell.maybe_into_fixed() {
+            self.cache.cache_cell(cell);
+        }
+        // SAFETY: cache will not be accessed nor moved.
+        unsafe { drop_in_place(&mut *self.cache) }
     }
 }
 
-impl<T: Into<FixedCell>, C: CellCache> Deref for Cached<T, C> {
+impl<T: Cachable, C: CellCache> Deref for Cached<T, C> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -149,49 +169,49 @@ impl<T: Into<FixedCell>, C: CellCache> Deref for Cached<T, C> {
     }
 }
 
-impl<T: Into<FixedCell>, C: CellCache> DerefMut for Cached<T, C> {
+impl<T: Cachable, C: CellCache> DerefMut for Cached<T, C> {
     fn deref_mut(&mut self) -> &mut T {
         &mut self.cell
     }
 }
 
-impl<T: Into<FixedCell> + PartialEq, C: CellCache> PartialEq for Cached<T, C> {
+impl<T: Cachable + PartialEq, C: CellCache> PartialEq for Cached<T, C> {
     fn eq(&self, rhs: &Self) -> bool {
         self.cell.eq(&rhs.cell)
     }
 }
 
-impl<T: Into<FixedCell> + PartialEq, C: CellCache> PartialEq<T> for Cached<T, C> {
+impl<T: Cachable + PartialEq, C: CellCache> PartialEq<T> for Cached<T, C> {
     fn eq(&self, rhs: &T) -> bool {
         (*self.cell).eq(rhs)
     }
 }
 
-impl<T: Into<FixedCell> + Eq, C: CellCache> Eq for Cached<T, C> {}
+impl<T: Cachable + Eq, C: CellCache> Eq for Cached<T, C> {}
 
-impl<T: Into<FixedCell> + PartialOrd, C: CellCache> PartialOrd for Cached<T, C> {
+impl<T: Cachable + PartialOrd, C: CellCache> PartialOrd for Cached<T, C> {
     fn partial_cmp(&self, rhs: &Self) -> Option<Ordering> {
         self.cell.partial_cmp(&rhs.cell)
     }
 }
 
-impl<T: Into<FixedCell> + PartialOrd, C: CellCache> PartialOrd<T> for Cached<T, C> {
+impl<T: Cachable + PartialOrd, C: CellCache> PartialOrd<T> for Cached<T, C> {
     fn partial_cmp(&self, rhs: &T) -> Option<Ordering> {
         (*self.cell).partial_cmp(rhs)
     }
 }
 
-impl<T: Into<FixedCell> + Ord, C: CellCache> Ord for Cached<T, C> {
+impl<T: Cachable + Ord, C: CellCache> Ord for Cached<T, C> {
     fn cmp(&self, rhs: &Self) -> Ordering {
         self.cell.cmp(&rhs.cell)
     }
 }
 
-impl<T: Into<FixedCell>, C: CellCache> Cached<T, C> {
+impl<T: Cachable, C: CellCache> Cached<T, C> {
     /// Create new [`Cached`].
     pub fn new(cache: C, value: T) -> Self {
         Self {
-            cache,
+            cache: ManuallyDrop::new(cache),
             cell: ManuallyDrop::new(value),
         }
     }
@@ -201,6 +221,29 @@ impl<T: Into<FixedCell>, C: CellCache> Cached<T, C> {
     /// Useful for using cache for other cells.
     pub fn cache(this: &Self) -> &C {
         &this.cache
+    }
+
+    /// Maps cell data.
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::cell::FixedCell;
+    /// use onioncloud_lowlevel::cell::padding::Padding;
+    /// use onioncloud_lowlevel::cache::{Cached, StandardCellCache};
+    ///
+    /// let cell = Cached::new(StandardCellCache::default(), FixedCell::default());
+    /// let cell = cell.map(Padding::new);
+    /// ```
+    pub fn map<U: Cachable>(self, f: impl FnOnce(T) -> U) -> Cached<U, C> {
+        // SAFETY: Self will not be accessed nor moved after this.
+        // Prevent drop from being called by wrapping self in ManuallyDrop.
+        let (cell, cache) = unsafe {
+            let mut this = ManuallyDrop::new(self);
+            (
+                ManuallyDrop::take(&mut this.cell),
+                ManuallyDrop::take(&mut this.cache),
+            )
+        };
+        Cached::new(cache, f(cell))
     }
 }
 

@@ -213,6 +213,12 @@ impl AsMut<[u8]> for Cell {
     }
 }
 
+impl crate::cache::Cachable for Cell {
+    fn maybe_into_fixed(self) -> Option<FixedCell> {
+        self.into_fixed().ok()
+    }
+}
+
 impl Cell {
     /// Creates empty fixed-sized cell.
     pub fn empty_fixed() -> Self {
