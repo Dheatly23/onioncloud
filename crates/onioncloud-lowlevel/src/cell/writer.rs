@@ -194,7 +194,7 @@ mod tests {
             is_4bytes: bool,
             data in var_cell_strat(),
         ) {
-            let mut v = Vec::with_capacity(FIXED_CELL_SIZE + if is_4bytes { 5 } else { 3 });
+            let mut v = Vec::with_capacity(data.len() + if is_4bytes { 7 } else { 5 });
             v.resize(
                 if is_4bytes {
                     4
@@ -243,7 +243,7 @@ mod tests {
             command: u8,
             data in var_cell_strat(),
         ) {
-            let mut v = Vec::with_capacity(FIXED_CELL_SIZE + if is_4bytes { 5 } else { 3 });
+            let mut v = Vec::with_capacity(data.len() + if is_4bytes { 7 } else { 5 });
             if is_4bytes {
                 v.extend_from_slice(&circ_id.to_be_bytes());
             } else {
