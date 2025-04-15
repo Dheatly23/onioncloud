@@ -61,3 +61,9 @@ impl InvalidCellHeader {
 pub struct CellFormatError;
 
 display2debug! {CellFormatError}
+
+#[derive(Error)]
+#[error("version negotiation error")]
+pub struct VersionsNegotiateError;
+
+display2debug! {VersionsNegotiateError}
