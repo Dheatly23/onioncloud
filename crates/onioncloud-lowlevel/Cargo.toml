@@ -14,6 +14,22 @@ futures-io.workspace = true
 rand.workspace = true
 thiserror.workspace = true
 
+[dependencies.tokio]
+workspace = true
+optional = true
+features = [
+  "net",
+  "rt",
+  "time",
+]
+
+[dependencies.tokio-util]
+workspace = true
+optional = true
+features = [
+  "compat",
+]
+
 [dependencies.zerocopy]
 workspace = true
 features = [
@@ -23,3 +39,12 @@ features = [
 [dev-dependencies]
 proptest.workspace = true
 proptest-state-machine.workspace = true
+
+[features]
+default = [
+  "tokio",
+]
+tokio = [
+  "dep:tokio",
+  "dep:tokio-util",
+]
