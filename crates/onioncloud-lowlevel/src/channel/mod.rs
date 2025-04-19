@@ -4,6 +4,7 @@ pub mod manager;
 use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
+use std::time::Instant;
 
 use crate::crypto::relay::RelayId;
 
@@ -21,7 +22,22 @@ pub trait ChannelConfig {
 
 pub struct ChannelInput<'a> {
     stream: &'a mut dyn Stream,
-    closed: bool,
+    time: Instant,
+    timeout: bool,
+}
+
+impl<'a> ChannelInput<'a> {
+    pub(crate) fn new(
+        stream: &'a mut dyn Stream,
+        time: Instant,
+        timeout: bool,
+    ) -> Self {
+        Self {
+            stream,
+            time,
+            timeout,
+        }
+    }
 }
 
 impl ChannelInput<'_> {
@@ -37,12 +53,37 @@ impl ChannelInput<'_> {
         self.stream.link_cert()
     }
 
-    pub fn is_closed(&self) -> bool {
-        self.closed
+    pub fn time(&self) -> Instant {
+        self.time
+    }
+
+    pub fn is_timeout(&self) -> bool {
+        self.timeout
+    }
+}
+
+pub struct ChannelOutput {
+    pub(crate) timeout: Option<Instant>,
+    pub(crate) shutdown: bool,
+}
+
+impl ChannelOutput {
+    pub fn new() -> Self {
+        Self { timeout: None, shutdown: false }
+    }
+
+    pub fn timeout(&mut self, timeout: Instant) -> &mut Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    pub fn shutdown(&mut self, value: bool) -> &mut Self {
+        self.shutdown = value;
+        self
     }
 }
 
 /// Internal trait for a TLS stream.
-trait Stream: Read + Write {
+pub(crate) trait Stream: Read + Write {
     fn link_cert(&self) -> &[u8];
 }

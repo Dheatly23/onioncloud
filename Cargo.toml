@@ -13,12 +13,29 @@ publish = false
 [workspace.dependencies]
 cipher = "0.4"
 crossbeam-queue = "0.3"
+flume = "0.11"
 futures-core = "0.3"
 futures-io = "0.3"
+loom = "0.7"
 proptest = "1"
 proptest-state-machine = "0.3"
 rand = "0.9"
 thiserror = "2"
 tokio = "1"
 tokio-util = "0.7"
+tracing = "0.1"
 zerocopy = "0.8"
+
+[workspace.dependencies.once_cell]
+version = "1"
+features = [
+  "parking_lot",
+]
+
+[workspace.dependencies.rustls]
+version = "0.23"
+default-features = false
+features = [
+  "ring",
+  "std",
+]

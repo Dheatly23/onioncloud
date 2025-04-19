@@ -1,6 +1,7 @@
 pub mod sans_io;
 
 use std::error::Error;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::future::poll_fn;
 use std::io::{Error as IoError, ErrorKind, IoSliceMut, Read, Result as IoResult, Write};
 use std::pin::Pin;
@@ -181,6 +182,16 @@ pub(crate) struct AsyncReadWrapper<'a, 'b> {
     pending: bool,
 }
 
+impl<'a, 'b> AsyncReadWrapper<'a, 'b> {
+    pub(crate) fn new(cx: &'a mut Context<'b>, reader: Pin<&'a mut dyn AsyncRead>) -> Self {
+        Self { cx, reader, pending: false }
+    }
+
+    pub(crate) fn finish(self) -> bool {
+        self.pending
+    }
+}
+
 impl Read for AsyncReadWrapper<'_, '_> {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
         if self.pending {
@@ -208,6 +219,16 @@ pub(crate) struct AsyncWriteWrapper<'a, 'b> {
     cx: &'a mut Context<'b>,
     writer: Pin<&'a mut dyn AsyncWrite>,
     pending: bool,
+}
+
+impl<'a, 'b> AsyncWriteWrapper<'a, 'b> {
+    pub(crate) fn new(cx: &'a mut Context<'b>, writer: Pin<&'a mut dyn AsyncWrite>) -> Self {
+        Self { cx, writer, pending: false }
+    }
+
+    pub(crate) fn finish(self) -> bool {
+        self.pending
+    }
 }
 
 impl Write for AsyncWriteWrapper<'_, '_> {
@@ -242,7 +263,7 @@ impl Write for AsyncWriteWrapper<'_, '_> {
     }
 }
 
-fn err_is_would_block(e: &(dyn Error + 'static)) -> bool {
+pub(crate) fn err_is_would_block(e: &(dyn Error + 'static)) -> bool {
     let mut p = Some(e);
     while let Some(e) = p {
         if let Some(e) = e.downcast_ref::<IoError>() {
@@ -275,7 +296,7 @@ where
 
         match handle.handle(&mut s) {
             // Check if pending is true to ensure there isn't spurious WouldBlock.
-            Err(e) if s.pending && err_is_would_block(&e) => Pending,
+            Err(e) if s.finish() && err_is_would_block(&e) => Pending,
             v => Ready(v),
         }
     })
@@ -300,11 +321,26 @@ where
 
         match handle.handle(&mut s) {
             // Check if pending is true to ensure there isn't spurious WouldBlock.
-            Err(e) if s.pending && err_is_would_block(&e) => Pending,
+            Err(e) if s.finish() && err_is_would_block(&e) => Pending,
             v => Ready(v),
         }
     })
     .await
+}
+
+pub(crate) fn print_hex(s: &[u8]) -> impl '_ + Display {
+    struct S<'a>(&'a [u8]);
+
+    impl Display for S<'_> {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            for &v in s.0 {
+                write!(f, "{v:02X}")?;
+            }
+            Ok(())
+        }
+    }
+
+    S(s)
 }
 
 #[cfg(test)]

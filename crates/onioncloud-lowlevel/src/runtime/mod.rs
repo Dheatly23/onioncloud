@@ -10,12 +10,14 @@ use std::time::Instant;
 use futures_io::{AsyncRead, AsyncWrite};
 
 pub trait Runtime: crate::private::Sealed {
+    type Task<T: Send>: Future<Output = T> + Send + Unpin;
     type Timer: Timer;
-    type Stream: AsyncRead + AsyncWrite + Send;
+    type Stream: Stream;
 
-    fn spawn<Fut>(&self, fut: Fut)
+    fn spawn<T, F>(&self, fut: F) -> impl Future<Output = T> + Send
     where
-        Fut: Future<Output = ()> + Send + 'static;
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static;
 
     fn timer(&self, timeout: Instant) -> Self::Timer;
 
@@ -24,4 +26,8 @@ pub trait Runtime: crate::private::Sealed {
 
 pub trait Timer: Future<Output = ()> + Send + crate::private::Sealed {
     fn reset(self: Pin<&mut Self>, timeout: Instant);
+}
+
+pub trait Stream: AsyncRead + AsyncWrite + Send + crate::private::Sealed {
+    fn peer_addr(&self) -> IoResult<SocketAddr>;
 }

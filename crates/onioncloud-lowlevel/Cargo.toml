@@ -11,8 +11,16 @@ cipher.workspace = true
 crossbeam-queue.workspace = true
 futures-core.workspace = true
 futures-io.workspace = true
+once_cell.workspace = true
 rand.workspace = true
+rustls.workspace = true
 thiserror.workspace = true
+
+[dependencies.flume]
+workspace = true
+features = [
+  "async",
+]
 
 [dependencies.tokio]
 workspace = true
@@ -30,6 +38,12 @@ features = [
   "compat",
 ]
 
+[dependencies.tracing]
+workspace = true
+features = [
+  "attributes",
+]
+
 [dependencies.zerocopy]
 workspace = true
 features = [
@@ -39,6 +53,9 @@ features = [
 [dev-dependencies]
 proptest.workspace = true
 proptest-state-machine.workspace = true
+
+[target.'cfg(loom)'.dependencies]
+loom.workspace = true
 
 [features]
 default = [

@@ -14,8 +14,6 @@ pub(crate) mod private {
     #[repr(transparent)]
     pub struct SealWrap<T: ?Sized>(pub(crate) T);
 
-    impl<T: ?Sized> Sealed for SealWrap<T> {}
-
     impl<T: ?Sized> SealWrap<T> {
         pub(crate) fn project(self: Pin<&mut Self>) -> Pin<&mut T> {
             // SAFETY: Inner value is projected
