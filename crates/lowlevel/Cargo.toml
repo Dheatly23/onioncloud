@@ -14,6 +14,7 @@ futures-io.workspace = true
 once_cell.workspace = true
 rand.workspace = true
 rustls.workspace = true
+scopeguard.workspace = true
 thiserror.workspace = true
 
 [dependencies.flume]

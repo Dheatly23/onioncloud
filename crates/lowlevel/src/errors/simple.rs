@@ -67,3 +67,9 @@ display2debug! {CellFormatError}
 pub struct VersionsNegotiateError;
 
 display2debug! {VersionsNegotiateError}
+
+#[derive(Error)]
+#[error("no free circuit ID found")]
+pub struct NoFreeCircIDError;
+
+display2debug! {NoFreeCircIDError}

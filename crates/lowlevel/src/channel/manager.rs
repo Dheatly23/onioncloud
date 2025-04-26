@@ -8,13 +8,14 @@ use std::io::{ErrorKind, Result as IoResult, IoSlice, IoSliceMut};
 use std::time::Instant;
 
 use flume::{Receiver, Sender, bounded};
-use tracing::{instrument, warn, error, debug_span, Span, info};
+use flume::r#async::{SendSink, RecvStream};
+use tracing::{instrument, warn, error, debug_span, Span, info, debug};
 use rustls::client::ClientConnection;
 use futures_io::{AsyncRead, AsyncWrite};
-use futures_core::ready;
+use scopeguard::guard;
 
-use super::controller::ChannelController;
-use super::{ChannelConfig, ChannelInput, ChannelOutput, Stream};
+use super::controller::{ChannelController, Timeout, ControlMsg};
+use super::{ChannelConfig, ChannelInput, ChannelOutput, Stream, CircuitMap};
 use crate::cell::Cell;
 use crate::crypto::relay::RelayId;
 use crate::runtime::Runtime;
@@ -26,9 +27,15 @@ struct CircuitData {
     sender: Sender<Cell>,
 }
 
+struct ChannelInner {
+    config: Cfg,
+    sender: Sender<CircuitData>,
+    receiver: Receiver<CircuitData>,
+}
+
 struct Channel<R: Runtime, M> {
     handle: R::Task<bool>,
-    sender: Sender<CircuitData>,
+    inner: Arc<ChannelInner>,
 }
 
 pub struct ChannelRef<'a, R: Runtime, M>(&'a mut Channel<R, M>);
@@ -106,22 +113,22 @@ async fn handle_channel<R: Runtime, C: ChannelController>(rt: R, cfg: C::Config)
     }
 }
 
+#[derive(PartialEq, Eq)]
 enum State {
     Normal,
+    ReqShutdown,
+    TlsShutdown,
     Shutdown,
-}
-
-enum TimerState<T> {
-    Nothing,
-    Pending(T, Instant),
-    Finished,
 }
 
 struct ChannelFut<R: Runtime, C: ChannelController> {
     runtime: R,
     stream: R::Stream,
-    timer: TimerState<R::Timer>,
+    timer: Option<R::Timer>,
+    timer_state: TimerState,
     tls: TlsWrapper,
+    ctrl_recv: Option<RecvStream<C::ControlMsg>>,
+    circ_map: Option<CircuitMap<C::Cell, C::CircMeta>>,
     cont: C,
     state: State,
     span: Span,
@@ -132,133 +139,195 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // SAFETY: Values are pin projected (except for controller and TLS).
-        let (runtime, mut stream, mut timer, tls, cont, state, span) = unsafe {
-            let Self {runtime, stream, timer, tls, cont} = Pin::into_inner_unchecked(self);
-            (runtime, Pin::new_unchecked(stream), Pin::new_unchecked(timer), tls, cont, state, span)
+        let (runtime, mut stream, mut timer, timer_finished, tls, mut ctrl_recv, circ_map, cont, state, span) = unsafe {
+            let Self {runtime, stream, timer, timer_finished, tls, ctrl_recv, circ_map, cont, state, span} = Pin::into_inner_unchecked(self);
+            (runtime, Pin::new_unchecked(stream), Pin::new_unchecked(timer), timer_finished, tls, Pin::new(ctrl_recv), circ_map, cont, state, span)
         };
+        let mut pending = 0u8;
+
+        const FLAG_READ: u8 = 1 << 0;
+        const FLAG_WRITE: u8 = 1 << 1;
+        const FLAG_TIMEOUT: u8 = 1 << 2;
+        const FLAG_CTRLMSG: u8 = 1 << 3;
 
         'main: loop {
             let guard = span.enter();
 
             // Process shutdown
-            if matches!(state, State::Shutdown) {
-                return ready!(stream.poll_close(cx));
+            match state {
+                State::Shutdown => {
+                    timer.set(TimerState::Nothing);
+                    *circ_map = None;
+                    ctrl_recv.set(None);
+                    return stream.poll_close(cx).map_err(|e| e.into());
+                }
+                State::ReqShutdown => {
+                    debug!("graceful shutdown request received");
+                    tls.0.send_close_notify();
+                    *state = State::TlsShutdown;
+                    *circ_map = None;
+                    ctrl_recv.set(None);
+                    continue;
+                }
+                _ => (),
             }
 
             // Process TLS
-            let mut pending = 0u8;
             loop {
-                if pending & 1 == 0 {
-                    while tls.0.wants_write() {
-                        let mut wrapper = AsyncWriteWrapper::new(cx, stream.as_mut());
-                        match tls.0.write_tls(&mut wrapper) {
-                            Ok(0) => {
-                                info!("shutting down: TLS write finished");
-                                *state = State::Shutdown;
-                                continue 'main;
-                            },
-                            Ok(_) => (),
-                            Err(e) => {
-                                if matches!(e.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) {
-                                    pending |= 1 | 4;
-                                    break;
-                                }
-
-                                warn!("shutting down: IO error");
-                                *state = State::Shutdown;
-                                return Poll::Ready(Err(e.into()));
-                            }
-                        }
-                    }
-
-                    if let Poll::Ready(Err(e)) = stream.poll_flush(cx) {
-                        return Poll::Ready(Err(e.into()));
-                    }
-                }
-
-                if pending & 2 == 0 {
-                    while tls.0.wants_read() {
-                        let mut wrapper = AsyncReadWrapper::new(cx, stream.as_mut());
-                        match tls.0.read_tls(&mut wrapper) {
-                            Ok(0) => {
-                                pending |= 2;
-                                break;
-                            }
-                            Ok(_) => (),
-                            Err(e) => {
-                                if matches!(e.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) {
-                                    pending |= 2 | 4;
-                                    break;
-                                }
-
-                                warn!("shutting down: IO error");
-                                *state = State::Shutdown;
-                                return Poll::Ready(Err(e.into()));
-                            }
-                        }
-                    }
-                }
-
                 if let Err(e) = tls.0.process_new_packets() {
                     warn!("shutting down: TLS error");
                     *state = Shutdown;
                     return Poll::Ready(Err(e.into()));
-                } else if pending & 3 == 3 || !(tls.0.wants_read() || tls.0.wants_write()) {
+                } else if !(tls.0.wants_read() || tls.0.wants_write()) {
                     break;
+                }
+
+                while tls.0.wants_write() {
+                    let mut wrapper = guard(AsyncWriteWrapper::new(cx, stream.as_mut()), |w| {
+                        if w.finish() {
+                            pending |= FLAG_WRITE;
+                        }
+                    });
+                    match tls.0.write_tls(&mut wrapper) {
+                        Ok(0) => {
+                            debug_assert!(!tls.0.wants_write(), "TLS writes EOF yet wants to write more");
+                            info!("shutting down: TLS write finished");
+                            *state = State::Shutdown;
+                            continue 'main;
+                        },
+                        Ok(_) => (),
+                        Err(e) if matches!(e.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) => break,
+                        Err(e) => {
+                            warn!("shutting down: IO error");
+                            *state = State::Shutdown;
+                            return Poll::Ready(Err(e.into()));
+                        }
+                    }
+                }
+
+                if let Poll::Ready(Err(e)) = stream.poll_flush(cx) {
+                    return Poll::Ready(Err(e.into()));
+                }
+
+                while tls.0.wants_read() {
+                    let mut wrapper = guard(AsyncReadWrapper::new(cx, stream.as_mut()), |w| {
+                        if w.finish() {
+                            pending |= FLAG_READ;
+                        }
+                    });
+                    match tls.0.read_tls(&mut wrapper) {
+                        Ok(0) => {
+                            debug_assert!(!tls.0.wants_read(), "TLS reads EOF yet wants to read more");
+                            break;
+                        }
+                        Ok(_) => (),
+                        Err(e) if matches!(e.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) => break,
+                        Err(e) => {
+                            warn!("shutting down: IO error");
+                            *state = State::Shutdown;
+                            return Poll::Ready(Err(e.into()));
+                        }
+                    }
                 }
             }
 
-            debug_assert!(pending & 4 != 0, "TLS handshake pending but IO is not");
-            if tls.0.is_handshaking() {
-                return Ok(());
+            if tls.0.is_handshaking() || *state == State::TlsShutdown {
+                debug_assert_ne!(pending & (FLAG_READ | FLAG_WRITE), 0, "TLS handshake pending but IO is not");
+                return Poll::Ready(Ok(()));
+            }
+
+            const fn match_out<E>(v: Result<ChannelOutput, E>) -> bool {
+                matches!(r, Ok(ChannelOutput { shutdown: false, .. }))
             }
 
             // Process controller
-            let time = Instant::now();
-            let is_timeout = match *timer {
-                TimerState::Pending(_, t) => t <= time,
-                TimerState::Nothing => false,
-                TimerState::Finished => true,
+            let ctrl_recv = ctrl_recv.as_pin_mut().expect("control receiver should not be dropped");
+            let circ_map = circ_map.as_mut().expect("circuit map should not be dropped");
+
+            let mut time = None;
+            let mut time = move || time.get_or_insert_with(Instant::now);
+            let mut ret = None;
+            if !*timer_finished {
+                if timer.as_pin_mut().is_some_and(|t| t.poll(cx).is_ready()) {
+                    *timer_finished = true;
+                    // Event: timeout
+                    ret = cont.handle((Timeout, ChannelInput::new(tls, cx, circ_map, time())));
+                } else {
+                    pending |= FLAG_TIMEOUT;
+                }
+            }
+
+            let mut ret = match ret {
+                Some(r) if !match_out(r) => r,
+                _ => cont.handle(ChannelInput::new(tls, cx, circ_map, time())),
             };
-            let ret = match cont.handle(ChannelInput::new(tls, time, is_timeout)) {
+
+            if pending & FLAG_CTRLMSG == 0 {
+                while match_out(ret) {
+                    let msg = match ctrl_recv.poll_next(cx) {
+                        Poll::Pending => {
+                            pending |= FLAG_CTRLMSG;
+                            break;
+                        },
+                        Poll::Ready(Some(v)) => v,
+                        Poll::Ready(None) => {
+                            error!("shutting down: control channel disconnected (this might be a bug in channel manager)");
+                            *state = State::Shutdown;
+                            continue 'main;
+                        },
+                    };
+
+                    // Event: control message
+                    ret = cont.handle((ControlMsg(msg), ChannelInput::new(tls, cx, circ_map, time())));
+                }
+            }
+
+            let ret = match ret {
                 Ok(v) => v,
                 Err(e) => {
                     warn!("shutting down: controller error");
                     *state = State::Shutdown;
-                    return Poll::Ready(Err(e.into()));
+                    return Poll::Ready(Err(e));
                 }
             };
-
-            if let Some(t) = ret.timeout {
-                loop {
-                    // SAFETY: Timer future will not be moved.
-                    if let TimerState::Pending(f, time) = unsafe { Pin::into_inner_unchecked(timer) } {
-                        // SAFETY: Timer future is pin projected.
-                        let f = unsafe { Pin::new_unchecked(f) };
-                        if *time != t {
-                            f.reset(t);
-                            *time = t;
-                        }
-
-                        if f.poll(cx).is_ready() {
-                            timer.set(TimerState::Finished);
-                        }
-                        break;
-                    } else {
-                        timer.set(TimerState::Pending((runtime.timer(t), t)));
-                    }
-                }
-            } else {
-                timer.set(TimerState::Nothing);
-            }
 
             if ret.shutdown {
                 *state = State::Shutdown;
                 continue;
+            } else if let Some(t) = ret.timeout {
+                let f = loop {
+                    if let Some(f) = timer.as_pin_mut() {
+                        break f;
+                    }
+                    timer.set(runtime.timer(t));
+                };
+
+                f.reset(t);
+                *timer_finished = false;
+                pending &= !FLAG_TIMEOUT;
+            } else {
+                // Regardless, mark timer as "finished"
+                *timer_finished = true;
             }
 
-            // All futures are pending.
-            return Poll::Pending;
+            let mut retry = false;
+            if pending & FLAG_READ == 0 && tls.0.wants_read() {
+                debug!("repolling: TLS wants to read");
+                retry = true;
+            }
+            if pending & FLAG_WRITE == 0 && tls.0.wants_write() {
+                debug!("repolling: TLS wants to write");
+                retry = true;
+            }
+            if pending & FLAG_TIMEOUT == 0 && !*timer_finished && timer.is_some() {
+                debug!("repolling: timer wants to be polled");
+                retry = true;
+            }
+
+            if !retry {
+                // All futures are pending.
+                return Poll::Pending;
+            }
         }
     }
 }
