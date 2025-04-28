@@ -9,10 +9,13 @@ use futures_io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::task::{JoinHandle, spawn};
 use tokio::time::{Instant as TokioInstant, Sleep, sleep_until};
+use tokio::io::BufStream;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 use super::{Runtime, Timer};
 use crate::private::{SealWrap, Sealed};
+
+type TokioStream = Compat<BufStream<TcpStream>>;
 
 /// Tokio runtime.
 #[derive(Default, Clone, Copy)]
@@ -23,7 +26,7 @@ impl Sealed for TokioRuntime {}
 impl Runtime for TokioRuntime {
     type Task<T: Send> = SealWrap<JoinHandle<T>>;
     type Timer = SealWrap<Sleep>;
-    type Stream = SealWrap<Compat<TcpStream>>;
+    type Stream = SealWrap<TokioStream>;
 
     fn spawn<T, F>(&self, fut: F) -> Self::Task<T>
     where
@@ -40,7 +43,7 @@ impl Runtime for TokioRuntime {
     async fn connect(&self, addrs: &[SocketAddr]) -> IoResult<Self::Stream> {
         TcpStream::connect(addrs)
             .await
-            .map(|v| SealWrap(v.compat()))
+            .map(|v| SealWrap(BufStream::new(v).compat()))
     }
 }
 
@@ -71,9 +74,9 @@ impl<T> Future for SealWrap<JoinHandle<T>> {
     }
 }
 
-impl Sealed for SealWrap<Compat<TcpStream>> {}
+impl Sealed for SealWrap<TokioStream> {}
 
-impl AsyncRead for SealWrap<Compat<TcpStream>> {
+impl AsyncRead for SealWrap<TokioStream> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -91,7 +94,7 @@ impl AsyncRead for SealWrap<Compat<TcpStream>> {
     }
 }
 
-impl AsyncWrite for SealWrap<Compat<TcpStream>> {
+impl AsyncWrite for SealWrap<TokioStream> {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
         self.project().poll_write(cx, buf)
     }
@@ -113,8 +116,8 @@ impl AsyncWrite for SealWrap<Compat<TcpStream>> {
     }
 }
 
-impl Stream for SealWrap<Compat<TcpStream>> {
+impl Stream for SealWrap<TokioStream> {
     fn peer_addr(&self) -> IoResult<SocketAddr> {
-        self.0.get_ref().peer_addr()
+        self.0.get_ref().get_ref().peer_addr()
     }
 }
