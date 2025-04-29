@@ -6,13 +6,13 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use futures_io::{AsyncRead, AsyncWrite};
+use tokio::io::BufStream;
 use tokio::net::TcpStream;
 use tokio::task::{JoinHandle, spawn};
 use tokio::time::{Instant as TokioInstant, Sleep, sleep_until};
-use tokio::io::BufStream;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
-use super::{Runtime, Timer};
+use super::{Runtime, Stream, Timer};
 use crate::private::{SealWrap, Sealed};
 
 type TokioStream = Compat<BufStream<TcpStream>>;
@@ -81,7 +81,7 @@ impl AsyncRead for SealWrap<TokioStream> {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
-    ) -> Poll<Result<usize>> {
+    ) -> Poll<IoResult<usize>> {
         self.project().poll_read(cx, buf)
     }
 
@@ -89,21 +89,21 @@ impl AsyncRead for SealWrap<TokioStream> {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         bufs: &mut [IoSliceMut<'_>],
-    ) -> Poll<Result<usize>> {
+    ) -> Poll<IoResult<usize>> {
         self.project().poll_read_vectored(cx, bufs)
     }
 }
 
 impl AsyncWrite for SealWrap<TokioStream> {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<IoResult<usize>> {
         self.project().poll_write(cx, buf)
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
         self.project().poll_flush(cx)
     }
 
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
         self.project().poll_close(cx)
     }
 
@@ -111,7 +111,7 @@ impl AsyncWrite for SealWrap<TokioStream> {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
-    ) -> Poll<Result<usize>> {
+    ) -> Poll<IoResult<usize>> {
         self.project().poll_write_vectored(cx, bufs)
     }
 }

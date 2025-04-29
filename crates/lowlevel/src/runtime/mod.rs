@@ -9,12 +9,12 @@ use std::time::Instant;
 
 use futures_io::{AsyncRead, AsyncWrite};
 
-pub trait Runtime: crate::private::Sealed {
-    type Task<T: Send>: Future<Output = T> + Send + Unpin;
+pub trait Runtime: crate::private::Sealed + Send {
+    type Task<T: Send>: Future<Output = T> + Send;
     type Timer: Timer;
     type Stream: Stream;
 
-    fn spawn<T, F>(&self, fut: F) -> impl Future<Output = T> + Send
+    fn spawn<T, F>(&self, fut: F) -> Self::Task<T>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static;

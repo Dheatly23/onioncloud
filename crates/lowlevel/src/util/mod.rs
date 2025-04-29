@@ -1,3 +1,4 @@
+mod channel;
 pub mod sans_io;
 
 use std::error::Error;
@@ -11,6 +12,7 @@ use std::task::Poll::*;
 use futures_io::{AsyncRead, AsyncWrite};
 
 use crate::errors;
+pub use channel::*;
 
 pub(crate) fn wrap_eof(v: IoResult<usize>) -> IoResult<usize> {
     match v {
@@ -184,7 +186,11 @@ pub(crate) struct AsyncReadWrapper<'a, 'b> {
 
 impl<'a, 'b> AsyncReadWrapper<'a, 'b> {
     pub(crate) fn new(cx: &'a mut Context<'b>, reader: Pin<&'a mut dyn AsyncRead>) -> Self {
-        Self { cx, reader, pending: false }
+        Self {
+            cx,
+            reader,
+            pending: false,
+        }
     }
 
     pub(crate) fn finish(self) -> bool {
@@ -223,7 +229,11 @@ pub(crate) struct AsyncWriteWrapper<'a, 'b> {
 
 impl<'a, 'b> AsyncWriteWrapper<'a, 'b> {
     pub(crate) fn new(cx: &'a mut Context<'b>, writer: Pin<&'a mut dyn AsyncWrite>) -> Self {
-        Self { cx, writer, pending: false }
+        Self {
+            cx,
+            writer,
+            pending: false,
+        }
     }
 
     pub(crate) fn finish(self) -> bool {
@@ -333,7 +343,7 @@ pub(crate) fn print_hex(s: &[u8]) -> impl '_ + Display {
 
     impl Display for S<'_> {
         fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-            for &v in s.0 {
+            for &v in self.0 {
                 write!(f, "{v:02X}")?;
             }
             Ok(())

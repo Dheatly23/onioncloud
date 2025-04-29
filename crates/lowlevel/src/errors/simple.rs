@@ -73,3 +73,20 @@ display2debug! {VersionsNegotiateError}
 pub struct NoFreeCircIDError;
 
 display2debug! {NoFreeCircIDError}
+
+#[derive(Error)]
+#[error("task handle returns an error")]
+pub struct HandleError;
+
+display2debug! {HandleError}
+
+#[derive(Error)]
+#[non_exhaustive]
+pub enum SendControlMsgError {
+    #[error("failed to send control message: {0}")]
+    HandleError(#[from] HandleError),
+    #[error("failed to send control message: task handle finished")]
+    HandleFinalized,
+}
+
+display2debug! {SendControlMsgError}

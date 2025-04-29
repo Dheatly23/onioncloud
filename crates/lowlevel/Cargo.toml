@@ -11,7 +11,10 @@ cipher.workspace = true
 crossbeam-queue.workspace = true
 futures-core.workspace = true
 futures-io.workspace = true
+futures-sink.workspace = true
+futures-util.workspace = true
 once_cell.workspace = true
+pin-project.workspace = true
 rand.workspace = true
 rustls.workspace = true
 scopeguard.workspace = true
@@ -27,6 +30,7 @@ features = [
 workspace = true
 optional = true
 features = [
+  "io-util",
   "net",
   "rt",
   "time",

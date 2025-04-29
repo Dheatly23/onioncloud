@@ -4,9 +4,9 @@ use std::sync::Arc;
 use once_cell::sync::OnceCell;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::{ClientConfig, ClientConnection};
-use rustls::crypto::rink::default_provider;
-use rustls::pki_types::{CertificateDer, ServerName, SignatureScheme, UnixTime};
-use rustls::{DigitallySignedStruct, Error as RustlsError};
+use rustls::crypto::ring::default_provider;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 
 fn get_client_cfg() -> Result<Arc<ClientConfig>, RustlsError> {
     static CFG: OnceCell<Arc<ClientConfig>> = OnceCell::new();
@@ -15,7 +15,7 @@ fn get_client_cfg() -> Result<Arc<ClientConfig>, RustlsError> {
     CFG.get_or_try_init(|| {
         Ok(Arc::new(
             ClientConfig::builder_with_provider(Arc::new(default_provider()))
-                .with_safe_default_protocol_versions()
+                .with_safe_default_protocol_versions()?
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(NullCertVerifier))
                 .with_no_client_auth(),
@@ -40,7 +40,7 @@ impl ServerCertVerifier for NullCertVerifier {
         _: &ServerName<'_>,
         _: &[u8],
         _: UnixTime,
-    ) -> Result<ServerCertVerified, Error> {
+    ) -> Result<ServerCertVerified, RustlsError> {
         Ok(ServerCertVerified::assertion())
     }
 
@@ -49,7 +49,7 @@ impl ServerCertVerifier for NullCertVerifier {
         _: &[u8],
         _: &CertificateDer<'_>,
         _: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, Error> {
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
         Ok(HandshakeSignatureValid::assertion())
     }
 
@@ -58,7 +58,7 @@ impl ServerCertVerifier for NullCertVerifier {
         _: &[u8],
         _: &CertificateDer<'_>,
         _: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, Error> {
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
         Ok(HandshakeSignatureValid::assertion())
     }
 
