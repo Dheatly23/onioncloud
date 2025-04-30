@@ -97,7 +97,7 @@ impl<C: ChannelController> TestController<C> {
 
     /// Run controller handler.
     pub fn process(&mut self) -> Result<ProcessedChannelOutput, C::Error> {
-        let mut ret = if self.timeout.is_some_and(|t| t >= self.time) {
+        let mut ret = if self.timeout.as_ref().is_some_and(|t| *t <= self.time) {
             self.timeout = None;
             // Event: timeout
             self.controller.handle((

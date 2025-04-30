@@ -62,10 +62,10 @@ mod tests {
     use std::convert::Infallible;
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use test_log::test;
-    use tracing::{info, instrument, warn};
+    use tracing::{debug, info, instrument, warn};
 
     use crate::cache::{CellCache, StandardCellCache};
     use crate::cell::dispatch::{CellReader, CellType, WithCellConfig};
@@ -76,21 +76,6 @@ mod tests {
     use crate::errors;
     use crate::linkver::StandardLinkver;
     use crate::util::{TestController, err_is_would_block, print_list};
-
-    pub(crate) struct SimpleConfig {
-        pub(crate) id: RelayId,
-        pub(crate) addrs: Cow<'static, [SocketAddr]>,
-    }
-
-    impl ChannelConfig for SimpleConfig {
-        fn peer_id(&self) -> &RelayId {
-            &self.id
-        }
-
-        fn peer_addrs(&self) -> Cow<'_, [SocketAddr]> {
-            Cow::Borrowed(&self.addrs)
-        }
-    }
 
     #[derive(Default)]
     struct LinkCfg {
@@ -142,21 +127,53 @@ mod tests {
         }
     }
 
+    pub(crate) struct SimpleConfig {
+        pub(crate) id: RelayId,
+        pub(crate) addrs: Cow<'static, [SocketAddr]>,
+    }
+
+    impl ChannelConfig for SimpleConfig {
+        fn peer_id(&self) -> &RelayId {
+            &self.id
+        }
+
+        fn peer_addrs(&self) -> Cow<'_, [SocketAddr]> {
+            Cow::Borrowed(&self.addrs)
+        }
+    }
+
+    pub(crate) struct VersionOnlyConfig {
+        pub(crate) cfg: SimpleConfig,
+        pub(crate) delay: bool,
+    }
+
+    impl ChannelConfig for VersionOnlyConfig {
+        fn peer_id(&self) -> &RelayId {
+            self.cfg.peer_id()
+        }
+
+        fn peer_addrs(&self) -> Cow<'_, [SocketAddr]> {
+            self.cfg.peer_addrs()
+        }
+    }
+
     pub(crate) struct VersionOnlyController {
         cell_read: CellReader<Arc<LinkCfg>>,
         cell_write: Option<CellWriter<Cell>>,
         link_cfg: Arc<LinkCfg>,
+        delay: bool,
+        target_time: Option<Instant>,
         finished: bool,
     }
 
     impl ChannelController for VersionOnlyController {
         type Error = ControllerError;
-        type Config = SimpleConfig;
+        type Config = VersionOnlyConfig;
         type ControlMsg = Infallible;
         type Cell = Cell;
         type CircMeta = ();
 
-        fn new(_: &Self::Config) -> Self {
+        fn new(cfg: &Self::Config) -> Self {
             let link_cfg = Arc::new(LinkCfg::default());
 
             Self {
@@ -167,6 +184,8 @@ mod tests {
                 )),
                 link_cfg,
                 finished: false,
+                target_time: None,
+                delay: cfg.delay,
             }
         }
     }
@@ -177,6 +196,16 @@ mod tests {
 
         #[instrument(skip_all)]
         fn handle(&mut self, mut input: ChannelInput<'a, 'b, Cell, ()>) -> Self::Return {
+            if self.delay {
+                info!("delay active: setting timeout");
+                let mut ret = ChannelOutput::new();
+                let time = *self
+                    .target_time
+                    .get_or_insert_with(|| input.time() + Duration::from_secs(5));
+                ret.timeout(time);
+                return Ok(ret);
+            }
+
             if let Some(h) = &mut self.cell_write {
                 match h.handle(input.writer()) {
                     Ok(()) => {
@@ -212,8 +241,16 @@ mod tests {
     impl<'a, 'b> Handle<(Timeout, ChannelInput<'a, 'b, Cell, ()>)> for VersionOnlyController {
         type Return = Result<ChannelOutput, ControllerError>;
 
-        fn handle(&mut self, _: (Timeout, ChannelInput<'a, 'b, Cell, ()>)) -> Self::Return {
-            panic!("controller never set timeout");
+        fn handle(
+            &mut self,
+            (_, input): (Timeout, ChannelInput<'a, 'b, Cell, ()>),
+        ) -> Self::Return {
+            debug!("handling timeout");
+            if !self.delay || self.target_time.is_none() {
+                panic!("controller does not set timeout");
+            }
+            self.delay = false;
+            self.handle(input)
         }
     }
 
@@ -233,24 +270,56 @@ mod tests {
     #[test]
     fn test_versions_controller() {
         let mut v = TestController::new(
-            VersionOnlyController::new(&SimpleConfig {
-                id: RelayId::default(),
-                addrs: Cow::Borrowed(&[]),
+            VersionOnlyController::new(&VersionOnlyConfig {
+                cfg: SimpleConfig {
+                    id: RelayId::default(),
+                    addrs: Cow::Borrowed(&[]),
+                },
+                delay: false,
             }),
             vec![],
         );
 
         v.send_stream().extend([0, 0, 7, 0, 2, 0, 4]);
-        loop {
-            let ret = v.process().unwrap();
-            if ret.shutdown {
-                break;
-            }
 
-            v.advance_time(Duration::from_secs(1));
-        }
+        let ret = v.process().unwrap();
+        assert!(ret.shutdown);
 
         assert_eq!(v.controller().link_cfg.linkver.as_ref().version(), 4);
+    }
+
+    #[test]
+    fn test_versions_controller_timeout() {
+        let mut v = TestController::new(
+            VersionOnlyController::new(&VersionOnlyConfig {
+                cfg: SimpleConfig {
+                    id: RelayId::default(),
+                    addrs: Cow::Borrowed(&[]),
+                },
+                delay: true,
+            }),
+            vec![],
+        );
+
+        v.send_stream().extend([0, 0, 7, 0, 2, 0, 5]);
+
+        let ret = v.process().unwrap();
+        assert!(!ret.shutdown);
+        info!("time: {:?} timeout: {:?}", v.cur_time(), v.timeout());
+
+        v.advance_time(Duration::from_secs(1));
+        info!("advancing time. Time: {:?}", v.cur_time());
+        let ret = v.process().unwrap();
+        assert!(!ret.shutdown);
+        info!("time: {:?} timeout: {:?}", v.cur_time(), v.timeout());
+
+        v.advance_time(Duration::from_secs(4));
+        info!("advancing time. Time: {:?}", v.cur_time());
+        let ret = v.process().unwrap();
+        assert!(ret.shutdown);
+        info!("time: {:?} timeout: {:?}", v.cur_time(), v.timeout());
+
+        assert_eq!(v.controller().link_cfg.linkver.as_ref().version(), 5);
     }
 
     #[cfg(feature = "tokio")]
@@ -282,12 +351,15 @@ mod tests {
             Err(e) => panic!("{e}"),
         };
 
-        let cfg = SimpleConfig {
-            id,
-            addrs: addrs.into(),
-        };
-
         let mut v = ChannelManager::<_, VersionOnlyController>::new(TokioRuntime);
+
+        let cfg = VersionOnlyConfig {
+            cfg: SimpleConfig {
+                id,
+                addrs: addrs.into(),
+            },
+            delay: true,
+        };
         v.create(cfg, ()).completion().await.unwrap();
     }
 }

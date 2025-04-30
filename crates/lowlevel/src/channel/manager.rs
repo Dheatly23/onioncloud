@@ -214,7 +214,7 @@ async fn handle_channel<R: Runtime, C: ChannelController>(
     let stream = match stream {
         Ok(v) => v,
         Err(e) => {
-            error!(error = format!("{}", e), "cannot connect to peer");
+            error!(error = format_args!("{}", e), "cannot connect to peer");
             return false;
         }
     };
@@ -222,7 +222,7 @@ async fn handle_channel<R: Runtime, C: ChannelController>(
     let peer_addr = match stream.peer_addr() {
         Ok(v) => v,
         Err(e) => {
-            error!(error = format!("{}", e), "cannot get peer address");
+            error!(error = format_args!("{}", e), "cannot get peer address");
             return false;
         }
     };
@@ -231,7 +231,7 @@ async fn handle_channel<R: Runtime, C: ChannelController>(
     let tls = match setup_client(peer_addr.ip()) {
         Ok(v) => v,
         Err(e) => {
-            error!(error = format!("{}", e), "rustls setup");
+            error!(error = format_args!("{}", e), "rustls setup");
             return false;
         }
     };
@@ -253,7 +253,7 @@ async fn handle_channel<R: Runtime, C: ChannelController>(
     match fut.await {
         Ok(()) => true,
         Err(e) => {
-            error!(error = format!("{}", e), "channel error");
+            error!(error = format_args!("{}", e), "channel error");
             false
         }
     }
@@ -295,6 +295,7 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
         const FLAG_WRITE: u8 = 1 << 1;
         const FLAG_TIMEOUT: u8 = 1 << 2;
         const FLAG_CTRLMSG: u8 = 1 << 3;
+        const FLAG_EMPTY_HANDLE: u8 = 1 << 7;
 
         'main: loop {
             let _guard = this.span.enter();
@@ -433,13 +434,13 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
 
             trace!(pending);
 
-            const fn match_out<E>(v: &Result<ChannelOutput, E>) -> bool {
+            const fn match_out<E>(v: &Option<Result<ChannelOutput, E>>) -> bool {
                 matches!(
                     v,
-                    Ok(ChannelOutput {
+                    Some(Ok(ChannelOutput {
                         shutdown: false,
                         ..
-                    })
+                    }))
                 )
             }
 
@@ -475,11 +476,15 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                 }
             }
 
-            let mut ret = ret.unwrap_or_else(|| {
+            if ret.is_none() && pending & FLAG_EMPTY_HANDLE == 0 {
                 // No event
-                this.cont
-                    .handle(ChannelInput::new(this.tls, Some(cx), circ_map, time()))
-            });
+                pending |= FLAG_EMPTY_HANDLE;
+                ret =
+                    Some(
+                        this.cont
+                            .handle(ChannelInput::new(this.tls, Some(cx), circ_map, time())),
+                    );
+            }
 
             if pending & FLAG_CTRLMSG == 0 {
                 while match_out(&ret) {
@@ -499,14 +504,14 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                     };
 
                     // Event: control message
-                    ret = this.cont.handle((
+                    ret = Some(this.cont.handle((
                         ControlMsg(msg),
                         ChannelInput::new(this.tls, Some(cx), circ_map, time()),
-                    ));
+                    )));
                 }
             }
 
-            let ret = match ret {
+            let ret = match ret.transpose() {
                 Ok(v) => v,
                 Err(e) => {
                     warn!("shutting down: controller error");
@@ -515,35 +520,44 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                 }
             };
 
-            if ret.shutdown {
-                info!("controller requesting graceful shutdown");
-                *this.state = State::ReqShutdown;
-                continue;
-            } else if let Some(t) = ret.timeout {
-                debug!(timeout = format!("{:?}", t), "resetting timer");
-                let f = loop {
-                    if let Some(f) = this.timer.as_mut().as_pin_mut() {
-                        break f;
-                    }
-                    this.timer.set(Some(this.runtime.timer(t)));
-                };
+            match ret {
+                Some(ChannelOutput { shutdown: true, .. }) => {
+                    info!("controller requesting graceful shutdown");
+                    *this.state = State::ReqShutdown;
+                    continue;
+                }
+                Some(ChannelOutput {
+                    timeout: Some(t), ..
+                }) => {
+                    debug!(timeout = format!("{:?}", t), "resetting timer");
+                    let f = loop {
+                        if let Some(f) = this.timer.as_mut().as_pin_mut() {
+                            break f;
+                        }
+                        this.timer.set(Some(this.runtime.timer(t)));
+                    };
 
-                f.reset(t);
-                *this.timer_finished = false;
-                pending &= !FLAG_TIMEOUT;
-            } else {
-                debug!("clearing timer");
-                // Regardless, mark timer as "finished"
-                *this.timer_finished = true;
+                    f.reset(t);
+                    *this.timer_finished = false;
+                    pending &= !FLAG_TIMEOUT;
+                }
+                Some(ChannelOutput { timeout: None, .. }) => {
+                    debug!("clearing timer");
+                    // Regardless, mark timer as "finished"
+                    *this.timer_finished = true;
+                }
+                _ => (),
             }
 
             let mut retry = false;
             if pending & FLAG_READ == 0 && this.tls.0.wants_read() {
                 debug!("repolling: TLS wants to read");
+                pending &= !FLAG_EMPTY_HANDLE; // Make sure controller will handle
                 retry = true;
             }
             if pending & FLAG_WRITE == 0 && this.tls.0.wants_write() {
                 debug!("repolling: TLS wants to write");
+                pending &= !FLAG_EMPTY_HANDLE; // Make sure controller will handle
                 retry = true;
             }
             if pending & FLAG_TIMEOUT == 0 && !*this.timer_finished && this.timer.is_some() {
