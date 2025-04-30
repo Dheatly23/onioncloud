@@ -196,16 +196,6 @@ mod tests {
 
         #[instrument(skip_all)]
         fn handle(&mut self, mut input: ChannelInput<'a, 'b, Cell, ()>) -> Self::Return {
-            if self.delay {
-                info!("delay active: setting timeout");
-                let mut ret = ChannelOutput::new();
-                let time = *self
-                    .target_time
-                    .get_or_insert_with(|| input.time() + Duration::from_secs(5));
-                ret.timeout(time);
-                return Ok(ret);
-            }
-
             if let Some(h) = &mut self.cell_write {
                 match h.handle(input.writer()) {
                     Ok(()) => {
@@ -215,6 +205,16 @@ mod tests {
                     Err(e) if err_is_would_block(&e) => (),
                     Err(e) => return Err(e.into()),
                 }
+            }
+
+            if self.delay {
+                info!("delay active: setting timeout");
+                let mut ret = ChannelOutput::new();
+                let time = *self
+                    .target_time
+                    .get_or_insert_with(|| input.time() + Duration::from_secs(5));
+                ret.timeout(time);
+                return Ok(ret);
             }
 
             let mut cell = match self.cell_read.handle(input.reader()) {

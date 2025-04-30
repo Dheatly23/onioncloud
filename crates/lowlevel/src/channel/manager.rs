@@ -478,13 +478,14 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
 
             if ret.is_none() && pending & FLAG_EMPTY_HANDLE == 0 {
                 // No event
-                pending |= FLAG_EMPTY_HANDLE;
                 ret =
                     Some(
                         this.cont
                             .handle(ChannelInput::new(this.tls, Some(cx), circ_map, time())),
                     );
             }
+            // Mark empty handle as true, because either timeout already fires or it has been handled previously.
+            pending |= FLAG_EMPTY_HANDLE;
 
             if pending & FLAG_CTRLMSG == 0 {
                 while match_out(&ret) {
