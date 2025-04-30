@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 
 use thiserror::Error;
@@ -90,3 +91,27 @@ pub enum SendControlMsgError {
 }
 
 display2debug! {SendControlMsgError}
+
+pub struct RelayIdParseError(pub(crate) ParseRelayIdInner);
+
+impl Display for RelayIdParseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        Display::fmt(&self.0, f)
+    }
+}
+
+display2debug! {RelayIdParseError}
+
+impl Error for RelayIdParseError {}
+
+#[derive(Error)]
+pub(crate) enum ParseRelayIdInner {
+    #[error("cannot represent relay ID from empty string")]
+    Empty,
+    #[error("string is too short")]
+    TooShort,
+    #[error("invalid digit found in string")]
+    InvalidDigit,
+}
+
+display2debug! {ParseRelayIdInner}

@@ -65,7 +65,7 @@ mod tests {
     use std::time::Duration;
 
     use test_log::test;
-    use tracing::{info, instrument};
+    use tracing::{info, instrument, warn};
 
     use crate::cache::{CellCache, StandardCellCache};
     use crate::cell::dispatch::{CellReader, CellType, WithCellConfig};
@@ -256,16 +256,35 @@ mod tests {
     #[cfg(feature = "tokio")]
     #[test(tokio::test)]
     async fn test_versions_controller_async() {
+        use std::env::{VarError, var};
+
         use crate::channel::manager::ChannelManager;
+        use crate::crypto::relay;
         use crate::runtime::tokio::TokioRuntime;
 
-        // Relay: 529D9C84E0D6A6141D409C1B02DB81B2B8E8E973
+        let id = match var("RELAY_ID") {
+            Ok(v) => relay::from_str(&v).unwrap(),
+            Err(VarError::NotPresent) => {
+                warn!("skipping test: environment variable RELAY_ID not set");
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let addrs = match var("RELAY_ADDRS") {
+            Ok(v) => v
+                .split(',')
+                .map(|s| s.parse::<SocketAddr>().unwrap())
+                .collect::<Vec<_>>(),
+            Err(VarError::NotPresent) => {
+                warn!("skipping test: environment variable RELAY_ADDRS not set");
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        };
+
         let cfg = SimpleConfig {
-            id: [
-                0x52, 0x9D, 0x9C, 0x84, 0xE0, 0xD6, 0xA6, 0x14, 0x1D, 0x40, 0x9C, 0x1B, 0x02, 0xDB,
-                0x81, 0xB2, 0xB8, 0xE8, 0xE9, 0x73,
-            ],
-            addrs: vec!["103.193.179.233:443".parse().unwrap()].into(),
+            id,
+            addrs: addrs.into(),
         };
 
         let mut v = ChannelManager::<_, VersionOnlyController>::new(TokioRuntime);

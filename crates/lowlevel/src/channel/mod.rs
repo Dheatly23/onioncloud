@@ -84,7 +84,7 @@ impl<'a, 'b, Cell, Meta> ChannelInput<'a, 'b, Cell, Meta> {
 
     /// Get channel [`CircuitMapRef`].
     pub fn circ_map(&mut self) -> CircuitMapRef<'_, 'b, Cell, Meta> {
-        CircuitMapRef::new(self.cx.as_deref_mut(), &mut self.map)
+        CircuitMapRef::new(self.cx.as_deref_mut(), self.map)
     }
 }
 
@@ -96,6 +96,7 @@ pub struct ChannelOutput {
 
 impl ChannelOutput {
     /// Create new [`ChannelOutput`].
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             timeout: None,
@@ -266,15 +267,16 @@ impl<Cell, Meta> CircuitMap<Cell, Meta> {
         id_32bit: bool,
         meta: impl FnOnce(NonZeroU32) -> Meta,
     ) -> Result<(NewCircuit<Cell>, &mut CircuitData<Cell, Meta>), errors::NoFreeCircIDError> {
-        fn f<'a, Cell, Meta>(
-            map: &'a mut HashMap<NonZeroU32, CircuitData<Cell, Meta>>,
+        #[allow(clippy::type_complexity)]
+        fn f<Cell, Meta>(
+            map: &mut HashMap<NonZeroU32, CircuitData<Cell, Meta>>,
             set_msb: bool,
             n_attempts: usize,
             id_32bit: bool,
         ) -> Result<
             (
                 NonZeroU32,
-                VacantEntry<'a, NonZeroU32, CircuitData<Cell, Meta>>,
+                VacantEntry<'_, NonZeroU32, CircuitData<Cell, Meta>>,
             ),
             errors::NoFreeCircIDError,
         > {
@@ -291,6 +293,7 @@ impl<Cell, Meta> CircuitMap<Cell, Meta> {
                 let id = NonZeroU32::new(id).expect("ID must be nonzero");
 
                 // SAFETY: Lifetime extension because idk non-linear lifetime?
+                #[allow(clippy::deref_addrof)]
                 let map = unsafe { &mut *(&raw mut *map) };
 
                 if let Entry::Vacant(e) = map.entry(id) {

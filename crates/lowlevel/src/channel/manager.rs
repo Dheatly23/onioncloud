@@ -47,6 +47,7 @@ pub struct ChannelRef<'a, R: Runtime, C: ChannelController, M> {
 
 pub struct ChannelManager<R: Runtime, C: ChannelController, M = ()> {
     runtime: R,
+    #[allow(clippy::type_complexity)]
     channels: HashMap<RelayId, Pin<Box<Channel<R, C, M>>>>,
 }
 
@@ -65,7 +66,7 @@ impl<R: Runtime, C: ChannelController, M> ChannelManager<R, C, M> {
         })
     }
 
-    pub fn create<'a>(&'a mut self, cfg: C::Config, meta: M) -> ChannelRef<'a, R, C, M>
+    pub fn create(&mut self, cfg: C::Config, meta: M) -> ChannelRef<'_, R, C, M>
     where
         R: 'static + Clone,
         C: 'static,
@@ -587,6 +588,6 @@ impl Write for TlsWrapper {
 
 impl Stream for TlsWrapper {
     fn link_cert(&self) -> Option<&[u8]> {
-        self.0.peer_certificates()?.get(0).map(|v| &v[..])
+        self.0.peer_certificates()?.first().map(|v| &v[..])
     }
 }
