@@ -59,6 +59,18 @@ features = [
 proptest.workspace = true
 proptest-state-machine.workspace = true
 
+[dev-dependencies.test-log]
+workspace = true
+features = [
+  "trace",
+]
+
+[dev-dependencies.tokio]
+workspace = true
+features = [
+  "macros",
+]
+
 [target.'cfg(loom)'.dependencies]
 loom.workspace = true
 

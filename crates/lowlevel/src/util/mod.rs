@@ -353,6 +353,22 @@ pub(crate) fn print_hex(s: &[u8]) -> impl '_ + Display {
     S(s)
 }
 
+pub(crate) fn print_list<T: Display>(s: &[T]) -> impl '_ + Display {
+    struct S<'a, T>(&'a [T]);
+
+    impl<T: Display> Display for S<'_, T> {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            write!(f, "[")?;
+            for (i, v) in self.0.iter().enumerate() {
+                write!(f, "{}{v}", if i == 0 { "" } else { ", " })?;
+            }
+            write!(f, "]")
+        }
+    }
+
+    S(s)
+}
+
 #[cfg(test)]
 pub(crate) use tests::*;
 

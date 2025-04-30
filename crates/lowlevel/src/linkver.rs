@@ -119,6 +119,12 @@ pub struct StandardLinkver {
     pub inner: Linkver,
 }
 
+impl AsRef<Linkver> for StandardLinkver {
+    fn as_ref(&self) -> &Linkver {
+        &self.inner
+    }
+}
+
 impl Default for StandardLinkver {
     fn default() -> Self {
         Self::new()

@@ -50,3 +50,225 @@ pub trait ChannelController:
 
     fn new(config: &Self::Config) -> Self;
 }
+
+#[cfg(test)]
+pub(crate) use tests::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::borrow::Cow;
+    use std::convert::Infallible;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use test_log::test;
+    use tracing::{info, instrument};
+
+    use crate::cache::{CellCache, StandardCellCache};
+    use crate::cell::dispatch::{CellReader, CellType, WithCellConfig};
+    use crate::cell::versions::Versions;
+    use crate::cell::writer::CellWriter;
+    use crate::cell::{Cell, CellHeader, FixedCell, cast};
+    use crate::crypto::relay::RelayId;
+    use crate::errors;
+    use crate::linkver::StandardLinkver;
+    use crate::util::{TestController, err_is_would_block, print_list};
+
+    pub(crate) struct SimpleConfig {
+        pub(crate) id: RelayId,
+        pub(crate) addrs: Cow<'static, [SocketAddr]>,
+    }
+
+    impl ChannelConfig for SimpleConfig {
+        fn peer_id(&self) -> &RelayId {
+            &self.id
+        }
+
+        fn peer_addrs(&self) -> Cow<'_, [SocketAddr]> {
+            Cow::Borrowed(&self.addrs)
+        }
+    }
+
+    #[derive(Default)]
+    struct LinkCfg {
+        linkver: StandardLinkver,
+        cache: StandardCellCache,
+    }
+
+    impl WithCellConfig for LinkCfg {
+        fn is_circ_id_4bytes(&self) -> bool {
+            self.linkver.is_circ_id_4bytes()
+        }
+
+        fn cell_type(&self, header: &CellHeader) -> Result<CellType, errors::InvalidCellHeader> {
+            self.linkver.cell_type(header)
+        }
+    }
+
+    impl CellCache for LinkCfg {
+        fn get_cached(&self) -> FixedCell {
+            self.cache.get_cached()
+        }
+
+        fn cache_cell(&self, cell: FixedCell) {
+            self.cache.cache_cell(cell);
+        }
+    }
+
+    #[derive(thiserror::Error, Debug)]
+    pub(crate) enum ControllerError {
+        #[error(transparent)]
+        Io(#[from] IoError),
+        #[error(transparent)]
+        Rustls(#[from] RustlsError),
+        #[error(transparent)]
+        InvalidCellHeader(#[from] errors::InvalidCellHeader),
+        #[error(transparent)]
+        CellFormatError(#[from] errors::CellFormatError),
+        #[error(transparent)]
+        VersionsNegotiate(#[from] errors::VersionsNegotiateError),
+    }
+
+    impl From<errors::CellError> for ControllerError {
+        fn from(v: errors::CellError) -> Self {
+            match v {
+                errors::CellError::Io(v) => Self::Io(v),
+                errors::CellError::InvalidCellHeader(v) => Self::InvalidCellHeader(v),
+                errors::CellError::CellFormatError(v) => Self::CellFormatError(v),
+            }
+        }
+    }
+
+    pub(crate) struct VersionOnlyController {
+        cell_read: CellReader<Arc<LinkCfg>>,
+        cell_write: Option<CellWriter<Cell>>,
+        link_cfg: Arc<LinkCfg>,
+        finished: bool,
+    }
+
+    impl ChannelController for VersionOnlyController {
+        type Error = ControllerError;
+        type Config = SimpleConfig;
+        type ControlMsg = Infallible;
+        type Cell = Cell;
+        type CircMeta = ();
+
+        fn new(_: &Self::Config) -> Self {
+            let link_cfg = Arc::new(LinkCfg::default());
+
+            Self {
+                cell_read: CellReader::new(link_cfg.clone()),
+                cell_write: Some(CellWriter::new(
+                    link_cfg.linkver.as_ref().versions_cell().into(),
+                    link_cfg.linkver.is_circ_id_4bytes(),
+                )),
+                link_cfg,
+                finished: false,
+            }
+        }
+    }
+
+    // NOTE: Cannot use Self:: syntax here because of cycles.
+    impl<'a, 'b> Handle<ChannelInput<'a, 'b, Cell, ()>> for VersionOnlyController {
+        type Return = Result<ChannelOutput, ControllerError>;
+
+        #[instrument(skip_all)]
+        fn handle(&mut self, mut input: ChannelInput<'a, 'b, Cell, ()>) -> Self::Return {
+            if let Some(h) = &mut self.cell_write {
+                match h.handle(input.writer()) {
+                    Ok(()) => {
+                        info!("writing version cell finished");
+                        self.cell_write = None;
+                    }
+                    Err(e) if err_is_would_block(&e) => (),
+                    Err(e) => return Err(e.into()),
+                }
+            }
+
+            let mut cell = match self.cell_read.handle(input.reader()) {
+                Ok(v) => Some(v),
+                Err(e) if err_is_would_block(&e) => None,
+                Err(e) => return Err(e.into()),
+            };
+            if let Some(cell) = cast::<Versions>(&mut cell)? {
+                info!("received VERSIONS: {}", print_list(cell.data()));
+                self.link_cfg.linkver.as_ref().versions_negotiate(cell)?;
+                info!(
+                    "version negotiated: {}",
+                    self.link_cfg.linkver.as_ref().version()
+                );
+                self.finished = true;
+            }
+
+            let mut ret = ChannelOutput::new();
+            ret.shutdown(self.finished);
+            Ok(ret)
+        }
+    }
+
+    impl<'a, 'b> Handle<(Timeout, ChannelInput<'a, 'b, Cell, ()>)> for VersionOnlyController {
+        type Return = Result<ChannelOutput, ControllerError>;
+
+        fn handle(&mut self, _: (Timeout, ChannelInput<'a, 'b, Cell, ()>)) -> Self::Return {
+            panic!("controller never set timeout");
+        }
+    }
+
+    impl<'a, 'b> Handle<(ControlMsg<Infallible>, ChannelInput<'a, 'b, Cell, ()>)>
+        for VersionOnlyController
+    {
+        type Return = Result<ChannelOutput, ControllerError>;
+
+        fn handle(
+            &mut self,
+            _: (ControlMsg<Infallible>, ChannelInput<'a, 'b, Cell, ()>),
+        ) -> Self::Return {
+            panic!("controller should never get any message");
+        }
+    }
+
+    #[test]
+    fn test_versions_controller() {
+        let mut v = TestController::new(
+            VersionOnlyController::new(&SimpleConfig {
+                id: RelayId::default(),
+                addrs: Cow::Borrowed(&[]),
+            }),
+            vec![],
+        );
+
+        v.send_stream().extend([0, 0, 7, 0, 2, 0, 4]);
+        loop {
+            let ret = v.process().unwrap();
+            if ret.shutdown {
+                break;
+            }
+
+            v.advance_time(Duration::from_secs(1));
+        }
+
+        assert_eq!(v.controller().link_cfg.linkver.as_ref().version(), 4);
+    }
+
+    #[cfg(feature = "tokio")]
+    #[test(tokio::test)]
+    async fn test_versions_controller_async() {
+        use crate::channel::manager::ChannelManager;
+        use crate::runtime::tokio::TokioRuntime;
+
+        // Relay: 529D9C84E0D6A6141D409C1B02DB81B2B8E8E973
+        let cfg = SimpleConfig {
+            id: [
+                0x52, 0x9D, 0x9C, 0x84, 0xE0, 0xD6, 0xA6, 0x14, 0x1D, 0x40, 0x9C, 0x1B, 0x02, 0xDB,
+                0x81, 0xB2, 0xB8, 0xE8, 0xE9, 0x73,
+            ],
+            addrs: vec!["103.193.179.233:443".parse().unwrap()].into(),
+        };
+
+        let mut v = ChannelManager::<_, VersionOnlyController>::new(TokioRuntime);
+        v.create(cfg, ()).completion().await.unwrap();
+    }
+}

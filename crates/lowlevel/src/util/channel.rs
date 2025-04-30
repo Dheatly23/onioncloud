@@ -6,6 +6,9 @@ use std::time::{Duration, Instant};
 use crate::channel::controller::{ChannelController, ControlMsg, Timeout};
 use crate::channel::{ChannelInput, CircuitMap, Stream};
 
+/// Test controller.
+///
+/// Useful for testing [`ChannelController`].
 pub struct TestController<C: ChannelController> {
     stream: TestStream,
     time: Instant,
@@ -16,6 +19,11 @@ pub struct TestController<C: ChannelController> {
 }
 
 impl<C: ChannelController> TestController<C> {
+    /// Create new [`TestController`].
+    ///
+    /// # Parameters
+    /// - `controller` : Channel controller to be tested.
+    /// - `link_cert` : Link certificate.
     pub fn new(controller: C, link_cert: impl Into<Cow<'static, [u8]>>) -> Self {
         Self {
             stream: TestStream {
@@ -33,50 +41,71 @@ impl<C: ChannelController> TestController<C> {
         }
     }
 
+    /// Get reference to controller.
+    pub fn controller(&mut self) -> &mut C {
+        &mut self.controller
+    }
+
+    /// Get reference to [`CircuitMap`].
     pub fn circ_map(&mut self) -> &mut CircuitMap<C::Cell, C::CircMeta> {
         &mut self.circ_map
     }
 
+    /// Get current time.
     pub fn cur_time(&self) -> Instant {
         self.time
     }
 
+    /// Get timeout value (if any).
     pub fn timeout(&self) -> Option<Instant> {
         self.timeout
     }
 
+    /// Advance time.
     pub fn advance_time(&mut self, dur: Duration) {
         self.time += dur;
     }
 
+    /// Get reference to send stream.
+    ///
+    /// Stream is [`Read`] by controller.
     pub fn send_stream(&mut self) -> &mut VecDeque<u8> {
         &mut self.stream.send
     }
 
+    /// Get reference to receive stream.
+    ///
+    /// Stream is [`Write`] by controller.
     pub fn recv_stream(&mut self) -> &mut VecDeque<u8> {
         &mut self.stream.recv
     }
 
+    /// Close sending half of pipe.
     pub fn close_send(&mut self) {
         self.stream.send_eof = true;
     }
 
+    /// Close receiving half of pipe.
     pub fn close_recv(&mut self) {
         self.stream.recv_eof = true;
     }
 
+    /// Submit control message.
     pub fn submit_msg(&mut self, msg: C::ControlMsg) {
         self.ctrl_msgs.push(msg);
     }
 
+    /// Run controller handler.
     pub fn process(&mut self) -> Result<ProcessedChannelOutput, C::Error> {
         let mut ret = if self.timeout.is_some_and(|t| t >= self.time) {
             self.timeout = None;
+            // Event: timeout
             self.controller.handle((
                 Timeout,
                 ChannelInput::new(&mut self.stream, None, &mut self.circ_map, self.time),
             ))
         } else {
+            // No particular event
             self.controller.handle(ChannelInput::new(
                 &mut self.stream,
                 None,
@@ -90,6 +119,7 @@ impl<C: ChannelController> TestController<C> {
                 break;
             }
 
+            // Event: control message
             ret = self.controller.handle((
                 ControlMsg(m),
                 ChannelInput::new(&mut self.stream, None, &mut self.circ_map, self.time),
@@ -103,8 +133,10 @@ impl<C: ChannelController> TestController<C> {
     }
 }
 
+/// Wrapper type for [`ChannelOutput`](`crate::channel::ChannelOutput`).
 #[non_exhaustive]
 pub struct ProcessedChannelOutput {
+    /// [`true`] if controller request for shutdown.
     pub shutdown: bool,
 }
 

@@ -23,7 +23,7 @@ use crate::crypto::relay::RelayId;
 use crate::crypto::tls::setup_client;
 use crate::errors;
 use crate::runtime::{Runtime, Stream as _, Timer};
-use crate::util::{AsyncReadWrapper, AsyncWriteWrapper, print_hex};
+use crate::util::{AsyncReadWrapper, AsyncWriteWrapper, print_hex, print_list};
 
 struct ChannelInner<C: ChannelController> {
     config: C::Config,
@@ -197,12 +197,20 @@ where
     }
 }
 
-#[instrument(skip_all, fields(cfg.peer_id = %print_hex(cfg.config.peer_id()), cfg.link_addrs = format!("{:?}", &cfg.config.peer_addrs()[..])))]
+#[instrument(skip_all, fields(cfg.peer_id = %print_hex(cfg.config.peer_id())))]
 async fn handle_channel<R: Runtime, C: ChannelController>(
     runtime: R,
     cfg: Arc<ChannelInner<C>>,
 ) -> bool {
-    let stream = match runtime.connect(&cfg.config.peer_addrs()[..]).await {
+    let stream = {
+        let peer_addrs = cfg.config.peer_addrs();
+        debug!(
+            "connecting to peer at addresses: {}",
+            print_list(&peer_addrs)
+        );
+        runtime.connect(&peer_addrs[..]).await
+    };
+    let stream = match stream {
         Ok(v) => v,
         Err(e) => {
             error!(error = format!("{}", e), "cannot connect to peer");
@@ -217,6 +225,7 @@ async fn handle_channel<R: Runtime, C: ChannelController>(
             return false;
         }
     };
+    debug!("connected to peer at {peer_addr}");
 
     let tls = match setup_client(peer_addr.ip()) {
         Ok(v) => v,
@@ -401,16 +410,27 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                 }
             }
 
-            trace!(pending);
+            if *this.state == State::TlsShutdown && pending & (FLAG_READ | FLAG_WRITE) == 0 {
+                info!("shutting down: TLS shutdown finished");
+                *this.state = State::Shutdown;
+                continue 'main;
+            }
 
             if this.tls.0.is_handshaking() || *this.state == State::TlsShutdown {
+                if this.tls.0.is_handshaking() {
+                    debug!("pending: TLS handshaking");
+                } else {
+                    debug!("pending: TLS shutdown");
+                }
                 assert_ne!(
                     pending & (FLAG_READ | FLAG_WRITE),
                     0,
                     "TLS handshake pending but IO is not"
                 );
-                return Poll::Ready(Ok(()));
+                return Poll::Pending;
             }
+
+            trace!(pending);
 
             const fn match_out<E>(v: &Result<ChannelOutput, E>) -> bool {
                 matches!(
