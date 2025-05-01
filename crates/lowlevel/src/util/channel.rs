@@ -4,7 +4,7 @@ use std::io::{ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::time::{Duration, Instant};
 
 use crate::channel::controller::{ChannelController, ControlMsg, Timeout};
-use crate::channel::{ChannelInput, CircuitMap, Stream};
+use crate::channel::{ChannelInput, ChannelOutput, CircuitMap, Stream};
 
 /// Test controller.
 ///
@@ -97,34 +97,51 @@ impl<C: ChannelController> TestController<C> {
 
     /// Run controller handler.
     pub fn process(&mut self) -> Result<ProcessedChannelOutput, C::Error> {
-        let mut ret = if self.timeout.as_ref().is_some_and(|t| *t <= self.time) {
+        const fn match_out(v: &Option<ChannelOutput>) -> bool {
+            matches!(
+                v,
+                None | Some(ChannelOutput {
+                    shutdown: false,
+                    ..
+                })
+            )
+        }
+
+        let mut ret = None;
+
+        if self.timeout.as_ref().is_some_and(|t| *t <= self.time) {
             self.timeout = None;
             // Event: timeout
-            self.controller.handle((
+            ret = Some(self.controller.handle((
                 Timeout,
                 ChannelInput::new(&mut self.stream, None, &mut self.circ_map, self.time),
-            ))
-        } else {
+            ))?);
+        }
+
+        if match_out(&ret) {
+            for m in self.ctrl_msgs.drain(..) {
+                // Event: control message
+                ret = Some(self.controller.handle((
+                    ControlMsg(m),
+                    ChannelInput::new(&mut self.stream, None, &mut self.circ_map, self.time),
+                ))?);
+
+                if !match_out(&ret) {
+                    break;
+                }
+            }
+        }
+
+        let ret = match ret {
             // No particular event
-            self.controller.handle(ChannelInput::new(
+            None => self.controller.handle(ChannelInput::new(
                 &mut self.stream,
                 None,
                 &mut self.circ_map,
                 self.time,
-            ))
-        }?;
-
-        for m in self.ctrl_msgs.drain(..) {
-            if ret.shutdown {
-                break;
-            }
-
-            // Event: control message
-            ret = self.controller.handle((
-                ControlMsg(m),
-                ChannelInput::new(&mut self.stream, None, &mut self.circ_map, self.time),
-            ))?;
-        }
+            ))?,
+            Some(v) => v,
+        };
 
         self.timeout = ret.timeout;
         Ok(ProcessedChannelOutput {
@@ -133,7 +150,7 @@ impl<C: ChannelController> TestController<C> {
     }
 }
 
-/// Wrapper type for [`ChannelOutput`](`crate::channel::ChannelOutput`).
+/// Wrapper type for [`ChannelOutput`].
 #[non_exhaustive]
 pub struct ProcessedChannelOutput {
     /// [`true`] if controller request for shutdown.

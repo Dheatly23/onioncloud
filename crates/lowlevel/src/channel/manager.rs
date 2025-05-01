@@ -295,6 +295,7 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
         const FLAG_WRITE: u8 = 1 << 1;
         const FLAG_TIMEOUT: u8 = 1 << 2;
         const FLAG_CTRLMSG: u8 = 1 << 3;
+        const FLAG_FLUSH: u8 = 1 << 4;
         const FLAG_EMPTY_HANDLE: u8 = 1 << 7;
 
         'main: loop {
@@ -325,6 +326,18 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                     warn!("shutting down: TLS error");
                     *this.state = State::Shutdown;
                     return Poll::Ready(Err(e.into()));
+                }
+
+                if pending & FLAG_FLUSH == 0 {
+                    match this.stream.as_mut().poll_flush(cx) {
+                        Poll::Pending => pending |= FLAG_FLUSH,
+                        Poll::Ready(Ok(())) => (),
+                        Poll::Ready(Err(e)) => {
+                            warn!("shutting down: IO error");
+                            *this.state = State::Shutdown;
+                            return Poll::Ready(Err(e.into()));
+                        }
+                    }
                 }
 
                 let wants_write = pending & FLAG_WRITE == 0 && this.tls.0.wants_write();
@@ -367,13 +380,6 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                                 return Poll::Ready(Err(e.into()));
                             }
                         }
-                    }
-
-                    drop(wrapper);
-                    if let Poll::Ready(Err(e)) = this.stream.as_mut().poll_flush(cx) {
-                        warn!("shutting down: IO error");
-                        *this.state = State::Shutdown;
-                        return Poll::Ready(Err(e.into()));
                     }
                 }
 
@@ -432,12 +438,10 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                 return Poll::Pending;
             }
 
-            trace!(pending);
-
             const fn match_out<E>(v: &Option<Result<ChannelOutput, E>>) -> bool {
                 matches!(
                     v,
-                    Some(Ok(ChannelOutput {
+                    None | Some(Ok(ChannelOutput {
                         shutdown: false,
                         ..
                     }))
@@ -458,7 +462,9 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
             let mut time = None;
             let mut time = move || *time.get_or_insert_with(Instant::now);
             let mut ret = None;
-            if !*this.timer_finished {
+            if !*this.timer_finished && pending & FLAG_TIMEOUT == 0 {
+                pending |= FLAG_TIMEOUT;
+
                 if this
                     .timer
                     .as_mut()
@@ -471,21 +477,8 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                         Timeout,
                         ChannelInput::new(this.tls, Some(cx), circ_map, time()),
                     )));
-                } else {
-                    pending |= FLAG_TIMEOUT;
                 }
             }
-
-            if ret.is_none() && pending & FLAG_EMPTY_HANDLE == 0 {
-                // No event
-                ret =
-                    Some(
-                        this.cont
-                            .handle(ChannelInput::new(this.tls, Some(cx), circ_map, time())),
-                    );
-            }
-            // Mark empty handle as true, because either timeout already fires or it has been handled previously.
-            pending |= FLAG_EMPTY_HANDLE;
 
             if pending & FLAG_CTRLMSG == 0 {
                 while match_out(&ret) {
@@ -511,6 +504,17 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                     )));
                 }
             }
+
+            if ret.is_none() && pending & FLAG_EMPTY_HANDLE == 0 {
+                // No event
+                ret =
+                    Some(
+                        this.cont
+                            .handle(ChannelInput::new(this.tls, Some(cx), circ_map, time())),
+                    );
+            }
+            // Mark empty handle as true, because either timeout already fires or it has been handled previously.
+            pending |= FLAG_EMPTY_HANDLE;
 
             let ret = match ret.transpose() {
                 Ok(v) => v,
@@ -552,22 +556,22 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
 
             let mut retry = false;
             if pending & FLAG_READ == 0 && this.tls.0.wants_read() {
-                debug!("repolling: TLS wants to read");
+                trace!("repolling: TLS wants to read");
                 pending &= !FLAG_EMPTY_HANDLE; // Make sure controller will handle
                 retry = true;
             }
             if pending & FLAG_WRITE == 0 && this.tls.0.wants_write() {
-                debug!("repolling: TLS wants to write");
+                trace!("repolling: TLS wants to write");
                 pending &= !FLAG_EMPTY_HANDLE; // Make sure controller will handle
                 retry = true;
             }
             if pending & FLAG_TIMEOUT == 0 && !*this.timer_finished && this.timer.is_some() {
-                debug!("repolling: timer wants to be polled");
+                trace!("repolling: timer wants to be polled");
                 retry = true;
             }
-            trace!(pending, retry);
 
             if !retry {
+                trace!("all futures are pending");
                 // All futures are pending.
                 return Poll::Pending;
             }
