@@ -52,6 +52,7 @@ features = [
 [dependencies.zerocopy]
 workspace = true
 features = [
+  "derive",
   "std",
 ]
 

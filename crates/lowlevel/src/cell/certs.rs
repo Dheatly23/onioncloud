@@ -1,7 +1,113 @@
+use zerocopy::byteorder::big_endian::U16;
+use zerocopy::{FromBytes, Immutable, KnownLayout, SplitAt, Unaligned};
+
 use crate::cell::{
     Cell, CellHeader, CellLike, CellRef, TryFromCell, VariableCell, to_variable_with,
 };
 use crate::errors;
+
+/// CERTS header.
+#[derive(FromBytes, SplitAt, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct CertsHeader {
+    n_certs: u8,
+    data: [u8],
+}
+
+/// DST of a single certificate.
+#[derive(FromBytes, SplitAt, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct CertRef {
+    /// Certificate type.
+    ///
+    /// Used to identify what kind of certificate it is
+    ty: u8,
+
+    /// Length of payload.
+    length: U16,
+
+    /// Certificate content.
+    ///
+    /// This data is not validated, it is the responsibility of user
+    /// to validate it's valid for the given certificate type.
+    data: [u8],
+}
+
+/// Certificate data type.
+///
+/// # Example
+///
+/// ```
+/// use onioncloud_lowlevel::cell::certs::Cert;
+///
+/// let cert: Cert<Vec<u8>> = Cert {
+///     ty: 0,
+///     data: vec![0; 10],
+/// };
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Cert<T> {
+    /// Certificate type.
+    ///
+    /// Used to identify what kind of certificate it is
+    pub ty: u8,
+
+    /// Certificate content.
+    ///
+    /// It should be a byteslice-like value.
+    /// The data is not validated by CERTS, it is the responsibility of user
+    /// to validate it's valid for the given certificate type.
+    pub data: T,
+}
+
+impl<T: AsRef<[u8]>> AsRef<[u8]> for Cert<T> {
+    fn as_ref(&self) -> &[u8] {
+        self.data.as_ref()
+    }
+}
+
+impl<T> Cert<T> {
+    /// Create new [`Cert`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::cell::certs::Cert;
+    ///
+    /// let cert = Cert::<Vec<u8>>::new(0, vec![0; 10]);
+    /// ```
+    pub fn new(ty: u8, data: T) -> Self {
+        Self { ty, data }
+    }
+
+    /// Converts from `&Cert<T>` to `Cert<&T>`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::cell::certs::Cert;
+    ///
+    /// let cert = Cert::<Vec<u8>>::new(0, vec![0; 10]);
+    /// let cert = cert.as_ref();
+    /// ```
+    pub fn as_ref(&self) -> Cert<&T> {
+        Cert {
+            ty: self.ty,
+            data: &self.data,
+        }
+    }
+}
+
+impl<'a> From<&'a CertRef> for Cert<&'a [u8]> {
+    fn from(v: &'a CertRef) -> Self {
+        debug_assert_eq!(v.length.get() as usize, v.data.len());
+
+        Self {
+            ty: v.ty,
+            data: &v.data,
+        }
+    }
+}
 
 /// Represents a CERTS cell.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,26 +119,36 @@ impl From<Certs> for Cell {
     }
 }
 
-impl<T: AsRef<[u8]>> FromIterator<(u8, T)> for Certs {
-    fn from_iter<It: IntoIterator<Item = (u8, T)>>(it: It) -> Self {
+/// Creates CERTS cell from iterator of [`Cert`].
+///
+/// # Panics
+///
+/// Panics if one of the following happened:
+/// - Number of certificates exceeds 255.
+/// - Length of _any_ certificate exceeds 65535.
+impl<T: AsRef<[u8]>> FromIterator<Cert<T>> for Certs {
+    fn from_iter<It: IntoIterator<Item = Cert<T>>>(it: It) -> Self {
         let mut buf = vec![0];
         let mut n = 0u8;
 
-        for (t, v) in it {
-            n = match n.checked_add(1) {
-                Some(v) => v,
-                None => panic!("too many certificates!"),
-            };
+        for c in it {
+            let ty = c.ty;
+            let data = c.data.as_ref();
 
-            let v = v.as_ref();
-            let Ok(l) = u16::try_from(v.len()) else {
-                panic!("certificate {} is too long! (length: {})", n - 1, v.len());
+            n = n.checked_add(1).expect("too many certificates!");
+
+            let Ok(l) = u16::try_from(data.len()) else {
+                panic!(
+                    "certificate {} is too long! (length: {})",
+                    n - 1,
+                    data.len()
+                );
             };
             let [a, b] = l.to_be_bytes();
 
-            buf.reserve(3 + v.len());
-            buf.extend([t, a, b]);
-            buf.extend_from_slice(v);
+            buf.reserve(3 + data.len());
+            buf.extend_from_slice(&[ty, a, b]);
+            buf.extend_from_slice(data);
         }
 
         buf[0] = n;
@@ -93,8 +209,8 @@ impl Certs {
     /// Panics if one of the following happened:
     /// - Number of certificates exceeds 255.
     /// - Length of _any_ certificate exceeds 65535.
-    pub fn from_list(list: &[Cert<'_>]) -> Self {
-        Self::from_iter(list.iter().map(|&Cert { ty, data }| (ty, data)))
+    pub fn from_list<T: AsRef<[u8]>>(list: &[Cert<T>]) -> Self {
+        Self::from_iter(list.iter().map(Cert::as_ref))
     }
 
     /// Gets number of certificates.
@@ -113,89 +229,49 @@ impl Certs {
     }
 
     fn check(data: &[u8]) -> bool {
-        let Some((&n, mut data)) = data.split_first() else {
+        let Ok(header) = CertsHeader::ref_from_bytes(data) else {
             return false;
         };
+        let mut data = &header.data;
 
-        for _ in 0..n {
-            let Some((&[_, a, b], v)) = data.split_first_chunk::<3>() else {
+        for _ in 0..header.n_certs {
+            let Some(s) = CertRef::ref_from_bytes(data)
+                .ok()
+                .and_then(|c| c.split_at(c.length.get().into()))
+            else {
                 return false;
             };
-            let l = u16::from_be_bytes([a, b]);
-            data = match v.get(l.into()..) {
-                Some(v) => v,
-                None => return false,
-            };
+            data = s.via_immutable().1;
         }
 
         true
     }
 }
 
-/// A reference to a certificate.
-pub struct Cert<'a> {
-    ty: u8,
-    data: &'a [u8],
-}
-
-impl AsRef<[u8]> for Cert<'_> {
-    fn as_ref(&self) -> &[u8] {
-        self.data
-    }
-}
-
-impl<'a> Cert<'a> {
-    /// Creates new certificate.
-    ///
-    /// Most useful for [`Certs::from_list`].
-    pub fn new(cert_type: u8, data: &'a [u8]) -> Self {
-        Self {
-            ty: cert_type,
-            data,
-        }
-    }
-
-    /// Gets certificate type.
-    pub fn cert_type(&self) -> u8 {
-        self.ty
-    }
-
-    /// Gets unparsed certificate bytes.
-    pub fn data(&self) -> &[u8] {
-        self.data
-    }
-
-    /// Unwraps inner bytes.
-    pub fn into_inner(self) -> &'a [u8] {
-        self.data
-    }
-}
-
-/// Iterator in [`Certs`].
+/// Iterator of [`Certs`].
 pub struct CertsIterator<'a> {
-    certs: &'a Certs,
+    data: &'a [u8],
     n: u8,
     i: u8,
-    off: usize,
 }
 
 impl<'a> Iterator for CertsIterator<'a> {
-    type Item = Cert<'a>;
+    type Item = Cert<&'a [u8]>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.i >= self.n {
             return None;
         }
 
-        let data = self.certs.0.data();
-        let [ty, a, b] =
-            <[u8; 3]>::try_from(&data[self.off..self.off + 3]).expect("data must be valid");
-        let l: usize = u16::from_be_bytes([a, b]).into();
-        let data = &data[self.off + 3..self.off + 3 + l];
-
-        self.off += 3 + l;
+        let cert = CertRef::ref_from_bytes(self.data).expect("data must be valid");
+        let (cert, rest) = cert
+            .split_at(cert.length.get().into())
+            .expect("data must be valid")
+            .via_immutable();
+        self.data = rest;
         self.i += 1;
-        Some(Cert { ty, data })
+
+        Some(cert.into())
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -212,14 +288,15 @@ impl ExactSizeIterator for CertsIterator<'_> {
 
 impl<'a> IntoIterator for &'a Certs {
     type IntoIter = CertsIterator<'a>;
-    type Item = Cert<'a>;
+    type Item = Cert<&'a [u8]>;
 
     fn into_iter(self) -> Self::IntoIter {
+        let header = CertsHeader::ref_from_bytes(self.0.data()).expect("data must be valid");
+
         CertsIterator {
-            n: self.0.data()[0],
+            data: &header.data,
+            n: header.n_certs,
             i: 0,
-            off: 1,
-            certs: self,
         }
     }
 }
@@ -242,37 +319,37 @@ mod tests {
     fn test_certs_too_long() {
         static DATA: &[u8] = &[0; 65536];
 
-        Certs::from_iter([(0, DATA)]);
+        Certs::from_iter([Cert::new(0, DATA)]);
     }
 
     #[test]
     #[should_panic]
     fn test_certs_too_many() {
-        Certs::from_iter(repeat_n((0, []), 256));
+        Certs::from_iter(repeat_n(Cert::new(0, []), 256));
     }
 
     #[test]
     #[should_panic]
     fn test_certs_infinity() {
-        Certs::from_iter(repeat((0, [])));
+        Certs::from_iter(repeat(Cert::new(0, [])));
     }
 
     proptest! {
         #[test]
         fn test_certs_from_list(certs in certs_strat()) {
-            let cell = Certs::from_list(&certs.iter().map(|(t, v)| Cert::new(*t, v)).collect::<Vec<_>>());
-            assert_eq!(cell.into_iter().map(|v| (v.cert_type(), Vec::from(v.into_inner()))).collect::<Vec<_>>(), certs);
+            let cell = Certs::from_list(&certs.iter().map(|(t, v)| Cert::new(*t, &v[..])).collect::<Vec<_>>());
+            assert_eq!(cell.into_iter().map(|v| (v.ty, Vec::from(v.data))).collect::<Vec<_>>(), certs);
         }
 
         #[test]
         fn test_certs_from_iter(certs in certs_strat()) {
-            let cell = Certs::from_iter(certs.iter().map(|(t, v)| (*t, v)));
-            assert_eq!(cell.into_iter().map(|v| (v.cert_type(), Vec::from(v.into_inner()))).collect::<Vec<_>>(), certs);
+            let cell = Certs::from_iter(certs.iter().map(|(t, v)| Cert::new(*t, &v[..])));
+            assert_eq!(cell.into_iter().map(|v| (v.ty, Vec::from(v.data))).collect::<Vec<_>>(), certs);
         }
 
         #[test]
         fn test_certs_content(certs in certs_strat()) {
-            let cell = Certs::from_iter(certs.iter().map(|(t, v)| (*t, v))).into_inner();
+            let cell = Certs::from_iter(certs.iter().map(|(t, v)| Cert::new(*t, &v[..]))).into_inner();
             let mut data = cell.data();
 
             assert_eq!(data[0] as usize, certs.len());
