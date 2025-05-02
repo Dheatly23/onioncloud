@@ -172,6 +172,8 @@ impl Netinfo {
     /// - `peer_addr` : Peer IP address.
     /// - `this_addr` : This IP addresses. Excessive addresses will be discared.
     ///
+    /// # Example
+    ///
     /// ```
     /// use onioncloud_lowlevel::cell::FixedCell;
     /// use onioncloud_lowlevel::cell::netinfo::Netinfo;
@@ -241,6 +243,9 @@ impl Netinfo {
     /// Gets iterator to this IP addresses.
     ///
     /// Iterator skips over invalid address.
+    ///
+    /// # Example
+    ///
     /// ```
     /// use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     ///
