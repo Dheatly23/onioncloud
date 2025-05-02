@@ -9,8 +9,7 @@ use std::time::Instant;
 
 use flume::r#async::RecvStream;
 use flume::{Receiver, Sender, bounded};
-use futures_core::future::FusedFuture;
-use futures_core::{Stream as _, ready};
+use futures_core::Stream as _;
 use futures_io::AsyncWrite;
 use futures_util::select_biased;
 use pin_project::pin_project;
@@ -24,7 +23,7 @@ use crate::crypto::relay::RelayId;
 use crate::crypto::tls::setup_client;
 use crate::errors;
 use crate::runtime::{Runtime, Stream as _, Timer};
-use crate::util::{AsyncReadWrapper, AsyncWriteWrapper, print_hex, print_list};
+use crate::util::{AsyncReadWrapper, AsyncWriteWrapper, FutureRepollable, print_hex, print_list};
 
 struct ChannelInner<C: ChannelController> {
     config: C::Config,
@@ -35,7 +34,7 @@ struct ChannelInner<C: ChannelController> {
 #[pin_project]
 struct Channel<R: Runtime, C: ChannelController, M> {
     #[pin]
-    handle: HandleWrapper<R::Task<bool>>,
+    handle: FutureRepollable<R::Task<bool>>,
     inner: Arc<ChannelInner<C>>,
     #[pin]
     meta: M,
@@ -109,10 +108,10 @@ impl<R: Runtime, C: ChannelController, M> ChannelManager<R, C, M> {
             });
 
             Box::pin(Channel {
-                handle: HandleWrapper::Fut(
-                    self.runtime
-                        .spawn(handle_channel(self.runtime.clone(), inner.clone())),
-                ),
+                handle: self
+                    .runtime
+                    .spawn(handle_channel(self.runtime.clone(), inner.clone()))
+                    .into(),
                 inner,
                 meta,
             })
@@ -164,12 +163,15 @@ impl<R: Runtime, C: ChannelController, M> ChannelManager<R, C, M> {
                 let peer_addr = stream.peer_addr()?;
 
                 e.insert(Box::pin(Channel {
-                    handle: HandleWrapper::Fut(self.runtime.spawn(handle_stream(
-                        self.runtime.clone(),
-                        inner.clone(),
-                        stream,
-                        peer_addr,
-                    ))),
+                    handle: self
+                        .runtime
+                        .spawn(handle_stream(
+                            self.runtime.clone(),
+                            inner.clone(),
+                            stream,
+                            peer_addr,
+                        ))
+                        .into(),
                     inner,
                     meta,
                 }))
@@ -276,14 +278,15 @@ impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
     {
         let mut this = self.inner.as_mut().project();
 
-        if !matches!(&*this.handle, HandleWrapper::Res(_)) {
+        if this.handle.is_finished() {
             return false;
         }
 
-        this.handle.as_mut().set(HandleWrapper::Fut(
+        this.handle.as_mut().set(
             self.runtime
-                .spawn(handle_channel(self.runtime.clone(), this.inner.clone())),
-        ));
+                .spawn(handle_channel(self.runtime.clone(), this.inner.clone()))
+                .into(),
+        );
         true
     }
 
@@ -295,7 +298,7 @@ impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
     {
         let mut this = self.inner.as_mut().project();
 
-        if !matches!(&*this.handle, HandleWrapper::Res(_)) {
+        if this.handle.is_finished() {
             return false;
         }
 
@@ -307,14 +310,16 @@ impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
             }
         };
 
-        this.handle
-            .as_mut()
-            .set(HandleWrapper::Fut(self.runtime.spawn(handle_stream(
-                self.runtime.clone(),
-                this.inner.clone(),
-                stream,
-                peer_addr,
-            ))));
+        this.handle.as_mut().set(
+            self.runtime
+                .spawn(handle_stream(
+                    self.runtime.clone(),
+                    this.inner.clone(),
+                    stream,
+                    peer_addr,
+                ))
+                .into(),
+        );
         true
     }
 }
@@ -350,42 +355,6 @@ impl<R: Runtime, C: ChannelController, M> ChannelRemoved<R, C, M> {
     #[inline(always)]
     pub async fn completion(mut self) -> Result<(), errors::HandleError> {
         self.0.as_mut().completion().await
-    }
-}
-
-#[pin_project(project = HandleWrapperProj)]
-enum HandleWrapper<F: Future> {
-    Fut(#[pin] F),
-    Res(F::Output),
-}
-
-impl<F> Future for HandleWrapper<F>
-where
-    F: Future,
-    F::Output: Copy,
-{
-    type Output = F::Output;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.as_mut().project() {
-            HandleWrapperProj::Fut(f) => {
-                let r = ready!(f.poll(cx));
-                self.set(Self::Res(r));
-                Poll::Ready(r)
-            }
-            HandleWrapperProj::Res(r) => Poll::Ready(*r),
-        }
-    }
-}
-
-impl<F> FusedFuture for HandleWrapper<F>
-where
-    F: Future,
-    F::Output: Copy,
-{
-    fn is_terminated(&self) -> bool {
-        // Always can be polled
-        false
     }
 }
 

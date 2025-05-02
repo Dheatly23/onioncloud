@@ -3,13 +3,17 @@ pub mod sans_io;
 
 use std::error::Error;
 use std::fmt::{Display, Formatter, Result as FmtResult};
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
 use std::io::{Error as IoError, ErrorKind, IoSliceMut, Read, Result as IoResult, Write};
 use std::pin::Pin;
-use std::task::Context;
 use std::task::Poll::*;
+use std::task::{Context, Poll};
 
+use futures_core::future::FusedFuture;
+use futures_core::ready;
 use futures_io::{AsyncRead, AsyncWrite};
+use pin_project::pin_project;
+use scopeguard::guard_on_unwind;
 
 use crate::errors;
 pub use channel::*;
@@ -336,6 +340,62 @@ where
         }
     })
     .await
+}
+
+#[pin_project(project = FutureRepollableProj)]
+pub(crate) enum FutureRepollable<F: Future> {
+    Fut(#[pin] F),
+    Res(F::Output),
+    Panic,
+}
+
+impl<F: Future> From<F> for FutureRepollable<F> {
+    fn from(fut: F) -> Self {
+        Self::new(fut)
+    }
+}
+
+impl<F: Future> FutureRepollable<F> {
+    pub(crate) const fn new(fut: F) -> Self {
+        Self::Fut(fut)
+    }
+
+    pub(crate) const fn is_finished(&self) -> bool {
+        matches!(self, Self::Res(_) | Self::Panic)
+    }
+}
+
+impl<F> Future for FutureRepollable<F>
+where
+    F: Future,
+    F::Output: Copy,
+{
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = guard_on_unwind(self, |mut this| this.set(Self::Panic));
+
+        match this.as_mut().project() {
+            FutureRepollableProj::Fut(f) => {
+                let r = ready!(f.poll(cx));
+                this.set(Self::Res(r));
+                Ready(r)
+            }
+            FutureRepollableProj::Res(r) => Ready(*r),
+            FutureRepollableProj::Panic => panic!("future has panicked before"),
+        }
+    }
+}
+
+impl<F> FusedFuture for FutureRepollable<F>
+where
+    F: Future,
+    F::Output: Copy,
+{
+    fn is_terminated(&self) -> bool {
+        // Always can be polled
+        false
+    }
 }
 
 pub(crate) fn print_hex(s: &[u8]) -> impl '_ + Display {
