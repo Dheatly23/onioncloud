@@ -1,7 +1,10 @@
+use std::mem::size_of;
 use std::net::IpAddr;
 
 use zerocopy::byteorder::big_endian::U32;
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, SplitAt, Unaligned};
+use zerocopy::{
+    FromBytes, Immutable, IntoBytes, KnownLayout, SplitAt, Unaligned, transmute_mut, transmute_ref,
+};
 
 use super::{
     Cell, CellHeader, CellLike, CellRef, FIXED_CELL_SIZE, FixedCell, TryFromCell, to_fixed_with,
@@ -9,31 +12,34 @@ use super::{
 use crate::errors;
 
 /// NETINFO header part 1.
-#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
-struct NetinfoHeader1 {
+struct NetinfoHeader1<T: ?Sized = [u8]> {
     /// Timestamp sent by peer.
     timestamp: U32,
 
     /// Peer address. Also contains [`NetinfoHeader2`].
-    peer_addr: Addr,
+    peer_addr: Addr<T>,
 }
 
+type NetinfoHeader =
+    NetinfoHeader1<[u8; const { FIXED_CELL_SIZE - size_of::<NetinfoHeader1<[u8; 0]>>() }]>;
+
 /// NETINFO header part 2.
-#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
-struct NetinfoHeader2 {
+struct NetinfoHeader2<T: ?Sized = [u8]> {
     /// Number of this addresses.
     n_addrs: u8,
 
     /// Rest of the data.
-    data: [u8],
+    data: T,
 }
 
-/// Address header.
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+/// Address type.
+#[derive(FromBytes, IntoBytes, SplitAt, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
-struct AddrHeader {
+struct Addr<T: ?Sized = [u8]> {
     /// Address type.
     ///
     /// Possible values:
@@ -43,67 +49,52 @@ struct AddrHeader {
 
     /// Length of payload.
     length: u8,
-}
-
-/// Address type.
-#[derive(FromBytes, SplitAt, KnownLayout, Immutable, Unaligned)]
-#[repr(C)]
-struct Addr {
-    /// Address header.
-    header: AddrHeader,
 
     /// Address payload.
-    data: [u8],
+    data: T,
 }
 
 impl Addr {
     fn split_data(&self) -> Option<(&Self, &[u8])> {
-        Some(self.split_at(self.header.length.into())?.via_immutable())
+        Some(self.split_at(self.length.into())?.via_immutable())
     }
+}
 
+impl<T: ?Sized> Addr<T> {
     /// Converts into [`IpAddr`].
     ///
     /// NOTE: Payload length must be equal to length, use [`split_data`] to ensure it.
     #[track_caller]
-    fn to_addr(&self) -> Option<IpAddr> {
-        debug_assert_eq!(self.header.length as usize, self.data.len());
+    fn to_addr(&self) -> Option<IpAddr>
+    where
+        T: AsRef<[u8]>,
+    {
+        debug_assert_eq!(self.length as usize, self.data.as_ref().len());
 
-        match (self.header.ty, self.header.length) {
-            (4, 4) => Some(<[u8; 4]>::try_from(&self.data).unwrap().into()),
-            (6, 16) => Some(<[u8; 16]>::try_from(&self.data).unwrap().into()),
+        match (self.ty, self.length) {
+            (4, 4) => Some(<[u8; 4]>::try_from(self.data.as_ref()).unwrap().into()),
+            (6, 16) => Some(<[u8; 16]>::try_from(self.data.as_ref()).unwrap().into()),
             _ => None,
         }
     }
 }
 
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
-#[repr(C)]
-struct AddrV4 {
-    header: AddrHeader,
-    data: [u8; 4],
-}
-
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
-#[repr(C)]
-struct AddrV6 {
-    header: AddrHeader,
-    data: [u8; 16],
-}
-
 fn write_addr(data: &mut [u8], addr: IpAddr) -> Option<&mut [u8]> {
     Some(match addr {
         IpAddr::V4(v) => {
-            let (o, rest) = AddrV4::mut_from_prefix(data).ok()?;
-            *o = AddrV4 {
-                header: AddrHeader { ty: 4, length: 4 },
+            let (o, rest) = Addr::<[u8; 4]>::mut_from_prefix(data).ok()?;
+            *o = Addr {
+                ty: 4,
+                length: 4,
                 data: v.octets(),
             };
             rest
         }
         IpAddr::V6(v) => {
-            let (o, rest) = AddrV6::mut_from_prefix(data).ok()?;
-            *o = AddrV6 {
-                header: AddrHeader { ty: 6, length: 16 },
+            let (o, rest) = Addr::<[u8; 16]>::mut_from_prefix(data).ok()?;
+            *o = Addr {
+                ty: 6,
+                length: 16,
                 data: v.octets(),
             };
             rest
@@ -197,17 +188,19 @@ impl Netinfo {
             data: &mut [u8; FIXED_CELL_SIZE],
             time: u32,
             peer_addr: IpAddr,
-        ) -> (&mut u8, &mut [u8]) {
-            // Cannot use NetinfoHeader1 because of IntoBytes limitation.
-            let (t, data) = U32::mut_from_prefix(data).expect("data must fit header");
-            t.set(time);
-            write_addr(data, peer_addr)
-                .expect("data must fit header")
-                .split_first_mut()
-                .expect("data must fit header")
+        ) -> &mut NetinfoHeader2 {
+            let header: &mut NetinfoHeader = transmute_mut!(data);
+            header.timestamp.set(time);
+
+            NetinfoHeader2::mut_from_bytes(
+                write_addr(header.peer_addr.as_mut_bytes(), peer_addr)
+                    .expect("data must fit header"),
+            )
+            .expect("data must fit header")
         }
 
-        let (np, mut data) = write_header(cell.data_mut(), time, peer_addr);
+        let header = write_header(cell.data_mut(), time, peer_addr);
+        let mut data = &mut header.data;
         let mut n = 0u8;
         for addr in this_addr {
             let Some(s) = write_addr(data, addr) else {
@@ -222,26 +215,23 @@ impl Netinfo {
             };
         }
 
-        *np = n;
+        header.n_addrs = n;
         // SAFETY: Data is valid
         unsafe { Self::from_cell(cell) }
     }
 
     /// Gets timestamp.
     pub fn time(&self) -> u32 {
-        NetinfoHeader1::ref_from_bytes(self.0.data())
-            .expect("data must fit header")
-            .timestamp
-            .get()
+        let header: &NetinfoHeader = transmute_ref!(self.0.data());
+        header.timestamp.get()
     }
 
     /// Gets peer IP address.
     ///
     /// Returns [`None`] if address is invalid.
     pub fn peer_addr(&self) -> Option<IpAddr> {
-        NetinfoHeader1::ref_from_bytes(self.0.data())
-            .expect("data must fit header")
-            .peer_addr
+        let NetinfoHeader { peer_addr: a, .. } = transmute_ref!(self.0.data());
+        (a as &Addr)
             .split_data()
             .expect("data must fit header")
             .0
@@ -263,18 +253,12 @@ impl Netinfo {
     /// }
     /// ```
     pub fn this_addrs(&self) -> NetinfoThisAddrIterator<'_> {
+        let NetinfoHeader { peer_addr: a, .. } = transmute_ref!(self.0.data());
         let &NetinfoHeader2 {
             n_addrs: n,
             ref data,
-        } = NetinfoHeader2::ref_from_bytes(
-            NetinfoHeader1::ref_from_bytes(self.0.data())
-                .expect("data must fit header")
-                .peer_addr
-                .split_data()
-                .expect("data must fit header")
-                .1,
-        )
-        .expect("data must fit header");
+        } = NetinfoHeader2::ref_from_bytes(&a.data[a.length.into()..])
+            .expect("data must fit header");
 
         NetinfoThisAddrIterator { data, n, i: 0 }
     }
@@ -287,16 +271,13 @@ impl Netinfo {
     fn check(data: &[u8; FIXED_CELL_SIZE]) -> bool {
         // Use expect() because maximum size of header is
         // 4 (timestamp) + 2 (peer address header) + 255 (peer address payload) + 1 (number of this addresses) = 262 < FIXED_CELL_SIZE
-        debug_assert!(262 < FIXED_CELL_SIZE, "fixed cell size is too small");
-        let header = NetinfoHeader2::ref_from_bytes(
-            NetinfoHeader1::ref_from_bytes(data)
-                .expect("data must fit header")
-                .peer_addr
-                .split_data()
-                .expect("data must fit header")
-                .1,
-        )
-        .expect("data must fit header");
+        let NetinfoHeader { peer_addr: a, .. } = transmute_ref!(data);
+        debug_assert!(
+            a.data.len() >= 255 + size_of::<NetinfoHeader2<[u8; 0]>>(),
+            "fixed cell size is too small"
+        );
+        let header = NetinfoHeader2::ref_from_bytes(&a.data[a.length.into()..])
+            .expect("data must fit header");
         let mut data = &header.data;
 
         for _ in 0..header.n_addrs {
