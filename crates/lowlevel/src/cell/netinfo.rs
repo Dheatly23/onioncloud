@@ -372,6 +372,22 @@ mod tests {
             assert_eq!(cell.time(), time);
             assert_eq!(cell.peer_addr(), Some(other));
             assert_eq!(cell.this_addrs().collect::<Vec<_>>(), this);
+
+            let mut v = Vec::new();
+            v.extend_from_slice(&time.to_be_bytes());
+            match other {
+                IpAddr::V4(t) => v.extend([4, 4].into_iter().chain(t.octets())),
+                IpAddr::V6(t) => v.extend([6, 16].into_iter().chain(t.octets())),
+            }
+            v.push(this.len() as u8);
+            for a in &this {
+                match a {
+                    IpAddr::V4(t) => v.extend([4, 4].into_iter().chain(t.octets())),
+                    IpAddr::V6(t) => v.extend([6, 16].into_iter().chain(t.octets())),
+                }
+            }
+
+            assert_eq!(&cell.into_inner().data()[..v.len()], v);
         }
     }
 }
