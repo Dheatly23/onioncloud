@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::{ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -241,7 +242,7 @@ async fn handle_channel<R: Runtime, C: ChannelController>(
         stream,
         timer: None,
         timer_finished: true,
-        tls: TlsWrapper(tls),
+        tls: TlsWrapper(tls, peer_addr),
         cont: C::new(&cfg.config),
         ctrl_recv: Some(cfg.receiver.clone().into_stream()),
         circ_map: Some(CircuitMap::new()),
@@ -579,7 +580,7 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
     }
 }
 
-struct TlsWrapper(ClientConnection);
+struct TlsWrapper(ClientConnection, SocketAddr);
 
 impl Read for TlsWrapper {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
@@ -608,5 +609,9 @@ impl Write for TlsWrapper {
 impl Stream for TlsWrapper {
     fn link_cert(&self) -> Option<&[u8]> {
         self.0.peer_certificates()?.first().map(|v| &v[..])
+    }
+
+    fn peer_addr(&self) -> &SocketAddr {
+        &self.1
     }
 }

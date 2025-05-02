@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use crate::channel::controller::{ChannelController, ControlMsg, Timeout};
@@ -24,9 +25,14 @@ impl<C: ChannelController> TestController<C> {
     /// # Parameters
     /// - `controller` : Channel controller to be tested.
     /// - `link_cert` : Link certificate.
-    pub fn new(controller: C, link_cert: impl Into<Cow<'static, [u8]>>) -> Self {
+    pub fn new(
+        controller: C,
+        peer_addr: SocketAddr,
+        link_cert: impl Into<Cow<'static, [u8]>>,
+    ) -> Self {
         Self {
             stream: TestStream {
+                peer_addr,
                 link_cert: link_cert.into(),
                 send: VecDeque::new(),
                 recv: VecDeque::new(),
@@ -163,6 +169,7 @@ struct TestStream {
     send_eof: bool,
     recv_eof: bool,
     link_cert: Cow<'static, [u8]>,
+    peer_addr: SocketAddr,
 }
 
 impl Read for TestStream {
@@ -233,5 +240,9 @@ impl Write for TestStream {
 impl Stream for TestStream {
     fn link_cert(&self) -> Option<&[u8]> {
         Some(&self.link_cert[..])
+    }
+
+    fn peer_addr(&self) -> &SocketAddr {
+        &self.peer_addr
     }
 }

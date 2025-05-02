@@ -277,6 +277,7 @@ mod tests {
                 },
                 delay: false,
             }),
+            ([127, 0, 0, 1], 443).into(),
             vec![],
         );
 
@@ -298,6 +299,7 @@ mod tests {
                 },
                 delay: true,
             }),
+            ([127, 0, 0, 1], 443).into(),
             vec![],
         );
 

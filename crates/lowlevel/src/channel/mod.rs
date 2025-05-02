@@ -77,6 +77,11 @@ impl<'a, 'b, Cell, Meta> ChannelInput<'a, 'b, Cell, Meta> {
         self.stream.link_cert()
     }
 
+    /// Get peer address.
+    pub fn peer_addr(&self) -> &SocketAddr {
+        self.stream.peer_addr()
+    }
+
     /// Get current time.
     pub fn time(&self) -> Instant {
         self.time
@@ -120,6 +125,7 @@ impl ChannelOutput {
 /// Internal trait for a TLS stream.
 pub(crate) trait Stream: Read + Write {
     fn link_cert(&self) -> Option<&[u8]>;
+    fn peer_addr(&self) -> &SocketAddr;
 }
 
 /// A circuit data.
