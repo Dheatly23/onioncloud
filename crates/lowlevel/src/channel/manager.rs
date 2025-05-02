@@ -49,6 +49,12 @@ pub struct ChannelRef<'a, R: Runtime, C: ChannelController, M> {
     runtime: &'a mut R,
 }
 
+/// A removed channel.
+///
+/// Typically created by [`ChannelManager::remove`],
+/// it can be used to do finalization outside channel manager.
+pub struct ChannelRemoved<R: Runtime, C: ChannelController, M>(Pin<Box<Channel<R, C, M>>>);
+
 /// Channel manager.
 ///
 /// Manages multiple channels, each running in separate task.
@@ -120,9 +126,9 @@ impl<R: Runtime, C: ChannelController, M> ChannelManager<R, C, M> {
 
     /// Remove channel from manager.
     ///
-    /// Make sure channel has stopped running before removing (use [`ChannelRef::completion`] to wait).
-    pub fn remove(&mut self, peer: &RelayId) -> bool {
-        self.channels.remove(peer).is_some()
+    /// Make sure channel has stopped running before removing (use [`ChannelRef::completion`] or [`ChannelRemoved::completion`] to wait).
+    pub fn remove(&mut self, peer: &RelayId) -> Option<ChannelRemoved<R, C, M>> {
+        self.channels.remove(peer).map(ChannelRemoved)
     }
 
     /// Insert existing stream to manager if it doesn't exist.
@@ -276,6 +282,56 @@ impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
                 peer_addr,
             ))));
         true
+    }
+}
+
+impl<R: Runtime, C: ChannelController, M> ChannelRemoved<R, C, M> {
+    /// Gets reference to channel metadata.
+    pub fn meta(&mut self) -> Pin<&mut M> {
+        self.0.as_mut().project().meta
+    }
+
+    /// Send a control message.
+    pub async fn send_control(
+        &mut self,
+        msg: C::ControlMsg,
+    ) -> Result<(), errors::SendControlMsgError> {
+        let this = self.0.as_mut().project();
+
+        select_biased! {
+            res = this.handle => Err(if res {
+                errors::SendControlMsgError::HandleFinalized
+            } else {
+                errors::HandleError.into()
+            }),
+            res = this.inner.sender.send_async(msg) => {
+                assert!(res.is_ok(), "receiver somehow got closed");
+                Ok(())
+            },
+        }
+    }
+
+    /// Send a control message and wait for completion.
+    ///
+    /// Useful for sending shutdown message.
+    pub async fn send_and_completion(
+        mut self,
+        msg: C::ControlMsg,
+    ) -> Result<(), errors::HandleError> {
+        match self.send_control(msg).await {
+            Ok(()) => self.completion().await,
+            Err(errors::SendControlMsgError::HandleFinalized) => Ok(()),
+            Err(errors::SendControlMsgError::HandleError(e)) => Err(e),
+        }
+    }
+
+    /// Waits controller for completion.
+    pub async fn completion(mut self) -> Result<(), errors::HandleError> {
+        if self.0.as_mut().project().handle.as_mut().await {
+            Ok(())
+        } else {
+            Err(errors::HandleError)
+        }
     }
 }
 
