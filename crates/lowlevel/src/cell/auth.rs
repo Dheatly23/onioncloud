@@ -1,10 +1,17 @@
-use std::slice::from_raw_parts;
+use std::mem::size_of;
 
-use zerocopy::FromBytes;
 use zerocopy::byteorder::big_endian::U16;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, SplitAt, Unaligned};
 
 use super::{Cell, CellHeader, CellLike, CellRef, TryFromCell, VariableCell, to_variable_with};
 use crate::errors;
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct AuthChallengeHeader {
+    challenge: [u8; 32],
+    n_methods: U16,
+}
 
 /// Represents a AUTH_CHALLENGE cell.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -66,18 +73,32 @@ impl AuthChallenge {
     /// Note that methods is not deduplicated nor checked for validity (e.g zero is not allowed).
     /// It is the responsibility of implementer to do all that.
     ///
+    /// # Panics
+    ///
+    /// Panics if methods length is > 65535.
+    ///
+    /// # Example
+    ///
     /// ```
     /// use onioncloud_lowlevel::cell::auth::AuthChallenge;
     ///
     /// let cell = AuthChallenge::new(&[0; 32], &[1, 2, 3]);
     /// ```
     pub fn new(challenge: &[u8; 32], methods: &[u16]) -> Self {
-        let l = u16::try_from(methods.len()).expect("too many methods");
-        let mut v = Vec::with_capacity(34 + methods.len() * 2);
+        let n = u16::try_from(methods.len()).expect("too many methods");
 
-        v.extend_from_slice(challenge);
-        v.extend_from_slice(&l.to_be_bytes());
-        v.extend(methods.iter().flat_map(|v| v.to_be_bytes()));
+        // TODO: Replace this with equivalent of new_box_zeroed_with_elems but with Vec<u8>
+        let mut v = vec![0; size_of::<AuthChallengeHeader>() + size_of::<U16>() * methods.len()];
+        let (header, rest) =
+            AuthChallengeHeader::mut_from_prefix(&mut v).expect("data must be valid");
+        header.challenge = *challenge;
+        header.n_methods.set(n);
+
+        let (methods_o, _) =
+            <[U16]>::mut_from_prefix_with_elems(rest, methods.len()).expect("data must be valid");
+        for (i, o) in methods_o.iter_mut().enumerate() {
+            o.set(methods[i]);
+        }
 
         // SAFETY: Data is valid
         unsafe { Self::from_cell(VariableCell::from(v)) }
@@ -85,19 +106,34 @@ impl AuthChallenge {
 
     /// Gets the challenge string.
     pub fn challenge(&self) -> &[u8; 32] {
-        self.0.data()[..32]
-            .try_into()
-            .expect("slice must be 32 bytes")
+        &AuthChallengeHeader::ref_from_prefix(self.0.data())
+            .expect("data must be valid")
+            .0
+            .challenge
+    }
+
+    /// Gets length of methods.
+    pub fn len(&self) -> usize {
+        AuthChallengeHeader::ref_from_prefix(self.0.data())
+            .expect("data must be valid")
+            .0
+            .n_methods
+            .get()
+            .into()
+    }
+
+    /// Returns [`true`] if there is no methods.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Gets reference into methods.
     pub fn methods(&self) -> &[U16] {
-        let s = &self.0.data()[32..];
-        let l = u16::from_be_bytes(s[..2].try_into().unwrap());
-
-        // SAFETY: Data has been checked
-        // XXX: Use zerocopy instead?
-        unsafe { from_raw_parts((&s[2..] as *const [u8]).cast::<U16>(), l.into()) }
+        let (header, rest) =
+            AuthChallengeHeader::ref_from_prefix(self.0.data()).expect("data must be valid");
+        <[U16]>::ref_from_prefix_with_elems(rest, header.n_methods.get().into())
+            .expect("data must be valid")
+            .0
     }
 
     /// Unwraps into inner [`VariableCell`].
@@ -106,14 +142,28 @@ impl AuthChallenge {
     }
 
     fn check(data: &[u8]) -> bool {
-        let Some((s, r)) = data.split_first_chunk::<34>() else {
+        let Ok((header, rest)) = AuthChallengeHeader::ref_from_prefix(data) else {
             return false;
         };
-
-        let l = u16::from_be_bytes(s[32..].try_into().expect("array must be 34 bytes"));
-        <[U16]>::ref_from_prefix_with_elems(r, l.into()).is_ok()
+        <[U16]>::ref_from_prefix_with_elems(rest, header.n_methods.get().into()).is_ok()
     }
 }
+
+#[derive(FromBytes, IntoBytes, SplitAt, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct AuthenticateTy<T: ?Sized> {
+    ty: U16,
+    length: U16,
+    data: T,
+}
+
+impl AuthenticateTy<[u8]> {
+    fn ensure_length(&self) -> Option<&Self> {
+        Some(self.split_at(self.length.get().into())?.via_immutable().0)
+    }
+}
+
+type AuthTy = AuthenticateTy<[u8]>;
 
 /// Represents a AUTHENTICATE cell.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -178,12 +228,14 @@ impl Authenticate {
 
     /// Create AUTHENTICATE cell.
     pub fn new(auth_type: u16, data: &[u8]) -> Self {
-        let l = u16::try_from(data.len()).expect("data is too long");
-        let mut v = Vec::with_capacity(4 + data.len());
+        let n = u16::try_from(data.len()).expect("data is too long");
 
-        v.extend_from_slice(&auth_type.to_be_bytes());
-        v.extend_from_slice(&l.to_be_bytes());
-        v.extend_from_slice(data);
+        // TODO: Replace this with equivalent of new_box_zeroed_with_elems but with Vec<u8>
+        let mut v = vec![0; size_of::<AuthenticateTy<[u8; 0]>>() + data.len()];
+        let p = AuthTy::mut_from_bytes_with_elems(&mut v, data.len()).expect("data must be valid");
+        p.ty.set(auth_type);
+        p.length.set(n);
+        p.data.copy_from_slice(data);
 
         // SAFETY: Data is valid
         unsafe { Self::from_cell(VariableCell::from(v)) }
@@ -191,12 +243,19 @@ impl Authenticate {
 
     /// Gets authentication type.
     pub fn auth_type(&self) -> u16 {
-        u16::from_be_bytes(self.0.data()[..2].try_into().unwrap())
+        AuthTy::ref_from_bytes(self.0.data())
+            .expect("data must be valid")
+            .ty
+            .get()
     }
 
     /// Gets length of authentication data.
     pub fn len(&self) -> usize {
-        u16::from_be_bytes(self.0.data()[2..4].try_into().unwrap()).into()
+        AuthTy::ref_from_bytes(self.0.data())
+            .expect("data must be valid")
+            .length
+            .get()
+            .into()
     }
 
     /// Returns [`true`] if there is no authentication data.
@@ -206,8 +265,11 @@ impl Authenticate {
 
     /// Gets reference into authentication data.
     pub fn data(&self) -> &[u8] {
-        let l = self.len();
-        &self.0.data()[4..4 + l]
+        &AuthTy::ref_from_bytes(self.0.data())
+            .expect("data must be valid")
+            .ensure_length()
+            .expect("data must be valid")
+            .data
     }
 
     /// Unwraps into inner [`VariableCell`].
@@ -216,12 +278,10 @@ impl Authenticate {
     }
 
     fn check(data: &[u8]) -> bool {
-        let Some((s, r)) = data.split_first_chunk::<4>() else {
-            return false;
-        };
-
-        let l = u16::from_be_bytes(s[2..4].try_into().unwrap());
-        r.len() >= usize::from(l)
+        AuthTy::ref_from_bytes(data)
+            .ok()
+            .and_then(|v| v.ensure_length())
+            .is_some()
     }
 }
 
