@@ -1,9 +1,115 @@
 use std::net::IpAddr;
 
+use zerocopy::byteorder::big_endian::U32;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, SplitAt, Unaligned};
+
 use super::{
     Cell, CellHeader, CellLike, CellRef, FIXED_CELL_SIZE, FixedCell, TryFromCell, to_fixed_with,
 };
 use crate::errors;
+
+/// NETINFO header part 1.
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct NetinfoHeader1 {
+    /// Timestamp sent by peer.
+    timestamp: U32,
+
+    /// Peer address. Also contains [`NetinfoHeader2`].
+    peer_addr: Addr,
+}
+
+/// NETINFO header part 2.
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct NetinfoHeader2 {
+    /// Number of this addresses.
+    n_addrs: u8,
+
+    /// Rest of the data.
+    data: [u8],
+}
+
+/// Address header.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct AddrHeader {
+    /// Address type.
+    ///
+    /// Possible values:
+    /// - 4 : IP version 4. Length must be 4 bytes.
+    /// - 6 : IP version 6. Length must be 16 bytes.
+    ty: u8,
+
+    /// Length of payload.
+    length: u8,
+}
+
+/// Address type.
+#[derive(FromBytes, SplitAt, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct Addr {
+    /// Address header.
+    header: AddrHeader,
+
+    /// Address payload.
+    data: [u8],
+}
+
+impl Addr {
+    fn split_data(&self) -> Option<(&Self, &[u8])> {
+        Some(self.split_at(self.header.length.into())?.via_immutable())
+    }
+
+    /// Converts into [`IpAddr`].
+    ///
+    /// NOTE: Payload length must be equal to length, use [`split_data`] to ensure it.
+    #[track_caller]
+    fn to_addr(&self) -> Option<IpAddr> {
+        debug_assert_eq!(self.header.length as usize, self.data.len());
+
+        match (self.header.ty, self.header.length) {
+            (4, 4) => Some(<[u8; 4]>::try_from(&self.data).unwrap().into()),
+            (6, 16) => Some(<[u8; 16]>::try_from(&self.data).unwrap().into()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct AddrV4 {
+    header: AddrHeader,
+    data: [u8; 4],
+}
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct AddrV6 {
+    header: AddrHeader,
+    data: [u8; 16],
+}
+
+fn write_addr(data: &mut [u8], addr: IpAddr) -> Option<&mut [u8]> {
+    Some(match addr {
+        IpAddr::V4(v) => {
+            let (o, rest) = AddrV4::mut_from_prefix(data).ok()?;
+            *o = AddrV4 {
+                header: AddrHeader { ty: 4, length: 4 },
+                data: v.octets(),
+            };
+            rest
+        }
+        IpAddr::V6(v) => {
+            let (o, rest) = AddrV6::mut_from_prefix(data).ok()?;
+            *o = AddrV6 {
+                header: AddrHeader { ty: 6, length: 16 },
+                data: v.octets(),
+            };
+            rest
+        }
+    })
+}
 
 /// Represents a NETINFO cell.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -66,39 +172,13 @@ impl Netinfo {
         Self(data)
     }
 
-    fn write_prefix(
-        data: &mut [u8; FIXED_CELL_SIZE],
-        time: u32,
-        other_addr: IpAddr,
-    ) -> (&mut u8, &mut [u8]) {
-        *<&mut [u8; 4]>::try_from(&mut data[..4]).unwrap() = time.to_be_bytes();
-        match other_addr {
-            IpAddr::V4(v) => {
-                data[4] = 4;
-                data[5] = 4;
-                let (a, b) = data[6..].split_first_chunk_mut::<4>().unwrap();
-                *a = v.octets();
-                b
-            }
-            IpAddr::V6(v) => {
-                data[4] = 6;
-                data[5] = 16;
-                let (a, b) = data[6..].split_first_chunk_mut::<16>().unwrap();
-                *a = v.octets();
-                b
-            }
-        }
-        .split_first_mut()
-        .unwrap()
-    }
-
     /// Creates new NETINFO cell.
     ///
     /// # Parameters
     ///
     /// - `cell` : Cached [`FixedCell`].
     /// - `time` : Timestamp.
-    /// - `other_addr` : Peer IP address.
+    /// - `peer_addr` : Peer IP address.
     /// - `this_addr` : This IP addresses. Excessive addresses will be discared.
     ///
     /// ```
@@ -110,35 +190,30 @@ impl Netinfo {
     pub fn new(
         mut cell: FixedCell,
         time: u32,
-        other_addr: IpAddr,
+        peer_addr: IpAddr,
         this_addr: impl IntoIterator<Item = IpAddr>,
     ) -> Self {
-        let (np, mut data) = Self::write_prefix(cell.data_mut(), time, other_addr);
+        fn write_header(
+            data: &mut [u8; FIXED_CELL_SIZE],
+            time: u32,
+            peer_addr: IpAddr,
+        ) -> (&mut u8, &mut [u8]) {
+            // Cannot use NetinfoHeader1 because of IntoBytes limitation.
+            let (t, data) = U32::mut_from_prefix(data).expect("data must fit header");
+            t.set(time);
+            write_addr(data, peer_addr)
+                .expect("data must fit header")
+                .split_first_mut()
+                .expect("data must fit header")
+        }
 
+        let (np, mut data) = write_header(cell.data_mut(), time, peer_addr);
         let mut n = 0u8;
-        for a in this_addr {
-            data = match a {
-                IpAddr::V4(v) => {
-                    let Some((a, r)) = data.split_first_chunk_mut::<{ 2 + 4 }>() else {
-                        // Not enough space
-                        break;
-                    };
-                    a[0] = 4;
-                    a[1] = 4;
-                    *<&mut [u8; 4]>::try_from(&mut a[2..]).unwrap() = v.octets();
-                    r
-                }
-                IpAddr::V6(v) => {
-                    let Some((a, r)) = data.split_first_chunk_mut::<{ 2 + 16 }>() else {
-                        // Not enough space
-                        break;
-                    };
-                    a[0] = 6;
-                    a[1] = 16;
-                    *<&mut [u8; 16]>::try_from(&mut a[2..]).unwrap() = v.octets();
-                    r
-                }
+        for addr in this_addr {
+            let Some(s) = write_addr(data, addr) else {
+                break;
             };
+            data = s;
 
             n = match n.checked_add(1) {
                 Some(v) => v,
@@ -154,19 +229,54 @@ impl Netinfo {
 
     /// Gets timestamp.
     pub fn time(&self) -> u32 {
-        u32::from_be_bytes(self.0.data()[..4].try_into().unwrap())
+        NetinfoHeader1::ref_from_bytes(self.0.data())
+            .expect("data must fit header")
+            .timestamp
+            .get()
     }
 
     /// Gets peer IP address.
     ///
     /// Returns [`None`] if address is invalid.
-    pub fn other_addr(&self) -> Option<IpAddr> {
-        let b = self.0.data();
-        match &b[4..6] {
-            [4, 4] => Some(<[u8; 4]>::try_from(&b[6..6 + 4]).unwrap().into()),
-            [6, 16] => Some(<[u8; 16]>::try_from(&b[6..6 + 16]).unwrap().into()),
-            _ => None,
-        }
+    pub fn peer_addr(&self) -> Option<IpAddr> {
+        NetinfoHeader1::ref_from_bytes(self.0.data())
+            .expect("data must fit header")
+            .peer_addr
+            .split_data()
+            .expect("data must fit header")
+            .0
+            .to_addr()
+    }
+
+    /// Gets iterator to this IP addresses.
+    ///
+    /// Iterator skips over invalid address.
+    /// ```
+    /// use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    ///
+    /// use onioncloud_lowlevel::cell::FixedCell;
+    /// use onioncloud_lowlevel::cell::netinfo::Netinfo;
+    ///
+    /// let cell = Netinfo::new(FixedCell::default(), 0, [0; 4].into(), [Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()]);
+    /// for addr in cell.this_addrs() {
+    ///     println!("{addr}");
+    /// }
+    /// ```
+    pub fn this_addrs(&self) -> NetinfoThisAddrIterator<'_> {
+        let &NetinfoHeader2 {
+            n_addrs: n,
+            ref data,
+        } = NetinfoHeader2::ref_from_bytes(
+            NetinfoHeader1::ref_from_bytes(self.0.data())
+                .expect("data must fit header")
+                .peer_addr
+                .split_data()
+                .expect("data must fit header")
+                .1,
+        )
+        .expect("data must fit header");
+
+        NetinfoThisAddrIterator { data, n, i: 0 }
     }
 
     /// Unwraps into inner [`FixedCell`].
@@ -175,19 +285,25 @@ impl Netinfo {
     }
 
     fn check(data: &[u8; FIXED_CELL_SIZE]) -> bool {
-        let l: usize = data[5].into();
-        // l < 256 < FIXED_CELL_SIZE + 7
-        let n = data[6 + l];
+        // Use expect() because maximum size of header is
+        // 4 (timestamp) + 2 (peer address header) + 255 (peer address payload) + 1 (number of this addresses) = 262 < FIXED_CELL_SIZE
+        debug_assert!(262 < FIXED_CELL_SIZE, "fixed cell size is too small");
+        let header = NetinfoHeader2::ref_from_bytes(
+            NetinfoHeader1::ref_from_bytes(data)
+                .expect("data must fit header")
+                .peer_addr
+                .split_data()
+                .expect("data must fit header")
+                .1,
+        )
+        .expect("data must fit header");
+        let mut data = &header.data;
 
-        let mut data = &data[7 + l..];
-        for _ in 0..n {
-            let Some((&[_, l], r)) = data.split_first_chunk::<2>() else {
+        for _ in 0..header.n_addrs {
+            let Some((_, s)) = Addr::ref_from_bytes(data).ok().and_then(|v| v.split_data()) else {
                 return false;
             };
-            data = match r.get(l.into()..) {
-                Some(v) => v,
-                None => return false,
-            };
+            data = s;
         }
 
         true
@@ -196,31 +312,30 @@ impl Netinfo {
 
 /// Iterator for [`Netinfo`].
 ///
-/// Iterates over this addresses.
-pub struct NetinfoIterator<'a> {
-    cell: &'a Netinfo,
+/// Iterates over this addresses. Skips over invalid address.
+pub struct NetinfoThisAddrIterator<'a> {
+    data: &'a [u8],
     n: u8,
     i: u8,
-    off: usize,
 }
 
-impl Iterator for NetinfoIterator<'_> {
+impl Iterator for NetinfoThisAddrIterator<'_> {
     type Item = IpAddr;
 
     fn next(&mut self) -> Option<Self::Item> {
+        debug_assert!(self.i <= self.n);
+
         while self.i < self.n {
-            let b = &self.cell.0.data()[self.off..];
-            let [t, l] = <[u8; 2]>::try_from(&b[..2]).expect("slice must be valid array");
-            let l_ = usize::from(l);
-            let b = &b[2..2 + l_];
-            self.off += 2 + l_;
             self.i += 1;
 
-            return Some(match (t, l) {
-                (4, 4) => <[u8; 4]>::try_from(b).expect("size must be 4").into(),
-                (6, 16) => <[u8; 16]>::try_from(b).expect("size must be 16").into(),
-                _ => continue,
-            });
+            let (addr, rest) = Addr::ref_from_bytes(self.data)
+                .expect("data must be valid")
+                .split_data()
+                .expect("data must be valid");
+            self.data = rest;
+            if let r @ Some(_) = addr.to_addr() {
+                return r;
+            }
         }
 
         None
@@ -228,25 +343,6 @@ impl Iterator for NetinfoIterator<'_> {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, Some((self.n - self.i).into()))
-    }
-}
-
-/// Iterates over this addresses in the [`Netinfo`] cell.
-impl<'a> IntoIterator for &'a Netinfo {
-    type IntoIter = NetinfoIterator<'a>;
-    type Item = IpAddr;
-
-    fn into_iter(self) -> Self::IntoIter {
-        let b = self.0.data();
-        let l: usize = b[5].into();
-        let n = b[6 + l];
-
-        NetinfoIterator {
-            n,
-            i: 0,
-            off: 7 + l,
-            cell: self,
-        }
     }
 }
 
@@ -274,7 +370,7 @@ mod tests {
         );
 
         // 1000 should be way too many
-        assert!(cell.into_iter().count() < 1000);
+        assert!(cell.this_addrs().count() < 1000);
     }
 
     proptest! {
@@ -288,8 +384,8 @@ mod tests {
             );
 
             assert_eq!(cell.time(), time);
-            assert_eq!(cell.other_addr(), Some(other));
-            assert_eq!(cell.into_iter().collect::<Vec<_>>(), this);
+            assert_eq!(cell.peer_addr(), Some(other));
+            assert_eq!(cell.this_addrs().collect::<Vec<_>>(), this);
         }
     }
 }
