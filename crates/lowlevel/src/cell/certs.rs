@@ -202,7 +202,7 @@ impl Certs {
     ///
     /// # Safety
     ///
-    /// Data must form a valid CERTS payload.
+    /// Data must be a valid CERTS cell.
     pub unsafe fn new(data: VariableCell) -> Self {
         debug_assert!(Self::check(data.data()));
         Self(data)

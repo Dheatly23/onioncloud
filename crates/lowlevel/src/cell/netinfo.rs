@@ -157,7 +157,7 @@ impl Netinfo {
     ///
     /// # Safety
     ///
-    /// Data must be a 2-byte array of [`U16`].
+    /// Data must be a valid NETINFO cell.
     pub unsafe fn from_cell(data: FixedCell) -> Self {
         debug_assert!(Self::check(data.data()));
         Self(data)
