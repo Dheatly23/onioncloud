@@ -324,6 +324,7 @@ mod tests {
 
     #[cfg(feature = "tokio")]
     #[test(tokio::test)]
+    #[ignore = "requires network access"]
     async fn test_versions_controller_async() {
         use std::env::{VarError, var};
 
