@@ -7,7 +7,7 @@ use crate::cell::{
 use crate::errors;
 
 /// CERTS header.
-#[derive(FromBytes, SplitAt, KnownLayout, Immutable, Unaligned)]
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct CertsHeader {
     n_certs: u8,
@@ -31,6 +31,12 @@ struct CertRef {
     /// This data is not validated, it is the responsibility of user
     /// to validate it's valid for the given certificate type.
     data: [u8],
+}
+
+impl CertRef {
+    fn split_data(&self) -> Option<(&Self, &[u8])> {
+        Some(self.split_at(self.length.get().into())?.via_immutable())
+    }
 }
 
 /// Certificate data type.
@@ -235,13 +241,13 @@ impl Certs {
         let mut data = &header.data;
 
         for _ in 0..header.n_certs {
-            let Some(s) = CertRef::ref_from_bytes(data)
+            let Some((_, s)) = CertRef::ref_from_bytes(data)
                 .ok()
-                .and_then(|c| c.split_at(c.length.get().into()))
+                .and_then(|c| c.split_data())
             else {
                 return false;
             };
-            data = s.via_immutable().1;
+            data = s;
         }
 
         true
@@ -263,11 +269,10 @@ impl<'a> Iterator for CertsIterator<'a> {
             return None;
         }
 
-        let cert = CertRef::ref_from_bytes(self.data).expect("data must be valid");
-        let (cert, rest) = cert
-            .split_at(cert.length.get().into())
+        let (cert, rest) = CertRef::ref_from_bytes(self.data)
             .expect("data must be valid")
-            .via_immutable();
+            .split_data()
+            .expect("data must be valid");
         self.data = rest;
         self.i += 1;
 
