@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::hash_map::{Entry, HashMap};
 use std::future::Future;
 use std::io::{ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::net::SocketAddr;
@@ -41,11 +41,19 @@ struct Channel<R: Runtime, C: ChannelController, M> {
     meta: M,
 }
 
+/// A reference to channel.
+///
+/// Use [`ChannelManager::get`] to create it.
 pub struct ChannelRef<'a, R: Runtime, C: ChannelController, M> {
     inner: Pin<&'a mut Channel<R, C, M>>,
     runtime: &'a mut R,
 }
 
+/// Channel manager.
+///
+/// Manages multiple channels, each running in separate task.
+/// It is recommended to create dedicated task to manage [`ChannelManager`]
+/// and communicate to it via channels.
 pub struct ChannelManager<R: Runtime, C: ChannelController, M = ()> {
     runtime: R,
     #[allow(clippy::type_complexity)]
@@ -53,6 +61,7 @@ pub struct ChannelManager<R: Runtime, C: ChannelController, M = ()> {
 }
 
 impl<R: Runtime, C: ChannelController, M> ChannelManager<R, C, M> {
+    /// Create new [`ChannelManager`].
     pub fn new(runtime: R) -> Self {
         Self {
             runtime,
@@ -60,6 +69,7 @@ impl<R: Runtime, C: ChannelController, M> ChannelManager<R, C, M> {
         }
     }
 
+    /// Get reference to channel.
     pub fn get<'a>(&'a mut self, peer: &RelayId) -> Option<ChannelRef<'a, R, C, M>> {
         self.channels.get_mut(peer).map(|v| ChannelRef {
             inner: v.as_mut(),
@@ -67,6 +77,18 @@ impl<R: Runtime, C: ChannelController, M> ChannelManager<R, C, M> {
         })
     }
 
+    /// Checks if channel with peer ID exists.
+    ///
+    /// Note that it doesn't check if channel is running.
+    pub fn has(&self, peer: &RelayId) -> bool {
+        self.channels.contains_key(peer)
+    }
+
+    /// Open new channel if it doesn't exist.
+    ///
+    /// # Parameters
+    /// - `cfg` : Channel configuration.
+    /// - `meta` : Metadata associated with channel.
     pub fn create(&mut self, cfg: C::Config, meta: M) -> ChannelRef<'_, R, C, M>
     where
         R: 'static + Clone,
@@ -96,16 +118,72 @@ impl<R: Runtime, C: ChannelController, M> ChannelManager<R, C, M> {
         }
     }
 
+    /// Remove channel from manager.
+    ///
+    /// Make sure channel has stopped running before removing (use [`ChannelRef::completion`] to wait).
     pub fn remove(&mut self, peer: &RelayId) -> bool {
         self.channels.remove(peer).is_some()
+    }
+
+    /// Insert existing stream to manager if it doesn't exist.
+    ///
+    /// Useful for relays where connection comes from outside.
+    ///
+    /// # Parameters
+    /// - `stream` : Network stream.
+    /// - `cfg` : Channel configuration.
+    /// - `meta` : Metadata associated with channel.
+    pub fn insert(
+        &mut self,
+        stream: R::Stream,
+        cfg: C::Config,
+        meta: M,
+    ) -> IoResult<ChannelRef<'_, R, C, M>>
+    where
+        R: 'static + Clone,
+        C: 'static,
+    {
+        let v = match self.channels.entry(*cfg.peer_id()) {
+            Entry::Occupied(e) => {
+                drop((stream, cfg, meta));
+                e.into_mut()
+            }
+            Entry::Vacant(e) => {
+                let (sender, receiver) = bounded(0);
+                let inner = Arc::new(ChannelInner {
+                    config: cfg,
+                    sender,
+                    receiver,
+                });
+                let peer_addr = stream.peer_addr()?;
+
+                e.insert(Box::pin(Channel {
+                    handle: HandleWrapper::Fut(self.runtime.spawn(handle_stream(
+                        self.runtime.clone(),
+                        inner.clone(),
+                        stream,
+                        peer_addr,
+                    ))),
+                    inner,
+                    meta,
+                }))
+            }
+        };
+
+        Ok(ChannelRef {
+            inner: v.as_mut(),
+            runtime: &mut self.runtime,
+        })
     }
 }
 
 impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
+    /// Gets reference to channel metadata.
     pub fn meta(&mut self) -> Pin<&mut M> {
         self.inner.as_mut().project().meta
     }
 
+    /// Send a control message.
     pub async fn send_control(
         &mut self,
         msg: C::ControlMsg,
@@ -125,6 +203,9 @@ impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
         }
     }
 
+    /// Send a control message and wait for completion.
+    ///
+    /// Useful for sending shutdown message.
     pub async fn send_and_completion(
         &mut self,
         msg: C::ControlMsg,
@@ -136,6 +217,7 @@ impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
         }
     }
 
+    /// Waits controller for completion.
     pub async fn completion(&mut self) -> Result<(), errors::HandleError> {
         if self.inner.as_mut().project().handle.as_mut().await {
             Ok(())
@@ -144,6 +226,9 @@ impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
         }
     }
 
+    /// Restarts controller if stopped.
+    ///
+    /// Sometimes it's useful to reuse state.
     pub fn restart(&mut self) -> bool
     where
         R: 'static + Clone,
@@ -159,6 +244,37 @@ impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
             self.runtime
                 .spawn(handle_channel(self.runtime.clone(), this.inner.clone())),
         ));
+        true
+    }
+
+    /// Restarts controller if stopped (with attached stream).
+    pub fn restart_with(&mut self, stream: R::Stream) -> bool
+    where
+        R: 'static + Clone,
+        C: 'static,
+    {
+        let mut this = self.inner.as_mut().project();
+
+        if !matches!(&*this.handle, HandleWrapper::Res(_)) {
+            return false;
+        }
+
+        let peer_addr = match stream.peer_addr() {
+            Ok(v) => v,
+            Err(e) => {
+                error!(error = format_args!("{}", e), "cannot get peer address");
+                return false;
+            }
+        };
+
+        this.handle
+            .as_mut()
+            .set(HandleWrapper::Fut(self.runtime.spawn(handle_stream(
+                self.runtime.clone(),
+                this.inner.clone(),
+                stream,
+                peer_addr,
+            ))));
         true
     }
 }
@@ -199,7 +315,7 @@ where
     }
 }
 
-#[instrument(skip_all, fields(cfg.peer_id = %print_hex(cfg.config.peer_id())))]
+#[instrument(skip_all, fields(peer_id = %print_hex(cfg.config.peer_id())))]
 async fn handle_channel<R: Runtime, C: ChannelController>(
     runtime: R,
     cfg: Arc<ChannelInner<C>>,
@@ -229,6 +345,16 @@ async fn handle_channel<R: Runtime, C: ChannelController>(
     };
     debug!("connected to peer at {peer_addr}");
 
+    handle_stream(runtime, cfg, stream, peer_addr).await
+}
+
+#[instrument(skip_all, fields(peer_id = %print_hex(cfg.config.peer_id())))]
+async fn handle_stream<R: Runtime, C: ChannelController>(
+    runtime: R,
+    cfg: Arc<ChannelInner<C>>,
+    stream: R::Stream,
+    peer_addr: SocketAddr,
+) -> bool {
     let tls = match setup_client(peer_addr.ip()) {
         Ok(v) => v,
         Err(e) => {
