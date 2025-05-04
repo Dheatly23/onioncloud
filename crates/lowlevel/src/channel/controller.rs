@@ -3,6 +3,7 @@ use std::io::Error as IoError;
 
 use rustls::Error as RustlsError;
 
+use super::circ_map::CircuitMap;
 use super::{ChannelConfig, ChannelInput, ChannelOutput};
 use crate::util::sans_io::Handle;
 
@@ -11,6 +12,7 @@ use crate::util::sans_io::Handle;
 pub struct Timeout;
 
 /// Wrapper type for signalling a control message.
+#[derive(Debug)]
 pub struct ControlMsg<M>(pub M);
 
 impl<M> ControlMsg<M> {
@@ -20,22 +22,29 @@ impl<M> ControlMsg<M> {
     }
 }
 
+/// Wrapper type for signalling a cell message.
+#[derive(Debug)]
+pub struct CellMsg<M>(pub M);
+
+impl<M> CellMsg<M> {
+    /// Unwraps into inner value.
+    pub fn into_inner(self) -> M {
+        self.0
+    }
+}
+
 /// Trait for a channel controller.
 pub trait ChannelController:
     Send
-    + for<'a, 'b> Handle<
-        ChannelInput<'a, 'b, Self::Cell, Self::CircMeta>,
-        Return = Result<ChannelOutput, Self::Error>,
-    > + for<'a, 'b> Handle<
+    + for<'a> Handle<
         (
-            ControlMsg<Self::ControlMsg>,
-            ChannelInput<'a, 'b, Self::Cell, Self::CircMeta>,
+            ChannelInput<'a>,
+            &'a mut CircuitMap<Self::Cell, Self::CircMeta>,
         ),
         Return = Result<ChannelOutput, Self::Error>,
-    > + for<'a, 'b> Handle<
-        (Timeout, ChannelInput<'a, 'b, Self::Cell, Self::CircMeta>),
-        Return = Result<ChannelOutput, Self::Error>,
-    >
+    > + Handle<ControlMsg<Self::ControlMsg>, Return = Result<(), Self::Error>>
+    + Handle<CellMsg<Self::Cell>, Return = Result<(), Self::Error>>
+    + Handle<Timeout, Return = Result<(), Self::Error>>
 {
     /// Error type.
     type Error: 'static + Error + Send + Sync + From<IoError> + From<RustlsError>;
@@ -191,11 +200,14 @@ mod tests {
     }
 
     // NOTE: Cannot use Self:: syntax here because of cycles.
-    impl<'a, 'b> Handle<ChannelInput<'a, 'b, Cell, ()>> for VersionOnlyController {
+    impl<'a> Handle<(ChannelInput<'a>, &'a mut CircuitMap<Cell, ()>)> for VersionOnlyController {
         type Return = Result<ChannelOutput, ControllerError>;
 
-        #[instrument(skip_all)]
-        fn handle(&mut self, mut input: ChannelInput<'a, 'b, Cell, ()>) -> Self::Return {
+        #[instrument(name = "handle_normal", skip_all)]
+        fn handle(
+            &mut self,
+            (mut input, _): (ChannelInput<'a>, &'a mut CircuitMap<Cell, ()>),
+        ) -> Self::Return {
             if let Some(h) = &mut self.cell_write {
                 match h.handle(input.writer()) {
                     Ok(()) => {
@@ -238,32 +250,35 @@ mod tests {
         }
     }
 
-    impl<'a, 'b> Handle<(Timeout, ChannelInput<'a, 'b, Cell, ()>)> for VersionOnlyController {
-        type Return = Result<ChannelOutput, ControllerError>;
+    impl Handle<Timeout> for VersionOnlyController {
+        type Return = Result<(), ControllerError>;
 
-        fn handle(
-            &mut self,
-            (_, input): (Timeout, ChannelInput<'a, 'b, Cell, ()>),
-        ) -> Self::Return {
+        #[instrument(name = "handle_timeout", skip_all)]
+        fn handle(&mut self, _: Timeout) -> Self::Return {
             debug!("handling timeout");
             if !self.delay || self.target_time.is_none() {
                 panic!("controller does not set timeout");
             }
             self.delay = false;
-            self.handle(input)
+            Ok(())
         }
     }
 
-    impl<'a, 'b> Handle<(ControlMsg<Infallible>, ChannelInput<'a, 'b, Cell, ()>)>
-        for VersionOnlyController
-    {
-        type Return = Result<ChannelOutput, ControllerError>;
+    impl Handle<ControlMsg<Infallible>> for VersionOnlyController {
+        type Return = Result<(), ControllerError>;
 
-        fn handle(
-            &mut self,
-            _: (ControlMsg<Infallible>, ChannelInput<'a, 'b, Cell, ()>),
-        ) -> Self::Return {
-            panic!("controller should never get any message");
+        #[instrument(name = "handle_control", skip_all)]
+        fn handle(&mut self, _: ControlMsg<Infallible>) -> Self::Return {
+            panic!("controller should never get any control message");
+        }
+    }
+
+    impl Handle<CellMsg<Cell>> for VersionOnlyController {
+        type Return = Result<(), ControllerError>;
+
+        #[instrument(name = "handle_cell", skip_all)]
+        fn handle(&mut self, _: CellMsg<Cell>) -> Self::Return {
+            panic!("controller should never get any cell message");
         }
     }
 

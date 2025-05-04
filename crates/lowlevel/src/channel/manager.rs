@@ -1,28 +1,30 @@
 use std::collections::hash_map::{Entry, HashMap};
 use std::future::Future;
-use std::io::{ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
+use std::io::{Error as IoError, ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll::*;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use flume::r#async::RecvStream;
 use flume::{Receiver, Sender, bounded};
 use futures_core::Stream as _;
-use futures_io::AsyncWrite;
 use futures_util::select_biased;
 use pin_project::pin_project;
+use rustls::Error as RustlsError;
 use rustls::client::ClientConnection;
 use scopeguard::guard;
 use tracing::{Span, debug, debug_span, error, info, instrument, trace, warn};
 
-use super::controller::{ChannelController, ControlMsg, Timeout};
-use super::{ChannelConfig, ChannelInput, ChannelOutput, CircuitMap, Stream};
+use super::circ_map::CircuitMap;
+use super::controller::{CellMsg, ChannelController, ControlMsg, Timeout};
+use super::{ChannelConfig, ChannelInput, Stream};
 use crate::crypto::relay::RelayId;
 use crate::crypto::tls::setup_client;
 use crate::errors;
-use crate::runtime::{Runtime, Stream as _, Timer};
+use crate::runtime::{Runtime, Stream as RTStream, Timer};
 use crate::util::{AsyncReadWrapper, AsyncWriteWrapper, FutureRepollable, print_hex, print_list};
 
 struct ChannelInner<C: ChannelController> {
@@ -408,13 +410,16 @@ async fn handle_stream<R: Runtime, C: ChannelController>(
 
     let fut = ChannelFut {
         runtime,
-        stream,
+        stream: StreamWrapper {
+            stream,
+            tls,
+            addr: peer_addr,
+        },
         timer: None,
         timer_finished: true,
-        tls: TlsWrapper(tls, peer_addr),
         cont: C::new(&cfg.config),
         ctrl_recv: Some(cfg.receiver.clone().into_stream()),
-        circ_map: Some(CircuitMap::new()),
+        circ_map: Some(CircuitMap::default()),
         state: State::Normal,
         span: debug_span!("ChannelFut"),
     };
@@ -441,11 +446,10 @@ enum State {
 struct ChannelFut<R: Runtime, C: ChannelController> {
     runtime: R,
     #[pin]
-    stream: R::Stream,
+    stream: StreamWrapper<R::Stream>,
     #[pin]
     timer: Option<R::Timer>,
     timer_finished: bool,
-    tls: TlsWrapper,
     #[pin]
     ctrl_recv: Option<RecvStream<'static, C::ControlMsg>>,
     circ_map: Option<CircuitMap<C::Cell, C::CircMeta>>,
@@ -454,19 +458,20 @@ struct ChannelFut<R: Runtime, C: ChannelController> {
     span: Span,
 }
 
+const FLAG_READ: u8 = 1 << 0;
+const FLAG_WRITE: u8 = 1 << 1;
+const FLAG_TIMEOUT: u8 = 1 << 2;
+const FLAG_CTRLMSG: u8 = 1 << 3;
+const FLAG_FLUSH: u8 = 1 << 4;
+const FLAG_CELLMSG: u8 = 1 << 5;
+const FLAG_EMPTY_HANDLE: u8 = 1 << 7;
+
 impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
     type Output = Result<(), C::Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
         let mut pending = 0u8;
-
-        const FLAG_READ: u8 = 1 << 0;
-        const FLAG_WRITE: u8 = 1 << 1;
-        const FLAG_TIMEOUT: u8 = 1 << 2;
-        const FLAG_CTRLMSG: u8 = 1 << 3;
-        const FLAG_FLUSH: u8 = 1 << 4;
-        const FLAG_EMPTY_HANDLE: u8 = 1 << 7;
 
         'main: loop {
             let _guard = this.span.enter();
@@ -481,7 +486,8 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                 }
                 State::ReqShutdown => {
                     debug!("graceful shutdown request received");
-                    this.tls.0.send_close_notify();
+                    this.stream.as_mut().tls().send_close_notify();
+                    this.timer.set(None);
                     *this.state = State::TlsShutdown;
                     *this.circ_map = None;
                     this.ctrl_recv.set(None);
@@ -491,134 +497,28 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
             }
 
             // Process TLS
-            loop {
-                if let Err(e) = this.tls.0.process_new_packets() {
-                    warn!("shutting down: TLS error");
+            match this
+                .stream
+                .as_mut()
+                .process(cx, *this.state == State::TlsShutdown, pending)
+            {
+                Ok(Pending) => return Pending,
+                Ok(Ready(None)) => {
                     *this.state = State::Shutdown;
-                    return Poll::Ready(Err(e.into()));
+                    continue;
                 }
-
-                if pending & FLAG_FLUSH == 0 {
-                    match this.stream.as_mut().poll_flush(cx) {
-                        Poll::Pending => pending |= FLAG_FLUSH,
-                        Poll::Ready(Ok(())) => (),
-                        Poll::Ready(Err(e)) => {
-                            warn!("shutting down: IO error");
-                            *this.state = State::Shutdown;
-                            return Poll::Ready(Err(e.into()));
-                        }
-                    }
+                Ok(Ready(Some(v))) => pending = v,
+                Err(e) => {
+                    *this.state = State::Shutdown;
+                    return Ready(Err(match e {
+                        ErrorType::Io(e) => e.into(),
+                        ErrorType::Tls(e) => e.into(),
+                    }));
                 }
-
-                let wants_write = pending & FLAG_WRITE == 0 && this.tls.0.wants_write();
-                let wants_read = pending & FLAG_READ == 0 && this.tls.0.wants_read();
-                if !(wants_write || wants_read) {
-                    break;
-                }
-
-                if wants_write {
-                    let mut wrapper =
-                        guard(AsyncWriteWrapper::new(cx, this.stream.as_mut()), |w| {
-                            if w.finish() {
-                                pending |= FLAG_WRITE;
-                            }
-                        });
-
-                    while this.tls.0.wants_write() {
-                        match this.tls.0.write_tls(&mut *wrapper) {
-                            Ok(0) => {
-                                debug_assert!(
-                                    !this.tls.0.wants_write(),
-                                    "TLS writes EOF yet wants to write more"
-                                );
-                                info!("shutting down: TLS write finished");
-                                *this.state = State::Shutdown;
-                                continue 'main;
-                            }
-                            Ok(_) => (),
-                            Err(e)
-                                if matches!(
-                                    e.kind(),
-                                    ErrorKind::Interrupted | ErrorKind::WouldBlock
-                                ) =>
-                            {
-                                break;
-                            }
-                            Err(e) => {
-                                warn!("shutting down: IO error");
-                                *this.state = State::Shutdown;
-                                return Poll::Ready(Err(e.into()));
-                            }
-                        }
-                    }
-                }
-
-                if wants_read {
-                    let mut wrapper = guard(AsyncReadWrapper::new(cx, this.stream.as_mut()), |w| {
-                        if w.finish() {
-                            pending |= FLAG_READ;
-                        }
-                    });
-
-                    while this.tls.0.wants_read() {
-                        match this.tls.0.read_tls(&mut *wrapper) {
-                            Ok(0) => {
-                                debug_assert!(
-                                    !this.tls.0.wants_read(),
-                                    "TLS reads EOF yet wants to read more"
-                                );
-                                break;
-                            }
-                            Ok(_) => (),
-                            Err(e)
-                                if matches!(
-                                    e.kind(),
-                                    ErrorKind::Interrupted | ErrorKind::WouldBlock
-                                ) =>
-                            {
-                                break;
-                            }
-                            Err(e) => {
-                                warn!("shutting down: IO error");
-                                *this.state = State::Shutdown;
-                                return Poll::Ready(Err(e.into()));
-                            }
-                        }
-                    }
-                }
-            }
-
-            if *this.state == State::TlsShutdown && pending & (FLAG_READ | FLAG_WRITE) == 0 {
-                info!("shutting down: TLS shutdown finished");
-                *this.state = State::Shutdown;
-                continue 'main;
-            }
-
-            if this.tls.0.is_handshaking() || *this.state == State::TlsShutdown {
-                if this.tls.0.is_handshaking() {
-                    debug!("pending: TLS handshaking");
-                } else {
-                    debug!("pending: TLS shutdown");
-                }
-                assert_ne!(
-                    pending & (FLAG_READ | FLAG_WRITE),
-                    0,
-                    "TLS handshake pending but IO is not"
-                );
-                return Poll::Pending;
-            }
-
-            const fn match_out<E>(v: &Option<Result<ChannelOutput, E>>) -> bool {
-                matches!(
-                    v,
-                    None | Some(Ok(ChannelOutput {
-                        shutdown: false,
-                        ..
-                    }))
-                )
             }
 
             // Process controller
+            let mut has_event = false;
             let mut ctrl_recv = this
                 .ctrl_recv
                 .as_mut()
@@ -629,9 +529,6 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                 .as_mut()
                 .expect("circuit map should not be dropped");
 
-            let mut time = None;
-            let mut time = move || *time.get_or_insert_with(Instant::now);
-            let mut ret = None;
             if !*this.timer_finished && pending & FLAG_TIMEOUT == 0 {
                 pending |= FLAG_TIMEOUT;
 
@@ -643,94 +540,87 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                 {
                     *this.timer_finished = true;
                     // Event: timeout
-                    ret = Some(this.cont.handle((
-                        Timeout,
-                        ChannelInput::new(this.tls, Some(cx), circ_map, time()),
-                    )));
+                    this.cont
+                        .handle(Timeout)
+                        .inspect_err(|_| *this.state = State::Shutdown)?;
+                    has_event = true;
                 }
             }
 
             if pending & FLAG_CTRLMSG == 0 {
-                while match_out(&ret) {
-                    let msg = match ctrl_recv.as_mut().poll_next(cx) {
-                        Poll::Pending => {
-                            pending |= FLAG_CTRLMSG;
-                            break;
-                        }
-                        Poll::Ready(Some(v)) => v,
-                        Poll::Ready(None) => {
-                            error!(
-                                "shutting down: control channel disconnected (this might be a bug in channel manager)"
-                            );
-                            *this.state = State::Shutdown;
-                            continue 'main;
-                        }
+                while let Ready(msg) = ctrl_recv.as_mut().poll_next(cx) {
+                    let Some(msg) = msg else {
+                        error!(
+                            "shutting down: control channel disconnected (this might be a bug in channel manager)"
+                        );
+                        *this.state = State::Shutdown;
+                        continue 'main;
                     };
 
                     // Event: control message
-                    ret = Some(this.cont.handle((
-                        ControlMsg(msg),
-                        ChannelInput::new(this.tls, Some(cx), circ_map, time()),
-                    )));
+                    this.cont
+                        .handle(ControlMsg(msg))
+                        .inspect_err(|_| *this.state = State::Shutdown)?;
+                    has_event = true;
                 }
+
+                pending |= FLAG_CTRLMSG;
             }
 
-            if ret.is_none() && pending & FLAG_EMPTY_HANDLE == 0 {
-                // No event
-                ret =
-                    Some(
-                        this.cont
-                            .handle(ChannelInput::new(this.tls, Some(cx), circ_map, time())),
-                    );
-            }
-            // Mark empty handle as true, because either timeout already fires or it has been handled previously.
-            pending |= FLAG_EMPTY_HANDLE;
-
-            let ret = match ret.transpose() {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!("shutting down: controller error");
-                    *this.state = State::Shutdown;
-                    return Poll::Ready(Err(e));
+            if pending & FLAG_CELLMSG == 0 {
+                while let Ready(msg) = circ_map.poll_recv(cx) {
+                    // Event: cell message
+                    this.cont
+                        .handle(CellMsg(
+                            msg.expect("circuit map aggregate receiver should never close"),
+                        ))
+                        .inspect_err(|_| *this.state = State::Shutdown)?;
+                    has_event = true;
                 }
-            };
 
-            match ret {
-                Some(ChannelOutput { shutdown: true, .. }) => {
+                pending |= FLAG_CELLMSG;
+            }
+
+            if has_event || pending & FLAG_EMPTY_HANDLE == 0 {
+                // Handle channel
+                let ret = this
+                    .cont
+                    .handle((
+                        ChannelInput::new(this.stream.as_mut().as_stream(), Instant::now()),
+                        circ_map,
+                    ))
+                    .inspect_err(|_| *this.state = State::Shutdown)?;
+
+                if ret.shutdown {
                     info!("controller requesting graceful shutdown");
                     *this.state = State::ReqShutdown;
                     continue;
                 }
-                Some(ChannelOutput {
-                    timeout: Some(t), ..
-                }) => {
-                    debug!(timeout = format!("{:?}", t), "resetting timer");
-                    let f = loop {
-                        if let Some(f) = this.timer.as_mut().as_pin_mut() {
-                            break f;
-                        }
-                        this.timer.set(Some(this.runtime.timer(t)));
-                    };
+                if let Some(t) = ret.timeout {
+                    debug!(timeout = format_args!("{:?}", t), "resetting timer");
+                    match this.timer.as_mut().as_pin_mut() {
+                        Some(f) => f.reset(t),
+                        None => this.timer.set(Some(this.runtime.timer(t))),
+                    }
 
-                    f.reset(t);
                     *this.timer_finished = false;
                     pending &= !FLAG_TIMEOUT;
-                }
-                Some(ChannelOutput { timeout: None, .. }) => {
+                } else {
                     debug!("clearing timer");
                     // Regardless, mark timer as "finished"
                     *this.timer_finished = true;
                 }
-                _ => (),
             }
+            // Mark empty handle as true, because either timeout already fires or it has been handled previously.
+            pending |= FLAG_EMPTY_HANDLE;
 
             let mut retry = false;
-            if pending & FLAG_READ == 0 && this.tls.0.wants_read() {
+            if pending & FLAG_READ == 0 && this.stream.as_mut().tls().wants_read() {
                 trace!("repolling: TLS wants to read");
                 pending &= !FLAG_EMPTY_HANDLE; // Make sure controller will handle
                 retry = true;
             }
-            if pending & FLAG_WRITE == 0 && this.tls.0.wants_write() {
+            if pending & FLAG_WRITE == 0 && this.stream.as_mut().tls().wants_write() {
                 trace!("repolling: TLS wants to write");
                 pending &= !FLAG_EMPTY_HANDLE; // Make sure controller will handle
                 retry = true;
@@ -743,44 +633,177 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
             if !retry {
                 trace!("all futures are pending");
                 // All futures are pending.
-                return Poll::Pending;
+                return Pending;
             }
         }
     }
 }
 
-struct TlsWrapper(ClientConnection, SocketAddr);
+enum ErrorType {
+    Io(IoError),
+    Tls(RustlsError),
+}
 
-impl Read for TlsWrapper {
+impl From<IoError> for ErrorType {
+    fn from(e: IoError) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<RustlsError> for ErrorType {
+    fn from(e: RustlsError) -> Self {
+        Self::Tls(e)
+    }
+}
+
+#[pin_project]
+struct StreamWrapper<S> {
+    #[pin]
+    stream: S,
+    tls: ClientConnection,
+    addr: SocketAddr,
+}
+
+impl<S: RTStream> StreamWrapper<S> {
+    #[instrument(level = "debug", skip(self, cx))]
+    fn process(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        is_shutdown: bool,
+        mut pending: u8,
+    ) -> Result<Poll<Option<u8>>, ErrorType> {
+        let mut this = self.project();
+
+        loop {
+            this.tls.process_new_packets()?;
+
+            if pending & FLAG_FLUSH == 0 && this.stream.as_mut().poll_flush(cx)?.is_pending() {
+                pending |= FLAG_FLUSH;
+            }
+
+            let wants_write = pending & FLAG_WRITE == 0 && this.tls.wants_write();
+            let wants_read = pending & FLAG_READ == 0 && this.tls.wants_read();
+            if !(wants_write || wants_read) {
+                break;
+            }
+
+            if wants_write {
+                let mut wrapper = guard(AsyncWriteWrapper::new(cx, this.stream.as_mut()), |w| {
+                    if w.finish() {
+                        pending |= FLAG_WRITE;
+                    }
+                });
+
+                while this.tls.wants_write() {
+                    match this.tls.write_tls(&mut *wrapper) {
+                        Ok(0) => {
+                            debug_assert!(
+                                !this.tls.wants_write(),
+                                "TLS writes EOF yet wants to write more"
+                            );
+                            break;
+                        }
+                        Ok(_) => (),
+                        Err(e) => match e.kind() {
+                            ErrorKind::Interrupted | ErrorKind::WouldBlock => break,
+                            _ => return Err(e.into()),
+                        },
+                    }
+                }
+            }
+
+            if wants_read {
+                let mut wrapper = guard(AsyncReadWrapper::new(cx, this.stream.as_mut()), |w| {
+                    if w.finish() {
+                        pending |= FLAG_READ;
+                    }
+                });
+
+                while this.tls.wants_read() {
+                    match this.tls.read_tls(&mut *wrapper) {
+                        Ok(0) => {
+                            debug_assert!(
+                                !this.tls.wants_read(),
+                                "TLS reads EOF yet wants to read more"
+                            );
+                            break;
+                        }
+                        Ok(_) => (),
+                        Err(e) => match e.kind() {
+                            ErrorKind::Interrupted | ErrorKind::WouldBlock => break,
+                            _ => return Err(e.into()),
+                        },
+                    }
+                }
+            }
+        }
+
+        Ok(if is_shutdown && pending & (FLAG_READ | FLAG_WRITE) == 0 {
+            info!("TLS shutdown finished");
+            Ready(None)
+        } else if this.tls.is_handshaking() || is_shutdown {
+            if this.tls.is_handshaking() {
+                debug!("pending: TLS handshaking");
+            } else {
+                debug!("pending: TLS shutdown");
+            }
+            assert_ne!(
+                pending & (FLAG_READ | FLAG_WRITE),
+                0,
+                "TLS handshake pending but IO is not"
+            );
+            Pending
+        } else {
+            Ready(Some(pending))
+        })
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
+        self.project().stream.poll_close(cx)
+    }
+}
+
+impl<S> StreamWrapper<S> {
+    fn tls(self: Pin<&mut Self>) -> &mut ClientConnection {
+        self.project().tls
+    }
+
+    fn as_stream(self: Pin<&mut Self>) -> &mut dyn Stream {
+        // SAFETY: Stream trait cannot access stream.
+        unsafe { Pin::into_inner_unchecked(self) }
+    }
+}
+
+impl<S> Read for StreamWrapper<S> {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-        self.0.reader().read(buf)
+        self.tls.reader().read(buf)
     }
 
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> IoResult<usize> {
-        self.0.reader().read_vectored(bufs)
+        self.tls.reader().read_vectored(bufs)
     }
 }
 
-impl Write for TlsWrapper {
+impl<S> Write for StreamWrapper<S> {
     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
-        self.0.writer().write(buf)
+        self.tls.writer().write(buf)
     }
 
     fn flush(&mut self) -> IoResult<()> {
-        self.0.writer().flush()
+        self.tls.writer().flush()
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> IoResult<usize> {
-        self.0.writer().write_vectored(bufs)
+        self.tls.writer().write_vectored(bufs)
     }
 }
 
-impl Stream for TlsWrapper {
+impl<S> Stream for StreamWrapper<S> {
     fn link_cert(&self) -> Option<&[u8]> {
-        self.0.peer_certificates()?.first().map(|v| &v[..])
+        self.tls.peer_certificates()?.first().map(|v| &v[..])
     }
 
     fn peer_addr(&self) -> &SocketAddr {
-        &self.1
+        &self.addr
     }
 }

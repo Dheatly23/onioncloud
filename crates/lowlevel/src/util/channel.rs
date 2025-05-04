@@ -4,8 +4,9 @@ use std::io::{ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use crate::channel::controller::{ChannelController, ControlMsg, Timeout};
-use crate::channel::{ChannelInput, ChannelOutput, CircuitMap, Stream};
+use crate::channel::circ_map::CircuitMap;
+use crate::channel::controller::{CellMsg, ChannelController, ControlMsg, Timeout};
+use crate::channel::{ChannelInput, Stream};
 
 /// Test controller.
 ///
@@ -40,7 +41,7 @@ impl<C: ChannelController> TestController<C> {
                 recv_eof: false,
             },
             controller,
-            circ_map: CircuitMap::new(),
+            circ_map: CircuitMap::default(),
             time: Instant::now(),
             timeout: None,
             ctrl_msgs: Vec::new(),
@@ -103,56 +104,50 @@ impl<C: ChannelController> TestController<C> {
 
     /// Run controller handler.
     pub fn process(&mut self) -> Result<ProcessedChannelOutput, C::Error> {
-        const fn match_out(v: &Option<ChannelOutput>) -> bool {
-            matches!(
-                v,
-                None | Some(ChannelOutput {
-                    shutdown: false,
-                    ..
-                })
-            )
-        }
+        let mut empty_handle = false;
 
-        let mut ret = None;
+        loop {
+            let mut has_event = false;
 
-        if self.timeout.as_ref().is_some_and(|t| *t <= self.time) {
-            self.timeout = None;
-            // Event: timeout
-            ret = Some(self.controller.handle((
-                Timeout,
-                ChannelInput::new(&mut self.stream, None, &mut self.circ_map, self.time),
-            ))?);
-        }
+            if self.timeout.as_ref().is_some_and(|t| *t <= self.time) {
+                self.timeout = None;
+                // Event: timeout
+                self.controller.handle(Timeout)?;
+                has_event = true;
+            }
 
-        if match_out(&ret) {
             for m in self.ctrl_msgs.drain(..) {
                 // Event: control message
-                ret = Some(self.controller.handle((
-                    ControlMsg(m),
-                    ChannelInput::new(&mut self.stream, None, &mut self.circ_map, self.time),
-                ))?);
+                self.controller.handle(ControlMsg(m))?;
+                has_event = true;
+            }
 
-                if !match_out(&ret) {
-                    break;
+            while let Ok(m) = self.circ_map.try_recv() {
+                // Event: cell message
+                self.controller.handle(CellMsg(m))?;
+                has_event = true;
+            }
+
+            if has_event || !empty_handle {
+                let ret = self.controller.handle((
+                    ChannelInput::new(&mut self.stream, self.time),
+                    &mut self.circ_map,
+                ))?;
+                empty_handle = true;
+
+                if ret.shutdown {
+                    return Ok(ProcessedChannelOutput { shutdown: true });
+                }
+
+                self.timeout = ret.timeout;
+                if self.timeout.is_some() {
+                    // Repoll timer
+                    continue;
                 }
             }
+
+            return Ok(ProcessedChannelOutput { shutdown: false });
         }
-
-        let ret = match ret {
-            // No particular event
-            None => self.controller.handle(ChannelInput::new(
-                &mut self.stream,
-                None,
-                &mut self.circ_map,
-                self.time,
-            ))?,
-            Some(v) => v,
-        };
-
-        self.timeout = ret.timeout;
-        Ok(ProcessedChannelOutput {
-            shutdown: ret.shutdown,
-        })
     }
 }
 
