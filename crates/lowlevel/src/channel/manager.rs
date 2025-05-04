@@ -700,11 +700,8 @@ impl<S: RTStream> StreamWrapper<S> {
                 while this.tls.wants_write() {
                     match this.tls.write_tls(&mut *wrapper) {
                         Ok(0) => {
-                            debug_assert!(
-                                !this.tls.wants_write(),
-                                "TLS writes EOF yet wants to write more"
-                            );
-                            break;
+                            info!("shutting down: write end connection closed");
+                            return Ok(Ready(None));
                         }
                         Ok(_) => (),
                         Err(e) => match e.kind() {
@@ -725,11 +722,8 @@ impl<S: RTStream> StreamWrapper<S> {
                 while this.tls.wants_read() {
                     match this.tls.read_tls(&mut *wrapper) {
                         Ok(0) => {
-                            debug_assert!(
-                                !this.tls.wants_read(),
-                                "TLS reads EOF yet wants to read more"
-                            );
-                            break;
+                            info!("shutting down: read end connection closed");
+                            return Ok(Ready(None));
                         }
                         Ok(_) => (),
                         Err(e) => match e.kind() {
