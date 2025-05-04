@@ -49,13 +49,22 @@ pub trait ChannelController:
     /// Error type.
     type Error: 'static + Error + Send + Sync + From<IoError> + From<RustlsError>;
     /// Channel configuration.
-    type Config: ChannelConfig + Send + Sync;
+    type Config: 'static + ChannelConfig + Send + Sync;
     /// Control message.
     type ControlMsg: 'static + Send;
     /// Cell type.
     type Cell: 'static + Send;
     /// Circuit metadata.
-    type CircMeta: Send;
+    type CircMeta: 'static + Send;
+
+    /// Get circuit channel capacity.
+    fn channel_cap(_config: &Self::Config) -> usize {
+        256
+    }
+    /// Get circuit aggregation channel capacity.
+    fn channel_aggregate_cap(_config: &Self::Config) -> usize {
+        256
+    }
 
     fn new(config: &Self::Config) -> Self;
 }
@@ -284,14 +293,14 @@ mod tests {
 
     #[test]
     fn test_versions_controller() {
-        let mut v = TestController::new(
-            VersionOnlyController::new(&VersionOnlyConfig {
+        let mut v = TestController::<VersionOnlyController>::new(
+            &VersionOnlyConfig {
                 cfg: SimpleConfig {
                     id: RelayId::default(),
                     addrs: Cow::Borrowed(&[]),
                 },
                 delay: false,
-            }),
+            },
             ([127, 0, 0, 1], 443).into(),
             vec![],
         );
@@ -306,14 +315,14 @@ mod tests {
 
     #[test]
     fn test_versions_controller_timeout() {
-        let mut v = TestController::new(
-            VersionOnlyController::new(&VersionOnlyConfig {
+        let mut v = TestController::<VersionOnlyController>::new(
+            &VersionOnlyConfig {
                 cfg: SimpleConfig {
                     id: RelayId::default(),
                     addrs: Cow::Borrowed(&[]),
                 },
                 delay: true,
-            }),
+            },
             ([127, 0, 0, 1], 443).into(),
             vec![],
         );

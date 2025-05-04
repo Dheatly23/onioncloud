@@ -27,7 +27,7 @@ impl<C: ChannelController> TestController<C> {
     /// - `controller` : Channel controller to be tested.
     /// - `link_cert` : Link certificate.
     pub fn new(
-        controller: C,
+        config: &C::Config,
         peer_addr: SocketAddr,
         link_cert: impl Into<Cow<'static, [u8]>>,
     ) -> Self {
@@ -40,8 +40,8 @@ impl<C: ChannelController> TestController<C> {
                 send_eof: false,
                 recv_eof: false,
             },
-            controller,
-            circ_map: CircuitMap::default(),
+            controller: C::new(config),
+            circ_map: CircuitMap::new(C::channel_cap(config), C::channel_aggregate_cap(config)),
             time: Instant::now(),
             timeout: None,
             ctrl_msgs: Vec::new(),

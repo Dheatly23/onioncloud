@@ -419,7 +419,10 @@ async fn handle_stream<R: Runtime, C: ChannelController>(
         timer_finished: true,
         cont: C::new(&cfg.config),
         ctrl_recv: Some(cfg.receiver.clone().into_stream()),
-        circ_map: Some(CircuitMap::default()),
+        circ_map: Some(CircuitMap::new(
+            C::channel_cap(&cfg.config),
+            C::channel_aggregate_cap(&cfg.config),
+        )),
         state: State::Normal,
         span: debug_span!("ChannelFut"),
     };
