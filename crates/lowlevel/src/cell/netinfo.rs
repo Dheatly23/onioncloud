@@ -48,6 +48,18 @@ macro_rules! netinfo_header_peeer_addr {
             $($l([u8; $n], NetinfoHeader2<[u8; const { FIXED_CELL_SIZE - HSZ - $n }]>) = $n,)*
         }
 
+        impl From<[u8; 0]> for NetinfoHeaderPeerAddr {
+            fn from(a: [u8; 0]) -> Self {
+                Self::L0(a, NetinfoHeader2 { n_addrs: 0, data: [0; const { FIXED_CELL_SIZE - HSZ }] })
+            }
+        }
+
+        $(impl From<[u8; $n]> for NetinfoHeaderPeerAddr {
+            fn from(a: [u8; $n]) -> Self {
+                Self::$l(a, NetinfoHeader2 { n_addrs: 0, data: [0; const { FIXED_CELL_SIZE - HSZ - $n }] })
+            }
+        })*
+
         impl NetinfoHeaderPeerAddr {
             fn part2(&self) -> &NetinfoHeader2<[u8]> {
                 match self {
@@ -271,26 +283,8 @@ impl Netinfo {
             header.header.timestamp.set(time);
 
             (header.header.peer_addr_ty, header.peer_addr_data) = match peer_addr {
-                IpAddr::V4(v) => (
-                    4,
-                    NetinfoHeaderPeerAddr::L4(
-                        v.octets(),
-                        NetinfoHeader2 {
-                            n_addrs: 0,
-                            data: [0; const { FIXED_CELL_SIZE - HSZ - 4 }],
-                        },
-                    ),
-                ),
-                IpAddr::V6(v) => (
-                    6,
-                    NetinfoHeaderPeerAddr::L16(
-                        v.octets(),
-                        NetinfoHeader2 {
-                            n_addrs: 0,
-                            data: [0; const { FIXED_CELL_SIZE - HSZ - 16 }],
-                        },
-                    ),
-                ),
+                IpAddr::V4(v) => (4, v.octets().into()),
+                IpAddr::V6(v) => (6, v.octets().into()),
             };
             header.peer_addr_data.part2_mut()
         }
@@ -339,7 +333,6 @@ impl Netinfo {
                     peer_addr_ty: 6, ..
                 },
                 peer_addr_data: NetinfoHeaderPeerAddr::L16(a, _),
-                ..
             } => Some(a.into()),
             _ => None,
         }
