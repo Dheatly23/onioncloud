@@ -11,6 +11,7 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+anyhow = "1"
 cipher = "0.4"
 crossbeam-queue = "0.3"
 flume = "0.11"

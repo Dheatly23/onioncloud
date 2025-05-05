@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::fmt::{Debug, Display};
 use std::io::Error as IoError;
 
 use rustls::Error as RustlsError;
@@ -47,7 +47,7 @@ pub trait ChannelController:
     + Handle<Timeout, Return = Result<(), Self::Error>>
 {
     /// Error type.
-    type Error: 'static + Error + Send + Sync + From<IoError> + From<RustlsError>;
+    type Error: 'static + Debug + Display + Send + Sync + From<IoError> + From<RustlsError>;
     /// Channel configuration.
     type Config: 'static + ChannelConfig + Send + Sync;
     /// Control message.
@@ -82,6 +82,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use anyhow::{Error as AnyError, Result as AnyResult};
     use test_log::test;
     use tracing::{debug, info, instrument, warn};
 
@@ -118,30 +119,6 @@ mod tests {
 
         fn cache_cell(&self, cell: FixedCell) {
             self.cache.cache_cell(cell);
-        }
-    }
-
-    #[derive(thiserror::Error, Debug)]
-    pub(crate) enum ControllerError {
-        #[error(transparent)]
-        Io(#[from] IoError),
-        #[error(transparent)]
-        Rustls(#[from] RustlsError),
-        #[error(transparent)]
-        InvalidCellHeader(#[from] errors::InvalidCellHeader),
-        #[error(transparent)]
-        CellFormatError(#[from] errors::CellFormatError),
-        #[error(transparent)]
-        VersionsNegotiate(#[from] errors::VersionsNegotiateError),
-    }
-
-    impl From<errors::CellError> for ControllerError {
-        fn from(v: errors::CellError) -> Self {
-            match v {
-                errors::CellError::Io(v) => Self::Io(v),
-                errors::CellError::InvalidCellHeader(v) => Self::InvalidCellHeader(v),
-                errors::CellError::CellFormatError(v) => Self::CellFormatError(v),
-            }
         }
     }
 
@@ -185,7 +162,7 @@ mod tests {
     }
 
     impl ChannelController for VersionOnlyController {
-        type Error = ControllerError;
+        type Error = AnyError;
         type Config = VersionOnlyConfig;
         type ControlMsg = Infallible;
         type Cell = Cell;
@@ -210,7 +187,7 @@ mod tests {
 
     // NOTE: Cannot use Self:: syntax here because of cycles.
     impl<'a> Handle<(ChannelInput<'a>, &'a mut CircuitMap<Cell, ()>)> for VersionOnlyController {
-        type Return = Result<ChannelOutput, ControllerError>;
+        type Return = AnyResult<ChannelOutput>;
 
         #[instrument(name = "handle_normal", skip_all)]
         fn handle(
@@ -260,7 +237,7 @@ mod tests {
     }
 
     impl Handle<Timeout> for VersionOnlyController {
-        type Return = Result<(), ControllerError>;
+        type Return = AnyResult<()>;
 
         #[instrument(name = "handle_timeout", skip_all)]
         fn handle(&mut self, _: Timeout) -> Self::Return {
@@ -274,7 +251,7 @@ mod tests {
     }
 
     impl Handle<ControlMsg<Infallible>> for VersionOnlyController {
-        type Return = Result<(), ControllerError>;
+        type Return = AnyResult<()>;
 
         #[instrument(name = "handle_control", skip_all)]
         fn handle(&mut self, _: ControlMsg<Infallible>) -> Self::Return {
@@ -283,7 +260,7 @@ mod tests {
     }
 
     impl Handle<CellMsg<Cell>> for VersionOnlyController {
-        type Return = Result<(), ControllerError>;
+        type Return = AnyResult<()>;
 
         #[instrument(name = "handle_cell", skip_all)]
         fn handle(&mut self, _: CellMsg<Cell>) -> Self::Return {
