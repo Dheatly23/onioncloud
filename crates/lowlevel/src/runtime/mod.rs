@@ -1,4 +1,4 @@
-#[cfg(feature = "tokio")]
+#[cfg(any(feature = "tokio", test))]
 pub mod tokio;
 
 use std::future::Future;

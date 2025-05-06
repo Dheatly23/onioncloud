@@ -78,6 +78,7 @@ mod tests {
 
     use std::borrow::Cow;
     use std::convert::Infallible;
+    use std::env::{VarError, var};
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -91,9 +92,11 @@ mod tests {
     use crate::cell::versions::Versions;
     use crate::cell::writer::CellWriter;
     use crate::cell::{Cell, CellHeader, FixedCell, cast};
-    use crate::crypto::relay::RelayId;
+    use crate::channel::manager::ChannelManager;
+    use crate::crypto::relay::{RelayId, from_str as relay_from_str};
     use crate::errors;
     use crate::linkver::StandardLinkver;
+    use crate::runtime::tokio::TokioRuntime;
     use crate::util::{TestController, err_is_would_block, print_list};
 
     #[derive(Default)]
@@ -325,18 +328,11 @@ mod tests {
         assert_eq!(v.controller().link_cfg.linkver.as_ref().version(), 5);
     }
 
-    #[cfg(feature = "tokio")]
     #[test(tokio::test)]
     #[ignore = "requires network access"]
     async fn test_versions_controller_async() {
-        use std::env::{VarError, var};
-
-        use crate::channel::manager::ChannelManager;
-        use crate::crypto::relay;
-        use crate::runtime::tokio::TokioRuntime;
-
         let id = match var("RELAY_ID") {
-            Ok(v) => relay::from_str(&v).unwrap(),
+            Ok(v) => relay_from_str(&v).unwrap(),
             Err(VarError::NotPresent) => {
                 warn!("skipping test: environment variable RELAY_ID not set");
                 return;

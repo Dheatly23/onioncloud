@@ -9,10 +9,10 @@ publish.workspace = true
 [dependencies]
 cipher.workspace = true
 crossbeam-queue.workspace = true
+futures-channel.workspace = true
 futures-core.workspace = true
 futures-io.workspace = true
 futures-sink.workspace = true
-futures-util.workspace = true
 once_cell.workspace = true
 pin-project.workspace = true
 rand.workspace = true
@@ -24,6 +24,12 @@ thiserror.workspace = true
 workspace = true
 features = [
   "async",
+]
+
+[dependencies.futures-util]
+workspace = true
+features = [
+  "sink",
 ]
 
 [dependencies.tokio]
@@ -70,7 +76,11 @@ features = [
 [dev-dependencies.tokio]
 workspace = true
 features = [
+  "io-util",
   "macros",
+  "net",
+  "rt",
+  "time",
 ]
 
 [target.'cfg(loom)'.dependencies]

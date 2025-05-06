@@ -298,7 +298,14 @@ impl<Cell> NewCircuit<Cell> {
 mod tests {
     use super::*;
 
+    use std::pin::pin;
     use std::thread::{JoinHandle, spawn};
+    use std::time::{Duration, Instant};
+
+    use futures_channel::oneshot::channel;
+    use futures_util::{SinkExt as _, StreamExt as _};
+    use tokio::task::spawn as spawn_async;
+    use tokio::time::timeout_at;
 
     fn join_all(handles: Vec<JoinHandle<()>>) {
         for h in handles {
@@ -453,6 +460,93 @@ mod tests {
 
         for (_, circ) in map.items() {
             assert!(circ.is_closed());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_recv_many_open_async() {
+        struct TO(Instant);
+
+        impl TO {
+            fn timeout<F: Future>(&self, f: F) -> impl use<F> + Future<Output = F::Output> {
+                let t = self.0;
+                async move { timeout_at(t.into(), f).await.unwrap() }
+            }
+        }
+
+        let t = TO(Instant::now() + Duration::from_secs(5));
+        let mut handles = Vec::new();
+
+        let mut map = CircuitMap::<(u32, u64), (u64, u64, u64)>::new(8, 8);
+
+        const N_CIRC: usize = 16;
+
+        let mut rng = ThreadRng::default();
+        for _ in 0..N_CIRC {
+            let (a, b): (u64, u64) = rng.random();
+
+            let (send, recv) = channel::<NewCircuit<(u32, u64)>>();
+            handles.push(spawn_async(t.timeout(async move {
+                let Ok(NewCircuit {
+                    sender: send,
+                    receiver: recv,
+                    id,
+                }) = recv.await
+                else {
+                    return;
+                };
+
+                let mut send = pin!(send.sink());
+                let mut recv = pin!(recv.stream());
+                while let Some((i, j)) = recv.as_mut().next().await {
+                    assert_eq!(i, id.get());
+
+                    if send
+                        .as_mut()
+                        .send((i, j.wrapping_mul(a).wrapping_add(b)))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })));
+
+            loop {
+                if let Ok((data, _)) = map.open_with(false, false, 64, |_| (0, a, b)) {
+                    let id = data.id;
+                    if send.send(data).is_err() {
+                        map.remove(id);
+                    }
+                    break;
+                }
+            }
+        }
+
+        for (&id, circ) in map.items() {
+            let send = circ.send.clone();
+            handles.push(spawn_async(t.timeout(async move {
+                let mut send = pin!(send.sink());
+                for i in 0..256 {
+                    send.as_mut().send((id.get(), i)).await.unwrap();
+                }
+            })));
+        }
+
+        while !map.is_empty() {
+            let (id, i) = t.timeout(map.recv.recv_async()).await.unwrap();
+            let (ref mut j, a, b) = map.get(NonZeroU32::new(id).unwrap()).unwrap().meta;
+            assert_eq!(i, j.wrapping_mul(a).wrapping_add(b));
+
+            assert!(*j < 256);
+            *j += 1;
+            if *j == 256 {
+                map.remove(NonZeroU32::new(id).unwrap());
+            }
+        }
+
+        for h in handles {
+            t.timeout(h).await.unwrap();
         }
     }
 }
