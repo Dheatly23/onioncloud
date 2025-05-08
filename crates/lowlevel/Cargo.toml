@@ -7,8 +7,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+aes.workspace = true
 cipher.workspace = true
 crossbeam-queue.workspace = true
+ctr.workspace = true
+digest.workspace = true
 futures-channel.workspace = true
 futures-core.workspace = true
 futures-io.workspace = true
@@ -16,8 +19,13 @@ futures-sink.workspace = true
 once_cell.workspace = true
 pin-project.workspace = true
 rand.workspace = true
+ring.workspace = true
+rsa.workspace = true
 rustls.workspace = true
+rustls-webpki.workspace = true
 scopeguard.workspace = true
+sha1.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 [dependencies.flume]
@@ -80,7 +88,14 @@ features = [
   "macros",
   "net",
   "rt",
+  "rt-multi-thread",
   "time",
+]
+
+[dependencies.tracing-subscriber]
+workspace = true
+features = [
+  "env-filter",
 ]
 
 [target.'cfg(loom)'.dependencies]

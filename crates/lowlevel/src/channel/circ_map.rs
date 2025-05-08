@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 use flume::r#async::RecvStream;
 use flume::{Receiver, Sender, TryRecvError, TrySendError, bounded};
 use futures_core::stream::Stream;
-use rand::distr::Uniform;
+use rand::distributions::Uniform;
 use rand::prelude::*;
 
 use crate::errors;
@@ -177,8 +177,7 @@ impl<Cell: 'static, Meta> CircuitMap<Cell, Meta> {
                 (true, false) => 0x8000..=0xffff,
                 (false, false) => 1..=0x7fff,
             }
-            .try_into()
-            .expect("uniform must succeed");
+            .into();
 
             for id in ThreadRng::default().sample_iter(d).take(n_attempts) {
                 let id = NonZeroU32::new(id).expect("ID must be nonzero");
@@ -483,7 +482,7 @@ mod tests {
 
         let mut rng = ThreadRng::default();
         for _ in 0..N_CIRC {
-            let (a, b): (u64, u64) = rng.random();
+            let (a, b): (u64, u64) = rng.r#gen();
 
             let (send, recv) = channel::<NewCircuit<(u32, u64)>>();
             handles.push(spawn_async(t.timeout(async move {

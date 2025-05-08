@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering::*};
 
 use crossbeam_queue::ArrayQueue;
 
-use crate::cell::FixedCell;
+use crate::cell::{Cell, FixedCell, TryFromCell};
+use crate::errors;
 
 /// Cell cache provider.
 ///
@@ -223,6 +224,18 @@ impl<T: Cachable, C: CellCache> Cached<T, C> {
         &this.cache
     }
 
+    fn into_inner(this: Self) -> (T, C) {
+        // SAFETY: this will not be accessed nor moved after.
+        // Prevent drop from being called by wrapping in ManuallyDrop.
+        unsafe {
+            let mut this = ManuallyDrop::new(this);
+            (
+                ManuallyDrop::take(&mut this.cell),
+                ManuallyDrop::take(&mut this.cache),
+            )
+        }
+    }
+
     /// Maps cell data.
     ///
     /// ```
@@ -234,17 +247,48 @@ impl<T: Cachable, C: CellCache> Cached<T, C> {
     /// let cell = cell.map(Padding::new);
     /// ```
     pub fn map<U: Cachable>(self, f: impl FnOnce(T) -> U) -> Cached<U, C> {
-        // SAFETY: Self will not be accessed nor moved after this.
-        // Prevent drop from being called by wrapping self in ManuallyDrop.
-        let (cell, cache) = unsafe {
-            let mut this = ManuallyDrop::new(self);
-            (
-                ManuallyDrop::take(&mut this.cell),
-                ManuallyDrop::take(&mut this.cache),
-            )
-        };
+        let (cell, cache) = Self::into_inner(self);
         Cached::new(cache, f(cell))
     }
+
+    /// Try to map cell data.
+    ///
+    /// Due to [`Try`] trait being unstable, it only supports [`Result`].
+    /// Within the closure, caching is done manually using reference to cache.
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::cell::FixedCell;
+    /// use onioncloud_lowlevel::cache::{Cached, CellCache, StandardCellCache};
+    ///
+    /// let cell = Cached::new(StandardCellCache::default(), FixedCell::default());
+    ///
+    /// // Example of error
+    /// assert!(cell.try_map(|cell, cache| {
+    ///     if false {
+    ///         Ok(cell)
+    ///     } else {
+    ///         // Manually cache
+    ///         cache.cache_cell(cell);
+    ///
+    ///         Err(())
+    ///     }
+    /// }).is_err());
+    /// ```
+    pub fn try_map<U: Cachable, E>(
+        self,
+        f: impl FnOnce(T, &C) -> Result<U, E>,
+    ) -> Result<Cached<U, C>, E> {
+        let (cell, cache) = Self::into_inner(self);
+        let cell = f(cell, &cache)?;
+        Ok(Cached::new(cache, cell))
+    }
+}
+
+/// Similiar to [`crate::cell::cast`], but cached version.
+pub fn cast<T: TryFromCell>(
+    cell: &mut Cached<Option<Cell>, impl CellCache>,
+) -> Result<Option<T>, errors::CellFormatError> {
+    T::try_from_cell(&mut cell.cell)
 }
 
 #[cfg(test)]

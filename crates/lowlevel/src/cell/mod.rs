@@ -219,6 +219,12 @@ impl crate::cache::Cachable for Cell {
     }
 }
 
+impl crate::cache::Cachable for Option<Cell> {
+    fn maybe_into_fixed(self) -> Option<FixedCell> {
+        self?.maybe_into_fixed()
+    }
+}
+
 impl Cell {
     /// Creates empty fixed-sized cell.
     pub fn empty_fixed() -> Self {

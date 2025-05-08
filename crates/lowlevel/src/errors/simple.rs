@@ -115,3 +115,15 @@ pub(crate) enum ParseRelayIdInner {
 }
 
 display2debug! {ParseRelayIdInner}
+
+#[derive(Error)]
+#[error("malformed certificate format")]
+pub struct CertFormatError;
+
+display2debug! {CertFormatError}
+
+#[derive(Error)]
+#[error("bad certificate signature")]
+pub struct CertVerifyError;
+
+display2debug! {CertVerifyError}

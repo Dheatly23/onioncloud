@@ -74,7 +74,7 @@ impl Padding {
 
     /// Randomize cell content.
     pub fn fill(&mut self) {
-        ThreadRng::default().fill(self.data_mut());
+        ThreadRng::default().fill(&mut self.data_mut()[..]);
     }
 }
 

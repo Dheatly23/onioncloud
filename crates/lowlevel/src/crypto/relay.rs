@@ -3,6 +3,11 @@ use crate::errors::{ParseRelayIdInner, RelayIdParseError};
 /// Relay ID/fingerprint, represented as 20 bytes.
 pub type RelayId = [u8; 20];
 
+/// Relay Ed25519 public key.
+///
+/// Used in conjunction with [`RelayId`].
+pub type RelayIdEd = super::EdPublicKey;
+
 /// Parse a string into [`RelayId`].
 ///
 /// String is in form of "$AAA..." or "AAA..." with the content is 40 hexadecimal digits.
