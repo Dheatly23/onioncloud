@@ -7,15 +7,20 @@ use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use crate::crypto::relay::RelayId;
+use crate::crypto::relay::{RelayId, RelayIdEd};
 
 /// Trait for channel configuration.
 pub trait ChannelConfig {
     /// Get peer relay ID.
     fn peer_id(&self) -> &RelayId;
 
-    // Get peer Ed25519 public key.
-    //fn peer_ed25519_id(&self)
+    /// Get peer relay Ed25519 id.
+    ///
+    /// Default implementation returns [`None`].
+    /// Implementors are encouraged to return [`RelayIdEd`] if possible.
+    fn peer_id_ed(&self) -> Option<&RelayIdEd> {
+        None
+    }
 
     /// Get peer addresses.
     fn peer_addrs(&self) -> Cow<'_, [SocketAddr]>;
