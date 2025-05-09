@@ -17,6 +17,7 @@ pub struct TestController<C: ChannelController> {
     timeout: Option<Instant>,
     controller: C,
     circ_map: CircuitMap<C::Cell, C::CircMeta>,
+    cell_msg_pause: bool,
     ctrl_msgs: Vec<C::ControlMsg>,
 }
 
@@ -42,6 +43,7 @@ impl<C: ChannelController> TestController<C> {
             },
             controller: C::new(config),
             circ_map: CircuitMap::new(C::channel_cap(config), C::channel_aggregate_cap(config)),
+            cell_msg_pause: false,
             time: Instant::now(),
             timeout: None,
             ctrl_msgs: Vec::new(),
@@ -122,9 +124,13 @@ impl<C: ChannelController> TestController<C> {
                 has_event = true;
             }
 
-            while let Ok(m) = self.circ_map.try_recv() {
+            while !self.cell_msg_pause {
+                let Ok(m) = self.circ_map.try_recv() else {
+                    break;
+                };
+
                 // Event: cell message
-                self.controller.handle(CellMsg(m))?;
+                self.cell_msg_pause = self.controller.handle(CellMsg(m))?.0;
                 has_event = true;
             }
 
@@ -134,9 +140,13 @@ impl<C: ChannelController> TestController<C> {
                     &mut self.circ_map,
                 ))?;
                 empty_handle = true;
+                self.cell_msg_pause = ret.cell_msg_pause;
 
                 if ret.shutdown {
-                    return Ok(ProcessedChannelOutput { shutdown: true });
+                    return Ok(ProcessedChannelOutput {
+                        shutdown: true,
+                        cell_msg_pause: self.cell_msg_pause,
+                    });
                 }
 
                 self.timeout = ret.timeout;
@@ -146,7 +156,10 @@ impl<C: ChannelController> TestController<C> {
                 }
             }
 
-            return Ok(ProcessedChannelOutput { shutdown: false });
+            return Ok(ProcessedChannelOutput {
+                shutdown: false,
+                cell_msg_pause: self.cell_msg_pause,
+            });
         }
     }
 }
@@ -156,6 +169,9 @@ impl<C: ChannelController> TestController<C> {
 pub struct ProcessedChannelOutput {
     /// [`true`] if controller request for shutdown.
     pub shutdown: bool,
+
+    /// [`true`] if cell messages should not be send while controller is processing.
+    pub cell_msg_pause: bool,
 }
 
 struct TestStream {

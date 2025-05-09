@@ -307,7 +307,7 @@ impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
         let peer_addr = match stream.peer_addr() {
             Ok(v) => v,
             Err(e) => {
-                error!(error = format_args!("{}", e), "cannot get peer address");
+                error!(error = display(e), "cannot get peer address");
                 return false;
             }
         };
@@ -376,7 +376,7 @@ async fn handle_channel<R: Runtime, C: ChannelController>(
     let stream = match stream {
         Ok(v) => v,
         Err(e) => {
-            error!(error = format_args!("{}", e), "cannot connect to peer");
+            error!(error = display(e), "cannot connect to peer");
             return false;
         }
     };
@@ -384,7 +384,7 @@ async fn handle_channel<R: Runtime, C: ChannelController>(
     let peer_addr = match stream.peer_addr() {
         Ok(v) => v,
         Err(e) => {
-            error!(error = format_args!("{}", e), "cannot get peer address");
+            error!(error = display(e), "cannot get peer address");
             return false;
         }
     };
@@ -403,7 +403,7 @@ async fn handle_stream<R: Runtime, C: ChannelController>(
     let tls = match setup_client(peer_addr.ip()) {
         Ok(v) => v,
         Err(e) => {
-            error!(error = format_args!("{}", e), "rustls setup");
+            error!(error = display(e), "rustls setup");
             return false;
         }
     };
@@ -423,6 +423,7 @@ async fn handle_stream<R: Runtime, C: ChannelController>(
             C::channel_cap(&cfg.config),
             C::channel_aggregate_cap(&cfg.config),
         )),
+        cell_msg_pause: false,
         state: State::Normal,
         span: debug_span!("ChannelFut"),
     };
@@ -431,7 +432,7 @@ async fn handle_stream<R: Runtime, C: ChannelController>(
     match fut.await {
         Ok(()) => true,
         Err(e) => {
-            error!(error = format_args!("{}", e), "channel error");
+            error!(error = display(e), "channel error");
             false
         }
     }
@@ -456,6 +457,7 @@ struct ChannelFut<R: Runtime, C: ChannelController> {
     #[pin]
     ctrl_recv: Option<RecvStream<'static, C::ControlMsg>>,
     circ_map: Option<CircuitMap<C::Cell, C::CircMeta>>,
+    cell_msg_pause: bool,
     cont: C,
     state: State,
     span: Span,
@@ -571,17 +573,25 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
             }
 
             if pending & FLAG_CELLMSG == 0 {
-                while let Ready(msg) = circ_map.poll_recv(cx) {
+                while !*this.cell_msg_pause {
+                    let Ready(msg) = circ_map.poll_recv(cx) else {
+                        pending |= FLAG_CELLMSG;
+                        break;
+                    };
+
                     // Event: cell message
-                    this.cont
+                    *this.cell_msg_pause = this
+                        .cont
                         .handle(CellMsg(
                             msg.expect("circuit map aggregate receiver should never close"),
                         ))
-                        .inspect_err(|_| *this.state = State::Shutdown)?;
+                        .inspect_err(|_| *this.state = State::Shutdown)?
+                        .0;
                     has_event = true;
+                    if *this.cell_msg_pause {
+                        debug!("pausing cell message receiving");
+                    }
                 }
-
-                pending |= FLAG_CELLMSG;
             }
 
             if has_event || pending & FLAG_EMPTY_HANDLE == 0 {
@@ -600,7 +610,7 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                     continue;
                 }
                 if let Some(t) = ret.timeout {
-                    debug!(timeout = format_args!("{:?}", t), "resetting timer");
+                    debug!(timeout = debug(t), "resetting timer");
                     match this.timer.as_mut().as_pin_mut() {
                         Some(f) => f.reset(t),
                         None => this.timer.set(Some(this.runtime.timer(t))),
@@ -613,6 +623,12 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                     // Regardless, mark timer as "finished"
                     *this.timer_finished = true;
                 }
+                match (*this.cell_msg_pause, ret.cell_msg_pause) {
+                    (true, false) => debug!("resuming cell message receiving"),
+                    (false, true) => debug!("pausing cell message receiving"),
+                    _ => (),
+                }
+                *this.cell_msg_pause = ret.cell_msg_pause;
             }
             // Mark empty handle as true, because either timeout already fires or it has been handled previously.
             pending |= FLAG_EMPTY_HANDLE;
@@ -630,6 +646,10 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
             }
             if pending & FLAG_TIMEOUT == 0 && !*this.timer_finished && this.timer.is_some() {
                 trace!("repolling: timer wants to be polled");
+                retry = true;
+            }
+            if pending & FLAG_CELLMSG == 0 && !*this.cell_msg_pause {
+                trace!("repolling: cell aggregate channel wants to be polled");
                 retry = true;
             }
 

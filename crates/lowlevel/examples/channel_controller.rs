@@ -9,25 +9,32 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Error as AnyError, Result as AnyResult};
+use anyhow::{Error as AnyError, Result as AnyResult, bail};
+use digest::{Digest, Output};
 use onioncloud_lowlevel::cache::{Cached, CellCache, StandardCellCache, cast};
+use onioncloud_lowlevel::cell::auth::AuthChallenge;
 use onioncloud_lowlevel::cell::certs::Certs;
 use onioncloud_lowlevel::cell::dispatch::{CellReader, CellType, WithCellConfig};
 use onioncloud_lowlevel::cell::netinfo::Netinfo;
 use onioncloud_lowlevel::cell::versions::Versions;
 use onioncloud_lowlevel::cell::writer::CellWriter;
-use onioncloud_lowlevel::cell::{Cell, CellHeader, FixedCell};
+use onioncloud_lowlevel::cell::{Cell, CellHeader, CellLike, FixedCell};
 use onioncloud_lowlevel::channel::circ_map::CircuitMap;
 use onioncloud_lowlevel::channel::controller::{CellMsg, ChannelController, ControlMsg, Timeout};
 use onioncloud_lowlevel::channel::manager::ChannelManager;
-use onioncloud_lowlevel::channel::{ChannelConfig, ChannelInput, ChannelOutput};
-use onioncloud_lowlevel::crypto::cert::{UnverifiedRsaCert, extract_rsa_from_x509};
+use onioncloud_lowlevel::channel::{CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput};
+use onioncloud_lowlevel::crypto::EdPublicKey;
+use onioncloud_lowlevel::crypto::cert::{
+    UnverifiedEdCert, UnverifiedRsaCert, extract_rsa_from_x509,
+};
 use onioncloud_lowlevel::crypto::relay::{RelayId, from_str as relay_from_str};
 use onioncloud_lowlevel::errors;
 use onioncloud_lowlevel::errors::CellError;
 use onioncloud_lowlevel::linkver::StandardLinkver;
 use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
 use onioncloud_lowlevel::util::sans_io::Handle;
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use tracing::{debug, info, instrument, warn};
 
 #[derive(Default)]
@@ -58,7 +65,7 @@ impl CellCache for LinkCfg {
 
 struct Config {
     id: RelayId,
-    addrs: Cow<'static, [SocketAddr]>,
+    addrs: Arc<[SocketAddr]>,
 }
 
 impl ChannelConfig for Config {
@@ -72,11 +79,34 @@ impl ChannelConfig for Config {
 }
 
 struct Controller {
-    cell_read: CellReader<Arc<LinkCfg>>,
-    cell_write: Option<CellWriter<Cell>>,
     link_cfg: Arc<LinkCfg>,
+    relay_id: RelayId,
+    addrs: Option<Arc<[SocketAddr]>>,
+
+    state: ControllerState,
 
     timer: TimerState,
+}
+
+type Writer<T = Cell> = CellWriter<Cached<T, Arc<LinkCfg>>>;
+type Reader = CellReader<Arc<LinkCfg>>;
+
+enum ControllerState {
+    Init,
+    VersionsWrite(CellWriter<Versions>),
+    ConfigRead {
+        reader: Reader,
+        state: ConfigReadState,
+    },
+    NetinfoWrite(Writer<Netinfo>),
+    Finished,
+}
+
+enum ConfigReadState {
+    NeedVersions,
+    NeedCerts,
+    NeedAuthChallenge,
+    NeedNetinfo,
 }
 
 enum TimerState {
@@ -96,16 +126,82 @@ impl ChannelController for Controller {
         let link_cfg = Arc::new(LinkCfg::default());
 
         Self {
-            cell_read: CellReader::new(link_cfg.clone()),
-            cell_write: Some(CellWriter::new(
-                link_cfg.linkver.as_ref().versions_cell().into(),
-                link_cfg.linkver.is_circ_id_4bytes(),
-            )),
+            state: ControllerState::Init,
+
+            relay_id: cfg.id,
+            addrs: Some(cfg.addrs.clone()),
             link_cfg,
 
             timer: TimerState::Init,
         }
     }
+}
+
+#[instrument(level = "debug", skip_all)]
+fn write_cell<T: CellLike>(
+    handler: &mut CellWriter<T>,
+    input: &mut ChannelInput<'_>,
+) -> AnyResult<bool> {
+    match handler.handle(input.writer()) {
+        Ok(()) => {
+            debug!("writing cell finished");
+            Ok(true)
+        }
+        Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn read_cell(handler: &mut Reader, input: &mut ChannelInput<'_>) -> AnyResult<Option<Cell>> {
+    match handler.handle(input.reader()) {
+        Ok(v) => Ok(Some(v)),
+        Err(CellError::Io(e)) if e.kind() == ErrorKind::WouldBlock => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn check_cert(
+    mut unverified: UnverifiedEdCert<'_>,
+    cert_ty: u8,
+    key_ty: u8,
+    pk: &EdPublicKey,
+    needs_signed_by: bool,
+) -> AnyResult<()> {
+    if unverified.header.cert_ty != cert_ty {
+        bail!(
+            "certificate type error (expected {cert_ty}, got {})",
+            unverified.header.cert_ty
+        )
+    } else if unverified.header.key_ty != 1 && unverified.header.key_ty != key_ty {
+        bail!(
+            "certificate key type error (expected {key_ty}, got {})",
+            unverified.header.key_ty
+        )
+    }
+
+    let mut signed_with = None;
+    while let Some(v) = unverified.next_ext() {
+        let (header, data) = v?;
+
+        match header.ty {
+            4 => signed_with = Some(data),
+            _ => (),
+        }
+    }
+
+    if needs_signed_by && signed_with.is_none() {
+        bail!("certificate does not contain signed-by key extension");
+    }
+
+    unverified.verify(pk)?;
+
+    if let Some(k) = signed_with {
+        if k != pk {
+            bail!("signed-by key does not match signing key");
+        }
+    }
+
+    Ok(())
 }
 
 // NOTE: Cannot use Self:: syntax here because of cycles.
@@ -125,78 +221,199 @@ impl<'a>
             &'a mut CircuitMap<Cached<Cell, Arc<LinkCfg>>, ()>,
         ),
     ) -> Self::Return {
-        if let Some(h) = &mut self.cell_write {
-            match h.handle(input.writer()) {
-                Ok(()) => {
-                    info!("writing version cell finished");
-                    self.cell_write = None;
-                }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => (),
-                Err(e) => return Err(e.into()),
-            }
-        }
-
         loop {
-            let mut cell = match self.cell_read.handle(input.reader()) {
-                Ok(v) => Cached::new(self.link_cfg.clone(), Some(v)),
-                Err(CellError::Io(e)) if e.kind() == ErrorKind::WouldBlock => break,
-                Err(e) => return Err(e.into()),
+            self.state = match &mut self.state {
+                ControllerState::Init => {
+                    let peer_addr = input.peer_addr();
+                    let addrs = self.addrs.as_ref().expect("addresses must exist");
+                    if !addrs.contains(peer_addr) {
+                        bail!("peer address {peer_addr} is not in {addrs:?}")
+                    }
+
+                    ControllerState::VersionsWrite(CellWriter::new(
+                        self.link_cfg.linkver.as_ref().versions_cell(),
+                        self.link_cfg.is_circ_id_4bytes(),
+                    ))
+                }
+                ControllerState::VersionsWrite(w) => match write_cell(w, &mut input)? {
+                    false => break,
+                    true => ControllerState::ConfigRead {
+                        reader: Reader::new(self.link_cfg.clone()),
+                        state: ConfigReadState::NeedVersions,
+                    },
+                },
+                ControllerState::ConfigRead { reader, state } => {
+                    let Some(cell) = read_cell(reader, &mut input)? else {
+                        break;
+                    };
+                    let mut cell = self.link_cfg.cache(Some(cell));
+
+                    match state {
+                        ConfigReadState::NeedVersions => {
+                            if let Some(cell) = cast::<Versions>(&mut cell)? {
+                                info!("received VERSIONS: {:?}", cell.data());
+                                self.link_cfg.linkver.as_ref().versions_negotiate(cell)?;
+                                info!(
+                                    "version negotiated: {}",
+                                    self.link_cfg.linkver.as_ref().version()
+                                );
+
+                                *state = ConfigReadState::NeedCerts;
+                            }
+                        }
+                        ConfigReadState::NeedCerts => {
+                            if let Some(cell) = cast::<Certs>(&mut cell)? {
+                                info!(len = cell.len(), "received CERTS");
+
+                                let mut cert_2 = None;
+                                let mut cert_4 = None;
+                                let mut cert_5 = None;
+                                let mut cert_7 = None;
+
+                                for c in &cell {
+                                    info!(
+                                        "get cert ty: {} data:\n{}",
+                                        c.ty,
+                                        print_hex_multiline(c.data)
+                                    );
+
+                                    match c.ty {
+                                        2 if cert_2.is_none() => cert_2 = Some(c.data),
+                                        4 if cert_4.is_none() => cert_4 = Some(c.data),
+                                        5 if cert_5.is_none() => cert_5 = Some(c.data),
+                                        7 if cert_7.is_none() => cert_7 = Some(c.data),
+                                        _ => (),
+                                    }
+                                }
+
+                                let mut pk_rsa = None;
+                                if let Some(data) = cert_2 {
+                                    let (k, id) = extract_rsa_from_x509(data)?;
+
+                                    info!(
+                                        "found relay RSA public key with fingerprint {}",
+                                        print_hex(&id)
+                                    );
+                                    if id.ct_ne(&self.relay_id).into() {
+                                        bail!(
+                                            "relay ID mismatch (expect {}, got {})",
+                                            print_hex(&self.relay_id),
+                                            print_hex(&id)
+                                        )
+                                    }
+
+                                    pk_rsa = Some(k);
+                                }
+
+                                let mut pk_id = None;
+                                if let Some(data) = cert_7 {
+                                    let unverified = UnverifiedRsaCert::new(data)?;
+
+                                    info!("RSA certificate header: {:?}", unverified.header);
+
+                                    if let Some(pk) = &pk_rsa {
+                                        pk_id = Some(unverified.verify(pk)?.key);
+                                        info!("RSA certificate verification success");
+                                    }
+                                }
+
+                                let mut pk_sign = None;
+                                if let Some(data) = cert_4 {
+                                    info!("got certificate ID 4 ID->sign");
+                                    let unverified = UnverifiedEdCert::new(data)?;
+                                    pk_sign = Some(unverified.header.key);
+
+                                    let Some(k) = &pk_id else {
+                                        bail!("ed25519 relay identity key not provided")
+                                    };
+                                    check_cert(unverified, 4, 1, k, true)?;
+                                    info!("ed25519 signing certificate verified");
+                                }
+
+                                let mut link_verified = false;
+                                if let Some(data) = cert_5 {
+                                    info!("got certificate ID 5 sign->link");
+                                    let unverified = UnverifiedEdCert::new(data)?;
+                                    let subject = Output::<Sha256>::from(unverified.header.key);
+
+                                    let Some(k) = &pk_sign else {
+                                        bail!("ed25519 relay signing key not provided")
+                                    };
+                                    check_cert(unverified, 5, 3, k, false)?;
+                                    info!("ed25519 link certificate verified");
+
+                                    let Some(link_cert) = input.link_cert() else {
+                                        bail!("link certificate not provided")
+                                    };
+                                    let hash = Sha256::digest(link_cert);
+                                    if subject.ct_ne(&hash).into() {
+                                        bail!("link certificate hash does not match")
+                                    }
+
+                                    link_verified = true;
+                                    info!("link certificate verified");
+                                }
+
+                                if !link_verified {
+                                    bail!("link certificate verification failed");
+                                }
+
+                                *state = ConfigReadState::NeedAuthChallenge;
+                            }
+                        }
+                        ConfigReadState::NeedAuthChallenge => {
+                            if let Some(_) = cast::<AuthChallenge>(&mut cell)? {
+                                info!("get AUTH_CHALLENGE cell");
+                                *state = ConfigReadState::NeedNetinfo;
+                            }
+                        }
+                        ConfigReadState::NeedNetinfo => {
+                            if let Some(cell) = cast::<Netinfo>(&mut cell)? {
+                                let peer_addr = cell.peer_addr();
+                                info!(
+                                    time = cell.time(),
+                                    peer_addr =
+                                        peer_addr.map_or_else(String::new, |v| v.to_string()),
+                                    "get NETINFO cell"
+                                );
+
+                                let Some(peer_addr) = peer_addr else {
+                                    bail!("invalid peer address")
+                                };
+                                let addrs = self.addrs.take().expect("addresses must exist");
+                                for a in cell.this_addrs() {
+                                    info!("found this address: {a}");
+                                    if addrs.iter().all(|b| b.ip() != a) {
+                                        bail!("address {a} is not found in {addrs:?}")
+                                    }
+                                }
+
+                                self.state = ControllerState::NetinfoWrite(
+                                    self.link_cfg
+                                        .cache(Netinfo::new(
+                                            self.link_cfg.get_cached(),
+                                            0,
+                                            input.peer_addr().ip(),
+                                            [peer_addr],
+                                        ))
+                                        .try_into()?,
+                                );
+                                continue;
+                            }
+                        }
+                    }
+
+                    if let Some(cell) = &*cell {
+                        bail!("cannot handle cell with command {}", cell.command)
+                    }
+                    continue;
+                }
+                ControllerState::NetinfoWrite(w) => match write_cell(w, &mut input)? {
+                    false => break,
+                    true => ControllerState::Finished,
+                },
+                ControllerState::Finished => break,
             };
-
-            if let Some(cell) = cast::<Versions>(&mut cell)? {
-                info!("received VERSIONS: {:?}", cell.data());
-                self.link_cfg.linkver.as_ref().versions_negotiate(cell)?;
-                info!(
-                    "version negotiated: {}",
-                    self.link_cfg.linkver.as_ref().version()
-                );
-            } else if let Some(cell) = cast::<Certs>(&mut cell)? {
-                info!("received CERTS");
-
-                let mut cert_2 = None;
-                let mut cert_4 = None;
-                let mut cert_5 = None;
-                let mut cert_7 = None;
-
-                for c in &cell {
-                    info!(
-                        "get cert ty: {} data:\n{}",
-                        c.ty,
-                        print_hex_multiline(c.data)
-                    );
-
-                    match c.ty {
-                        2 if cert_2.is_none() => cert_2 = Some(c.data),
-                        4 if cert_4.is_none() => cert_4 = Some(c.data),
-                        5 if cert_5.is_none() => cert_5 = Some(c.data),
-                        7 if cert_7.is_none() => cert_7 = Some(c.data),
-                        _ => (),
-                    }
-                }
-
-                let mut pk = None;
-                if let Some(data) = cert_2 {
-                    let (k, id) = extract_rsa_from_x509(data)?;
-
-                    info!(
-                        "found relay RSA public key with fingerprint {}",
-                        print_hex(&id)
-                    );
-
-                    pk = Some(k);
-                }
-
-                if let Some(data) = cert_7 {
-                    let unverified = UnverifiedRsaCert::new(data)?;
-
-                    info!("RSA certificate header: {:?}", unverified.header);
-
-                    if let Some(pk) = &pk {
-                        unverified.verify(pk)?;
-                        info!("RSA certificate verification success");
-                    }
-                }
-            }
         }
 
         let mut ret = ChannelOutput::new();
@@ -243,7 +460,7 @@ impl Handle<ControlMsg<Infallible>> for Controller {
 }
 
 impl Handle<CellMsg<Cached<Cell, Arc<LinkCfg>>>> for Controller {
-    type Return = AnyResult<()>;
+    type Return = AnyResult<CellMsgPause>;
 
     #[instrument(name = "handle_cell", skip_all)]
     fn handle(&mut self, _: CellMsg<Cached<Cell, Arc<LinkCfg>>>) -> Self::Return {

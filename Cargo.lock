@@ -670,6 +670,7 @@ dependencies = [
  "scopeguard",
  "sha1",
  "sha2",
+ "subtle",
  "test-log",
  "thiserror",
  "tokio",

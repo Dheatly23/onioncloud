@@ -4,7 +4,7 @@ use std::io::Error as IoError;
 use rustls::Error as RustlsError;
 
 use super::circ_map::CircuitMap;
-use super::{ChannelConfig, ChannelInput, ChannelOutput};
+use super::{CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput};
 use crate::util::sans_io::Handle;
 
 /// Marker type for channel timeout.
@@ -43,7 +43,7 @@ pub trait ChannelController:
         ),
         Return = Result<ChannelOutput, Self::Error>,
     > + Handle<ControlMsg<Self::ControlMsg>, Return = Result<(), Self::Error>>
-    + Handle<CellMsg<Self::Cell>, Return = Result<(), Self::Error>>
+    + Handle<CellMsg<Self::Cell>, Return = Result<CellMsgPause, Self::Error>>
     + Handle<Timeout, Return = Result<(), Self::Error>>
 {
     /// Error type.
@@ -263,7 +263,7 @@ mod tests {
     }
 
     impl Handle<CellMsg<Cell>> for VersionOnlyController {
-        type Return = AnyResult<()>;
+        type Return = AnyResult<CellMsgPause>;
 
         #[instrument(name = "handle_cell", skip_all)]
         fn handle(&mut self, _: CellMsg<Cell>) -> Self::Return {

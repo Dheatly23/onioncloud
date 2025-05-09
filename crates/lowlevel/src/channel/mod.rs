@@ -69,6 +69,7 @@ impl<'a> ChannelInput<'a> {
 pub struct ChannelOutput {
     pub(crate) timeout: Option<Instant>,
     pub(crate) shutdown: bool,
+    pub(crate) cell_msg_pause: bool,
 }
 
 impl ChannelOutput {
@@ -78,6 +79,7 @@ impl ChannelOutput {
         Self {
             timeout: None,
             shutdown: false,
+            cell_msg_pause: false,
         }
     }
 
@@ -91,6 +93,36 @@ impl ChannelOutput {
     pub fn shutdown(&mut self, value: bool) -> &mut Self {
         self.shutdown = value;
         self
+    }
+
+    /// Pauses cell message receiving. By default it's set to [`false`].
+    pub fn cell_msg_pause(&mut self, value: CellMsgPause) -> &mut Self {
+        self.cell_msg_pause = value.0;
+        self
+    }
+}
+
+/// Wrapper type for pausing cell messages.
+///
+/// Useful to stop controller from receiving excessive cell message before it's all transmitted.
+///
+/// # Example
+///
+/// ```
+/// use onioncloud_lowlevel::channel::CellMsgPause;
+///
+/// // Pause cell message
+/// CellMsgPause::from(true);
+///
+/// // Resume cell message
+/// CellMsgPause::from(false);
+/// ```
+#[derive(Debug)]
+pub struct CellMsgPause(pub(crate) bool);
+
+impl From<bool> for CellMsgPause {
+    fn from(v: bool) -> Self {
+        Self(v)
     }
 }
 

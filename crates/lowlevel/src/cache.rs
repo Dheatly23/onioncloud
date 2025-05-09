@@ -26,6 +26,15 @@ pub trait CellCache: Sync {
     /// The behavior can be as simple as dropping the cell.
     /// More advanced implementation should be caching it for a reasonable time.
     fn cache_cell(&self, cell: FixedCell);
+
+    /// Helper function to cache a cell.
+    fn cache<T>(&self, cell: T) -> Cached<T, Self>
+    where
+        T: Cachable,
+        Self: Clone,
+    {
+        Cached::new(self.clone(), cell)
+    }
 }
 
 impl<T> CellCache for T

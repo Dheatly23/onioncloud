@@ -2,6 +2,8 @@
 //!
 //! [spec]: https://spec.torproject.org/cert-spec.html#ed-certs
 
+use std::time::{Duration, SystemTime};
+
 use digest::Digest;
 use ring::signature::{ED25519, VerificationAlgorithm};
 use rsa::pkcs1::EncodeRsaPublicKey;
@@ -17,6 +19,14 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 use super::relay::RelayId;
 use super::{EdPublicKey, EdSignature, RsaPublicKey};
 use crate::errors;
+
+/// Verifies expiry time is not past.
+fn verify_exp(t: u32) -> bool {
+    let Some(t) = SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(t as u64 * 3600)) else {
+        return true;
+    };
+    t >= SystemTime::now()
+}
 
 /// Header for ed25519 certificate.
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -77,8 +87,12 @@ pub struct UnverifiedEdCert<'a> {
 impl<'a> UnverifiedEdCert<'a> {
     /// Parse ed25519 certificate.
     pub fn new(data: &'a [u8]) -> Result<Self, errors::CertFormatError> {
+        // Check certificate version
+        let Some((1, rest)) = data.split_first() else {
+            return Err(errors::CertFormatError);
+        };
         let (header, rest) =
-            EdCertHeader::ref_from_prefix(data).map_err(|_| errors::CertFormatError)?;
+            EdCertHeader::ref_from_prefix(rest).map_err(|_| errors::CertFormatError)?;
 
         Ok(Self {
             data,
@@ -119,9 +133,15 @@ impl<'a> UnverifiedEdCert<'a> {
                 .get_unchecked(..(sig as *const EdSignature).byte_offset_from(self.data) as usize)
         };
 
-        ED25519
+        if ED25519
             .verify(pk[..].into(), msg.into(), sig[..].into())
-            .map_err(|_| errors::CertVerifyError)
+            .is_ok()
+            && verify_exp(self.header.expiry.get())
+        {
+            Ok(())
+        } else {
+            Err(errors::CertVerifyError)
+        }
     }
 }
 
@@ -198,8 +218,8 @@ impl UnverifiedRsaCert {
             &hasher.finalize(),
             &self.sig,
         ) {
-            Ok(()) => Ok(&self.header),
-            Err(_) => Err(errors::CertVerifyError),
+            Ok(()) if verify_exp(self.header.expiry.get()) => Ok(&self.header),
+            _ => Err(errors::CertVerifyError),
         }
     }
 }
@@ -249,11 +269,10 @@ mod tests {
 
         // Sign
         let key = rng.r#gen::<EdPublicKey>();
-        let expiry = rng.r#gen::<u32>();
         let cert = {
             let mut cert = RsaCertHeader {
                 key,
-                expiry: expiry.into(),
+                expiry: u32::MAX.into(),
                 len: 128,
             };
             let sig = private_key
@@ -280,7 +299,6 @@ mod tests {
             .verify(&public_key)
             .unwrap();
         assert_eq!(cert.key, key);
-        assert_eq!(cert.expiry.get(), expiry);
     }
 
     #[test]
@@ -295,19 +313,20 @@ mod tests {
 
         // Sign
         let key = rng.r#gen::<EdPublicKey>();
-        let expiry = rng.r#gen::<u32>();
         let cert = {
             let cert = EdCertHeader {
                 cert_ty: 0,
                 key_ty: 0,
                 key,
-                expiry: expiry.into(),
+                expiry: u32::MAX.into(),
                 n_ext: 0,
             };
-            let sig = private_key.sign(cert.as_bytes());
 
-            let mut v = Vec::with_capacity(cert.as_bytes().len() + sig.as_ref().len());
+            let mut v = Vec::with_capacity(1 + cert.as_bytes().len() + 64);
+            v.push(1);
             v.extend_from_slice(cert.as_bytes());
+
+            let sig = private_key.sign(&v);
             v.extend_from_slice(sig.as_ref());
             v
         };
@@ -316,7 +335,6 @@ mod tests {
         // Verify
         let mut unverified = UnverifiedEdCert::new(&cert).unwrap();
         assert_eq!(unverified.header.key, key);
-        assert_eq!(unverified.header.expiry.get(), expiry);
         while let Some((header, data)) = unverified.next_ext().transpose().unwrap() {
             println!("extension header: {header:?} {}", print_hex(data));
         }
