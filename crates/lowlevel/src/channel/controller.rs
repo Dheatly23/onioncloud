@@ -34,6 +34,26 @@ impl<M> CellMsg<M> {
 }
 
 /// Trait for a channel controller.
+///
+/// # Implementers Note
+///
+/// Implementers _must_ implement [`Handle`]rs to handle incoming events. Values to be handled are:
+/// - [`(ChannelInput<'a>, &'a mut CircuitMap<Self::Cell, Self::CircMeta>)`]
+///
+///   Universal handler for channel inputs and circuit map. Will be called after all the other events.
+///   Returns [`ChannelOutput`] to control things like shutdown, timer, and cell message handling.
+///
+/// - [`Timeout`]
+///
+///   Timeout handler.
+///
+/// - [`ControlMsg<Self::ControlMsg>`]
+///
+///   Control message handler.
+///
+/// - [`CellMsg<Self::Cell>`]
+///
+///   Cell message handler. Returns [`CellMsgPause`] to pause next cell message handling.
 pub trait ChannelController:
     Send
     + for<'a> Handle<

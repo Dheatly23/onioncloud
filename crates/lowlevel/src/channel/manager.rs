@@ -742,6 +742,9 @@ impl<S: RTStream> StreamWrapper<S> {
                 while this.tls.wants_read() {
                     match this.tls.read_tls(&mut *wrapper) {
                         Ok(0) => {
+                            // XXX: Read end is closed.
+                            // We might have pending data to be written, but trying to handle it leads to infinite loop/pending.
+                            // In the future, fix it?
                             info!("shutting down: read end connection closed");
                             return Ok(Ready(None));
                         }

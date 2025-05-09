@@ -372,8 +372,11 @@ pub trait TryFromCell: Sized {
     /// Returns a [`None`] value if the checks are failed, but can be passed onto the next type.
     /// Error result only happens when the format of the cell itself is invalid.
     ///
+    /// # Implementers Note
+    ///
     /// This method **should** not mutate the cell, it's only allowed to inspect it.
     /// If the checks are good, then use the [`Option::take`] method to pop cell out of it.
+    /// The cell may not be dropped, only moved.
     fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, errors::CellFormatError>;
 }
 
