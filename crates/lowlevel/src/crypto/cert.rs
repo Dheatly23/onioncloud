@@ -186,9 +186,6 @@ pub struct RsaCertHeader {
 
     /// Expiration date in terms of _hours_ since epoch.
     pub expiry: U32,
-
-    /// Signature length.
-    pub len: u8,
 }
 
 /// Unverified RSA certificate.
@@ -215,6 +212,9 @@ pub struct UnverifiedRsaCert {
     /// **NOTE: Do not use this until certificate is verified!**
     pub header: RsaCertHeader,
 
+    /// Signature length.
+    pub len: u8,
+
     /// Certificate signature.
     pub sig: [u8],
 }
@@ -225,7 +225,7 @@ impl UnverifiedRsaCert {
     /// Parse RSA certificate.
     pub fn new(data: &[u8]) -> Result<&Self, errors::CertFormatError> {
         let ret = Self::ref_from_bytes(data).map_err(|_| errors::CertFormatError)?;
-        if ret.sig.len() != usize::from(ret.header.len) {
+        if ret.sig.len() != usize::from(ret.len) {
             return Err(errors::CertFormatError);
         }
         Ok(ret)
@@ -235,16 +235,9 @@ impl UnverifiedRsaCert {
     ///
     /// Returns verified certificate header.
     pub fn verify(&self, pk: &RsaPublicKey) -> Result<&RsaCertHeader, errors::CertVerifyError> {
-        // Length field is omitted.
-        let b = match self.header.as_bytes().split_last() {
-            Some((_, v)) => v,
-            // Should never happen but okay
-            None => &[],
-        };
-
         let mut hasher = Sha256::new();
         hasher.update(Self::PREFIX);
-        hasher.update(b);
+        hasher.update(self.header.as_bytes());
         match pk.verify(
             Pkcs1v15Sign::new_unprefixed(),
             &hasher.finalize(),
@@ -305,21 +298,21 @@ mod tests {
             let mut cert = RsaCertHeader {
                 key,
                 expiry: u32::MAX.into(),
-                len: 128,
             };
             let sig = private_key
                 .sign(
                     Pkcs1v15Sign::new_unprefixed(),
                     &Sha256::new()
                         .chain_update(UnverifiedRsaCert::PREFIX)
-                        .chain_update(cert.as_bytes().split_last().unwrap().1)
+                        .chain_update(cert.as_bytes())
                         .finalize(),
                 )
                 .unwrap();
             cert.len = sig.len().try_into().unwrap();
 
-            let mut v = Vec::with_capacity(cert.as_bytes().len() + sig.len());
+            let mut v = Vec::with_capacity(cert.as_bytes().len() + 1 + sig.len());
             v.extend_from_slice(cert.as_bytes());
+            v.push(sig.len() as u8);
             v.extend(sig);
             v
         };
