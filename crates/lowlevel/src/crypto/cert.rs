@@ -48,6 +48,37 @@ pub struct EdCertHeader {
     pub n_ext: u8,
 }
 
+impl EdCertHeader {
+    /// Checks certificate type.
+    ///
+    /// # Parameters
+    /// - `cert_ty` : Certificate type.
+    /// - `key_ty` : Certificate key type.
+    ///
+    /// **NOTE: Due to Tor bug, certificate key type may be 1 regardless of actual expected key type.
+    /// So key type of 1 will be accepted regardless of expected key type.**
+    #[inline(always)]
+    pub const fn check_type(
+        &self,
+        cert_ty: u8,
+        key_ty: u8,
+    ) -> Result<&Self, errors::CertTypeError> {
+        if self.cert_ty != cert_ty {
+            Err(errors::CertTypeError(errors::CertTypeInner::CertTy {
+                expect: cert_ty,
+                actual: self.cert_ty,
+            }))
+        } else if self.key_ty != 1 && self.key_ty != key_ty {
+            Err(errors::CertTypeError(errors::CertTypeInner::KeyTy {
+                expect: key_ty,
+                actual: self.key_ty,
+            }))
+        } else {
+            Ok(self)
+        }
+    }
+}
+
 /// Header for ed25519 certificate extension.
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
@@ -88,7 +119,8 @@ impl<'a> UnverifiedEdCert<'a> {
     /// Parse ed25519 certificate.
     pub fn new(data: &'a [u8]) -> Result<Self, errors::CertFormatError> {
         // Check certificate version
-        let Some((1, rest)) = data.split_first() else {
+        // TODO: Handle multiple versions?
+        let [1, rest @ ..] = data else {
             return Err(errors::CertFormatError);
         };
         let (header, rest) =

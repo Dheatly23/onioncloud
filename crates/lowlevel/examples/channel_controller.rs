@@ -167,17 +167,7 @@ fn check_cert(
     pk: &EdPublicKey,
     needs_signed_by: bool,
 ) -> AnyResult<()> {
-    if unverified.header.cert_ty != cert_ty {
-        bail!(
-            "certificate type error (expected {cert_ty}, got {})",
-            unverified.header.cert_ty
-        )
-    } else if unverified.header.key_ty != 1 && unverified.header.key_ty != key_ty {
-        bail!(
-            "certificate key type error (expected {key_ty}, got {})",
-            unverified.header.key_ty
-        )
-    }
+    unverified.header.check_type(cert_ty, key_ty)?;
 
     let mut signed_with = None;
     while let Some(v) = unverified.next_ext() {

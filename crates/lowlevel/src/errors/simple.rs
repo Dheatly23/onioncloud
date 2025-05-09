@@ -127,3 +127,25 @@ display2debug! {CertFormatError}
 pub struct CertVerifyError;
 
 display2debug! {CertVerifyError}
+
+pub struct CertTypeError(pub(crate) CertTypeInner);
+
+impl Display for CertTypeError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        Display::fmt(&self.0, f)
+    }
+}
+
+display2debug! {CertTypeError}
+
+impl Error for CertTypeError {}
+
+#[derive(Error)]
+pub(crate) enum CertTypeInner {
+    #[error("certificate type mismatch (expected {expect}, got {actual})")]
+    CertTy { expect: u8, actual: u8 },
+    #[error("certificate key mismatch (expected {expect}, got {actual})")]
+    KeyTy { expect: u8, actual: u8 },
+}
+
+display2debug! {CertTypeInner}
