@@ -140,18 +140,17 @@ impl<C: ChannelController> TestController<C> {
                     &mut self.circ_map,
                 ))?;
                 empty_handle = true;
+                let old_pause = self.cell_msg_pause;
                 self.cell_msg_pause = ret.cell_msg_pause;
+                self.timeout = ret.timeout;
 
                 if ret.shutdown {
                     return Ok(ProcessedChannelOutput {
                         shutdown: true,
                         cell_msg_pause: self.cell_msg_pause,
                     });
-                }
-
-                self.timeout = ret.timeout;
-                if self.timeout.is_some() {
-                    // Repoll timer
+                } else if self.timeout.is_some() || (old_pause && !self.cell_msg_pause) {
+                    // Repoll
                     continue;
                 }
             }
