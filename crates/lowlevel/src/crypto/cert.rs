@@ -295,7 +295,7 @@ mod tests {
         // Sign
         let key = rng.r#gen::<EdPublicKey>();
         let cert = {
-            let mut cert = RsaCertHeader {
+            let cert = RsaCertHeader {
                 key,
                 expiry: u32::MAX.into(),
             };
@@ -308,7 +308,6 @@ mod tests {
                         .finalize(),
                 )
                 .unwrap();
-            cert.len = sig.len().try_into().unwrap();
 
             let mut v = Vec::with_capacity(cert.as_bytes().len() + 1 + sig.len());
             v.extend_from_slice(cert.as_bytes());
