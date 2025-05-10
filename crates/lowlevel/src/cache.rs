@@ -1,7 +1,6 @@
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
-use std::ptr::drop_in_place;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering::*};
 
@@ -28,6 +27,21 @@ pub trait CellCache: Sync {
     fn cache_cell(&self, cell: FixedCell);
 
     /// Helper function to cache a cell.
+    ///
+    /// Note that it requires [`Self`] to be [`Clone`], which is **not recommended** to be implemented.
+    /// In effect, only [`Arc`](`std::sync::Arc`) wrapped cache can use it.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use onioncloud_lowlevel::cell::FixedCell;
+    /// use onioncloud_lowlevel::cell::padding::Padding;
+    /// use onioncloud_lowlevel::cache::{CellCache, StandardCellCache};
+    ///
+    /// let cache = Arc::new(StandardCellCache::default());
+    /// let cell = cache.cache(FixedCell::default());
+    /// ```
     fn cache<T>(&self, cell: T) -> Cached<T, Self>
     where
         T: Cachable,
@@ -167,7 +181,7 @@ impl<T: Cachable, C: CellCache> Drop for Cached<T, C> {
             self.cache.cache_cell(cell);
         }
         // SAFETY: cache will not be accessed nor moved.
-        unsafe { drop_in_place(&mut *self.cache) }
+        unsafe { ManuallyDrop::drop(&mut self.cache) }
     }
 }
 
@@ -233,7 +247,34 @@ impl<T: Cachable, C: CellCache> Cached<T, C> {
         &this.cache
     }
 
-    fn into_inner(this: Self) -> (T, C) {
+    /// Unwraps into inner value without caching.
+    ///
+    /// Useful to manipulate inner value.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use onioncloud_lowlevel::cell::FixedCell;
+    /// use onioncloud_lowlevel::cell::padding::Padding;
+    /// use onioncloud_lowlevel::cache::{Cached, StandardCellCache};
+    ///
+    /// let cache = Arc::new(StandardCellCache::default());
+    ///
+    /// // Cache cell
+    /// let cell = Cached::new(cache.clone(), FixedCell::default());
+    ///
+    /// // Unwraps inner cell (now it's uncached)
+    /// let cell = Cached::into_inner(cell);
+    ///
+    /// // Re-cache cell
+    /// let cell = Cached::new(cache.clone(), cell);
+    /// ```
+    pub fn into_inner(this: Self) -> T {
+        Self::decompose(this).0
+    }
+
+    fn decompose(this: Self) -> (T, C) {
         // SAFETY: this will not be accessed nor moved after.
         // Prevent drop from being called by wrapping in ManuallyDrop.
         unsafe {
@@ -256,7 +297,7 @@ impl<T: Cachable, C: CellCache> Cached<T, C> {
     /// let cell = cell.map(Padding::new);
     /// ```
     pub fn map<U: Cachable>(self, f: impl FnOnce(T) -> U) -> Cached<U, C> {
-        let (cell, cache) = Self::into_inner(self);
+        let (cell, cache) = Self::decompose(self);
         Cached::new(cache, f(cell))
     }
 
@@ -287,7 +328,7 @@ impl<T: Cachable, C: CellCache> Cached<T, C> {
         self,
         f: impl FnOnce(T, &C) -> Result<U, E>,
     ) -> Result<Cached<U, C>, E> {
-        let (cell, cache) = Self::into_inner(self);
+        let (cell, cache) = Self::decompose(self);
         let cell = f(cell, &cache)?;
         Ok(Cached::new(cache, cell))
     }
