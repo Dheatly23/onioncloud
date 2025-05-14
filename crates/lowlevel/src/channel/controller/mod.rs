@@ -1,5 +1,6 @@
 use std::fmt::{Debug, Display};
 use std::io::Error as IoError;
+use std::sync::Arc;
 
 use rustls::Error as RustlsError;
 
@@ -86,7 +87,7 @@ pub trait ChannelController:
         256
     }
 
-    fn new(config: &Self::Config) -> Self;
+    fn new(config: Arc<dyn Send + Sync + AsRef<Self::Config>>) -> Self;
 }
 
 #[cfg(test)]
@@ -165,6 +166,12 @@ mod tests {
         pub(crate) delay: bool,
     }
 
+    impl AsRef<Self> for VersionOnlyConfig {
+        fn as_ref(&self) -> &Self {
+            self
+        }
+    }
+
     impl ChannelConfig for VersionOnlyConfig {
         fn peer_id(&self) -> &RelayId {
             self.cfg.peer_id()
@@ -191,7 +198,8 @@ mod tests {
         type Cell = Cell;
         type CircMeta = ();
 
-        fn new(cfg: &Self::Config) -> Self {
+        fn new(cfg: Arc<dyn Send + Sync + AsRef<Self::Config>>) -> Self {
+            let cfg = (*cfg).as_ref();
             let link_cfg = Arc::new(LinkCfg::default());
 
             Self {
@@ -294,13 +302,14 @@ mod tests {
     #[test]
     fn test_versions_controller() {
         let mut v = TestController::<VersionOnlyController>::new(
-            &VersionOnlyConfig {
+            VersionOnlyConfig {
                 cfg: SimpleConfig {
                     id: RelayId::default(),
                     addrs: Cow::Borrowed(&[]),
                 },
                 delay: false,
-            },
+            }
+            .into(),
             ([127, 0, 0, 1], 443).into(),
             vec![],
         );
@@ -316,13 +325,14 @@ mod tests {
     #[test]
     fn test_versions_controller_timeout() {
         let mut v = TestController::<VersionOnlyController>::new(
-            &VersionOnlyConfig {
+            VersionOnlyConfig {
                 cfg: SimpleConfig {
                     id: RelayId::default(),
                     addrs: Cow::Borrowed(&[]),
                 },
                 delay: true,
-            },
+            }
+            .into(),
             ([127, 0, 0, 1], 443).into(),
             vec![],
         );

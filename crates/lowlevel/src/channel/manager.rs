@@ -28,9 +28,15 @@ use crate::runtime::{Runtime, Stream as RTStream, Timer};
 use crate::util::{AsyncReadWrapper, AsyncWriteWrapper, FutureRepollable, print_hex, print_list};
 
 struct ChannelInner<C: ChannelController> {
-    config: C::Config,
     sender: Sender<C::ControlMsg>,
     receiver: Receiver<C::ControlMsg>,
+    config: C::Config,
+}
+
+impl<C: ChannelController> AsRef<C::Config> for ChannelInner<C> {
+    fn as_ref(&self) -> &C::Config {
+        &self.config
+    }
 }
 
 #[pin_project]
@@ -361,7 +367,7 @@ impl<R: Runtime, C: ChannelController, M> ChannelRemoved<R, C, M> {
 }
 
 #[instrument(skip_all, fields(peer_id = %print_hex(cfg.config.peer_id())))]
-async fn handle_channel<R: Runtime, C: ChannelController>(
+async fn handle_channel<R: Runtime, C: ChannelController + 'static>(
     runtime: R,
     cfg: Arc<ChannelInner<C>>,
 ) -> bool {
@@ -394,7 +400,7 @@ async fn handle_channel<R: Runtime, C: ChannelController>(
 }
 
 #[instrument(skip_all, fields(peer_id = %print_hex(cfg.config.peer_id())))]
-async fn handle_stream<R: Runtime, C: ChannelController>(
+async fn handle_stream<R: Runtime, C: ChannelController + 'static>(
     runtime: R,
     cfg: Arc<ChannelInner<C>>,
     stream: R::Stream,
@@ -417,7 +423,6 @@ async fn handle_stream<R: Runtime, C: ChannelController>(
         },
         timer: None,
         timer_finished: true,
-        cont: C::new(&cfg.config),
         ctrl_recv: Some(cfg.receiver.clone().into_stream()),
         circ_map: Some(CircuitMap::new(
             C::channel_cap(&cfg.config),
@@ -425,9 +430,9 @@ async fn handle_stream<R: Runtime, C: ChannelController>(
         )),
         cell_msg_pause: false,
         state: State::Normal,
+        cont: C::new(cfg),
         span: debug_span!("ChannelFut"),
     };
-    drop(cfg);
 
     match fut.await {
         Ok(()) => true,

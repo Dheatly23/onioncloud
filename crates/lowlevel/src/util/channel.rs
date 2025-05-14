@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::channel::circ_map::CircuitMap;
@@ -28,10 +29,13 @@ impl<C: ChannelController> TestController<C> {
     /// - `controller` : Channel controller to be tested.
     /// - `link_cert` : Link certificate.
     pub fn new(
-        config: &C::Config,
+        config: Arc<impl 'static + Send + Sync + AsRef<C::Config>>,
         peer_addr: SocketAddr,
         link_cert: impl Into<Cow<'static, [u8]>>,
     ) -> Self {
+        let cfg = (*config).as_ref();
+        let circ_map = CircuitMap::new(C::channel_cap(cfg), C::channel_aggregate_cap(cfg));
+
         Self {
             stream: TestStream {
                 peer_addr,
@@ -42,7 +46,7 @@ impl<C: ChannelController> TestController<C> {
                 recv_eof: false,
             },
             controller: C::new(config),
-            circ_map: CircuitMap::new(C::channel_cap(config), C::channel_aggregate_cap(config)),
+            circ_map,
             cell_msg_pause: false,
             time: Instant::now(),
             timeout: None,

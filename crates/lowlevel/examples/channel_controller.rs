@@ -65,7 +65,7 @@ impl CellCache for LinkCfg {
 
 struct Config {
     id: RelayId,
-    addrs: Arc<[SocketAddr]>,
+    addrs: Cow<'static, [SocketAddr]>,
 }
 
 impl ChannelConfig for Config {
@@ -80,8 +80,7 @@ impl ChannelConfig for Config {
 
 struct Controller {
     link_cfg: Arc<LinkCfg>,
-    relay_id: RelayId,
-    addrs: Option<Arc<[SocketAddr]>>,
+    cfg: Arc<dyn Send + Sync + AsRef<Config>>,
 
     state: ControllerState,
 
@@ -122,14 +121,13 @@ impl ChannelController for Controller {
     type Cell = Cached<Cell, Arc<LinkCfg>>;
     type CircMeta = ();
 
-    fn new(cfg: &Self::Config) -> Self {
+    fn new(cfg: Arc<dyn Send + Sync + AsRef<Self::Config>>) -> Self {
         let link_cfg = Arc::new(LinkCfg::default());
 
         Self {
             state: ControllerState::Init,
 
-            relay_id: cfg.id,
-            addrs: Some(cfg.addrs.clone()),
+            cfg,
             link_cfg,
 
             timer: TimerState::Init,
@@ -215,7 +213,7 @@ impl<'a>
             self.state = match &mut self.state {
                 ControllerState::Init => {
                     let peer_addr = input.peer_addr();
-                    let addrs = self.addrs.as_ref().expect("addresses must exist");
+                    let addrs = &(*self.cfg).as_ref().addrs;
                     if !addrs.contains(peer_addr) {
                         bail!("peer address {peer_addr} is not in {addrs:?}")
                     }
@@ -284,10 +282,11 @@ impl<'a>
                                         "found relay RSA public key with fingerprint {}",
                                         print_hex(&id)
                                     );
-                                    if id.ct_ne(&self.relay_id).into() {
+                                    let relay_id = &(*self.cfg).as_ref().id;
+                                    if id.ct_ne(relay_id).into() {
                                         bail!(
                                             "relay ID mismatch (expect {}, got {})",
-                                            print_hex(&self.relay_id),
+                                            print_hex(relay_id),
                                             print_hex(&id)
                                         )
                                     }
@@ -370,7 +369,7 @@ impl<'a>
                                 let Some(peer_addr) = peer_addr else {
                                     bail!("invalid peer address")
                                 };
-                                let addrs = self.addrs.take().expect("addresses must exist");
+                                let addrs = &(*self.cfg).as_ref().addrs;
                                 for a in cell.this_addrs() {
                                     info!("found this address: {a}");
                                     if addrs.iter().all(|b| b.ip() != a) {
