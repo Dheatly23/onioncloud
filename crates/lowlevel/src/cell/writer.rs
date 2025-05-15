@@ -27,6 +27,29 @@ impl<C: CellLike> CellWriter<C> {
             index: 0,
         }
     }
+
+    /// Create new [`CellWriter`] using configuration.
+    pub fn with_cell_config<Cfg: WithCellConfig>(
+        cell: C,
+        cfg: &Cfg,
+    ) -> Result<Self, errors::CellError> {
+        Self::check_cell_config(&cell, cfg).map(|t| Self::new(cell, t))
+    }
+
+    fn check_cell_config<Cfg: WithCellConfig>(
+        cell: &C,
+        cfg: &Cfg,
+    ) -> Result<bool, errors::CellError> {
+        match (
+            cfg.cell_type(&CellHeader::new(cell.circuit(), cell.command()))?,
+            cell.cell(),
+        ) {
+            (CellType::Fixed, CellRef::Fixed(_)) | (CellType::Variable, CellRef::Variable(_)) => {
+                Ok(cfg.is_circ_id_4bytes())
+            }
+            _ => Err(errors::CellFormatError.into()),
+        }
+    }
 }
 
 /// Wraps a [`Cached`] cell to be written.
@@ -38,19 +61,7 @@ where
     type Error = errors::CellError;
 
     fn try_from(v: Cached<T, C>) -> Result<Self, Self::Error> {
-        let config = Cached::cache(&v);
-        if !matches!(
-            (
-                config.cell_type(&CellHeader::new(v.circuit(), v.command()))?,
-                v.cell()
-            ),
-            (CellType::Fixed, CellRef::Fixed(_)) | (CellType::Variable, CellRef::Variable(_))
-        ) {
-            return Err(errors::CellFormatError.into());
-        }
-
-        let circuit_4bytes = config.is_circ_id_4bytes();
-        Ok(Self::new(v, circuit_4bytes))
+        Self::check_cell_config(&v, Cached::cache(&v)).map(|t| Self::new(v, t))
     }
 }
 
