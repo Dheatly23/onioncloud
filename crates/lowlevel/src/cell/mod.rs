@@ -1,5 +1,7 @@
 pub mod auth;
 pub mod certs;
+pub mod create;
+pub mod destroy;
 pub mod dispatch;
 pub mod netinfo;
 pub mod padding;
