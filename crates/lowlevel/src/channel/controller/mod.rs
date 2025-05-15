@@ -1,3 +1,5 @@
+pub mod user_controller;
+
 use std::fmt::{Debug, Display};
 use std::io::Error as IoError;
 use std::sync::Arc;
@@ -7,6 +9,8 @@ use rustls::Error as RustlsError;
 use super::circ_map::CircuitMap;
 use super::{CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput};
 use crate::util::sans_io::Handle;
+
+pub use user_controller::UserController;
 
 /// Marker type for channel timeout.
 #[derive(Debug, PartialEq, Eq)]
