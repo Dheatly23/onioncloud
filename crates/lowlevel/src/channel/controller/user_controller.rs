@@ -256,21 +256,27 @@ impl<T> OutBuffer<T> {
         assert!(self.head < 64);
         assert!(self.len < 64);
 
+        self.head = (self.head + 1) % 64;
+        self.len += 1;
         let ix = usize::from(self.head);
         debug_assert!(self.buffer[ix].is_none());
         self.buffer[ix] = Some(value);
-        self.head = (self.head + 1) % 64;
-        self.len += 1;
+
+        debug_assert!(self.head < 64);
+        debug_assert!(self.len <= 64);
     }
 
     fn push_front(&mut self, value: T) {
         assert!(self.head < 64);
         assert!(self.len < 64);
 
-        let ix = usize::from(((self.head as i8 - self.len as i8) % 64) as u8);
+        let ix = usize::from((self.head as i8 - self.len as i8).rem_euclid(64) as u8);
         debug_assert!(self.buffer[ix].is_none());
         self.buffer[ix] = Some(value);
         self.len += 1;
+
+        debug_assert!(self.head < 64);
+        debug_assert!(self.len <= 64);
     }
 
     fn pop(&mut self) -> Option<T> {
@@ -280,13 +286,17 @@ impl<T> OutBuffer<T> {
         if self.len == 0 {
             return None;
         }
-        let ix = usize::from(((self.head as i8 - self.len as i8) % 64) as u8);
+        let ix = usize::from((self.head as i8 - (self.len - 1) as i8).rem_euclid(64) as u8);
         let ret = self.buffer[ix].take();
         debug_assert!(ret.is_some());
         self.len -= 1;
         if self.len == 0 {
             self.head = 0;
         }
+
+        debug_assert!(self.head < 64);
+        debug_assert!(self.len < 64);
+
         ret
     }
 }
@@ -460,6 +470,19 @@ mod tests {
             }
         }
 
+        fn push_front(&mut self, n: u8) {
+            self.popped.clear();
+
+            for _ in 0..n {
+                if self.is_full() {
+                    break;
+                }
+
+                self.buf.push_front(self.i);
+                self.i = self.i.wrapping_add(1);
+            }
+        }
+
         fn scan_pop(&mut self, v: &[bool; 64]) {
             self.popped.clear();
 
@@ -472,6 +495,15 @@ mod tests {
                     true
                 }
             });
+        }
+
+        fn pop(&mut self, n: u8) {
+            self.popped.clear();
+
+            for _ in 0..n {
+                let Some(v) = self.buf.pop_front() else { break };
+                self.popped.push(v);
+            }
         }
     }
 
@@ -568,6 +600,7 @@ mod tests {
             ref_state: &<Self::Reference as ReferenceStateMachine>::State,
         ) {
             assert_eq!(state.popped, ref_state.popped);
+            assert_eq!(state.i, ref_state.i);
 
             let mut flags = [false; 64];
             let mut i = state.buf.head;
@@ -603,8 +636,124 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone)]
+    enum OutBufferTrans {
+        PushBack(u8),
+        PushFront(u8),
+        Pop(u8),
+    }
+
+    struct RefOutBuffer;
+
+    impl ReferenceStateMachine for RefOutBuffer {
+        type State = RefBuffer;
+        type Transition = OutBufferTrans;
+
+        fn init_state() -> BoxedStrategy<Self::State> {
+            LazyJust::new(RefBuffer::new).boxed()
+        }
+
+        fn transitions(_: &Self::State) -> BoxedStrategy<Self::Transition> {
+            prop_oneof![
+                (1u8..=64).prop_map(OutBufferTrans::PushBack),
+                (1u8..=64).prop_map(OutBufferTrans::PushFront),
+                (1u8..=64).prop_map(OutBufferTrans::Pop),
+            ]
+            .boxed()
+        }
+
+        fn apply(mut state: Self::State, trans: &Self::Transition) -> Self::State {
+            match *trans {
+                OutBufferTrans::PushBack(n) => state.push(n),
+                OutBufferTrans::PushFront(n) => state.push_front(n),
+                OutBufferTrans::Pop(n) => state.pop(n),
+            }
+
+            state
+        }
+    }
+
+    struct OutBufferTest {
+        buf: OutBuffer<u64>,
+        i: u64,
+        popped: Vec<u64>,
+    }
+
+    impl StateMachineTest for OutBufferTest {
+        type SystemUnderTest = Self;
+        type Reference = RefOutBuffer;
+
+        fn init_test(
+            _: &<Self::Reference as ReferenceStateMachine>::State,
+        ) -> Self::SystemUnderTest {
+            OutBufferTest {
+                buf: OutBuffer::new(),
+                i: 0,
+                popped: Vec::new(),
+            }
+        }
+
+        fn apply(
+            mut state: Self::SystemUnderTest,
+            _: &<Self::Reference as ReferenceStateMachine>::State,
+            trans: <Self::Reference as ReferenceStateMachine>::Transition,
+        ) -> Self::SystemUnderTest {
+            state.popped.clear();
+            match trans {
+                OutBufferTrans::PushBack(n) => {
+                    for _ in 0..n {
+                        if state.buf.is_full() {
+                            break;
+                        }
+
+                        state.buf.push_back(state.i);
+                        state.i = state.i.wrapping_add(1);
+                    }
+                }
+                OutBufferTrans::PushFront(n) => {
+                    for _ in 0..n {
+                        if state.buf.is_full() {
+                            break;
+                        }
+
+                        state.buf.push_front(state.i);
+                        state.i = state.i.wrapping_add(1);
+                    }
+                }
+                OutBufferTrans::Pop(n) => {
+                    for _ in 0..n {
+                        let Some(v) = state.buf.pop() else { break };
+                        state.popped.push(v);
+                    }
+                }
+            }
+
+            state
+        }
+
+        fn check_invariants(
+            state: &Self::SystemUnderTest,
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        ) {
+            assert_eq!(state.popped, ref_state.popped);
+            assert_eq!(state.i, ref_state.i);
+
+            assert_eq!(state.buf.len as usize, ref_state.len());
+            for i in 0..state.buf.len {
+                let ix = usize::from((state.buf.head as i8 - i as i8).rem_euclid(64) as u8);
+                assert_eq!(
+                    state.buf.buffer[ix],
+                    Some(ref_state.buf[ref_state.len() - 1 - i as usize]),
+                    "value mismatch at index {i}"
+                );
+            }
+        }
+    }
+
     prop_state_machine! {
         #[test]
         fn test_in_buffer(sequential 1..64 => InBufferTest);
+        #[test]
+        fn test_out_buffer(sequential 1..64 => OutBufferTest);
     }
 }
