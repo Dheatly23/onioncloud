@@ -76,13 +76,11 @@ impl From<Create2> for FixedCell {
 
 impl TryFromCell for Create2 {
     fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, errors::CellFormatError> {
-        let Some(
-            ref c @ Cell {
-                circuit: cid,
-                command: Self::ID,
-                ..
-            },
-        ) = *cell
+        let Some(Cell {
+            circuit: cid,
+            command: Self::ID,
+            ..
+        }) = *cell
         else {
             return Ok(None);
         };
@@ -204,13 +202,11 @@ impl From<Created2> for FixedCell {
 
 impl TryFromCell for Created2 {
     fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, errors::CellFormatError> {
-        let Some(
-            ref c @ Cell {
-                circuit: cid,
-                command: Self::ID,
-                ..
-            },
-        ) = *cell
+        let Some(Cell {
+            circuit: cid,
+            command: Self::ID,
+            ..
+        }) = *cell
         else {
             return Ok(None);
         };

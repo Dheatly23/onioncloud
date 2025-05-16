@@ -30,13 +30,11 @@ impl From<Destroy> for FixedCell {
 
 impl TryFromCell for Destroy {
     fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, errors::CellFormatError> {
-        let Some(
-            ref c @ Cell {
-                circuit: cid,
-                command: Self::ID,
-                ..
-            },
-        ) = *cell
+        let Some(Cell {
+            circuit: cid,
+            command: Self::ID,
+            ..
+        }) = *cell
         else {
             return Ok(None);
         };
