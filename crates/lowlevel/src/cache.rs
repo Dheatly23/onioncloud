@@ -18,6 +18,8 @@ pub trait CellCache: Sync {
     ///
     /// The behavior can be as simple as creating a new [`FixedCell`] every time.
     /// More advanced implementation should be using a global cache to manage cached cells.
+    ///
+    /// **⚠ Cell should be cleared of it's content before returning. ⚠**
     fn get_cached(&self) -> FixedCell;
 
     /// Returns cell into cache.
@@ -129,7 +131,10 @@ impl CellCache for StandardCellCache {
         // Needs it for test harness
         #[allow(clippy::manual_unwrap_or_default)]
         match self.buf.pop() {
-            Some(v) => v,
+            Some(mut v) => {
+                v.data_mut().fill(0);
+                v
+            }
             None => {
                 #[cfg(test)]
                 self.alloc_count.fetch_add(1, AcqRel);
