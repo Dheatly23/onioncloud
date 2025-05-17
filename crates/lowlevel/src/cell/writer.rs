@@ -50,6 +50,11 @@ impl<C: CellLike> CellWriter<C> {
             _ => Err(errors::CellFormatError.into()),
         }
     }
+
+    /// Check if writer is finished.
+    pub fn is_finished(&self) -> bool {
+        self.cell.is_none()
+    }
 }
 
 /// Wraps a [`Cached`] cell to be written.
@@ -143,6 +148,8 @@ fn write_cell(
 /// Handle a [`Write`] stream.
 ///
 /// When it returns an [`Ok`] value, [`CellWriter`] is finished and should be dropped.
+/// [`handle`] can be called after it finished, but writer return [`Ok`] immediately.
+/// Use [`is_finished`](`Self::is_finished`) to check.
 impl<C: CellLike> Handle<&mut dyn Write> for CellWriter<C> {
     type Return = IoResult<()>;
 
