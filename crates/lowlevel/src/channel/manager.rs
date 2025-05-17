@@ -53,7 +53,7 @@ struct Channel<R: Runtime, C: ChannelController, M> {
 /// Use [`ChannelManager::get`] to create it.
 pub struct ChannelRef<'a, R: Runtime, C: ChannelController, M> {
     inner: Pin<&'a mut Channel<R, C, M>>,
-    runtime: &'a mut R,
+    runtime: &'a R,
 }
 
 /// A removed channel.
@@ -86,7 +86,7 @@ impl<R: Runtime, C: ChannelController, M> ChannelManager<R, C, M> {
     pub fn get<'a>(&'a mut self, peer: &RelayId) -> Option<ChannelRef<'a, R, C, M>> {
         self.channels.get_mut(peer).map(|v| ChannelRef {
             inner: v.as_mut(),
-            runtime: &mut self.runtime,
+            runtime: &self.runtime,
         })
     }
 
@@ -127,7 +127,7 @@ impl<R: Runtime, C: ChannelController, M> ChannelManager<R, C, M> {
 
         ChannelRef {
             inner: v.as_mut(),
-            runtime: &mut self.runtime,
+            runtime: &self.runtime,
         }
     }
 
@@ -188,7 +188,7 @@ impl<R: Runtime, C: ChannelController, M> ChannelManager<R, C, M> {
 
         Ok(ChannelRef {
             inner: v.as_mut(),
-            runtime: &mut self.runtime,
+            runtime: &self.runtime,
         })
     }
 }
@@ -246,6 +246,59 @@ impl<R: Runtime, C: ChannelController, M> Channel<R, C, M> {
             Err(errors::HandleError)
         }
     }
+
+    /// Restarts controller if stopped.
+    ///
+    /// Sometimes it's useful to reuse state.
+    pub fn restart(self: Pin<&mut Self>, r: &R) -> bool
+    where
+        R: 'static + Clone,
+        C: 'static,
+    {
+        let mut this = self.project();
+
+        if this.handle.is_finished() {
+            return false;
+        }
+
+        this.handle.as_mut().set(
+            r.spawn(handle_channel(r.clone(), this.inner.clone()))
+                .into(),
+        );
+        true
+    }
+
+    /// Restarts controller if stopped (with attached stream).
+    pub fn restart_with(self: Pin<&mut Self>, r: &R, stream: R::Stream) -> bool
+    where
+        R: 'static + Clone,
+        C: 'static,
+    {
+        let mut this = self.project();
+
+        if this.handle.is_finished() {
+            return false;
+        }
+
+        let peer_addr = match stream.peer_addr() {
+            Ok(v) => v,
+            Err(e) => {
+                error!(error = display(e), "cannot get peer address");
+                return false;
+            }
+        };
+
+        this.handle.as_mut().set(
+            r.spawn(handle_stream(
+                r.clone(),
+                this.inner.clone(),
+                stream,
+                peer_addr,
+            ))
+            .into(),
+        );
+        true
+    }
 }
 
 impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
@@ -295,18 +348,7 @@ impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
         R: 'static + Clone,
         C: 'static,
     {
-        let mut this = self.inner.as_mut().project();
-
-        if this.handle.is_finished() {
-            return false;
-        }
-
-        this.handle.as_mut().set(
-            self.runtime
-                .spawn(handle_channel(self.runtime.clone(), this.inner.clone()))
-                .into(),
-        );
-        true
+        self.inner.as_mut().restart(self.runtime)
     }
 
     /// Restarts controller if stopped (with attached stream).
@@ -315,31 +357,7 @@ impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
         R: 'static + Clone,
         C: 'static,
     {
-        let mut this = self.inner.as_mut().project();
-
-        if this.handle.is_finished() {
-            return false;
-        }
-
-        let peer_addr = match stream.peer_addr() {
-            Ok(v) => v,
-            Err(e) => {
-                error!(error = display(e), "cannot get peer address");
-                return false;
-            }
-        };
-
-        this.handle.as_mut().set(
-            self.runtime
-                .spawn(handle_stream(
-                    self.runtime.clone(),
-                    this.inner.clone(),
-                    stream,
-                    peer_addr,
-                ))
-                .into(),
-        );
-        true
+        self.inner.as_mut().restart_with(self.runtime, stream)
     }
 }
 
@@ -380,6 +398,182 @@ impl<R: Runtime, C: ChannelController, M> ChannelRemoved<R, C, M> {
     #[inline(always)]
     pub async fn completion(mut self) -> Result<(), errors::HandleError> {
         self.0.as_mut().completion().await
+    }
+}
+
+/// Channel manager that only manages one channel.
+///
+/// Useful if you want to manage channels yourself.
+pub struct SingleManager<R: Runtime, C: ChannelController, M> {
+    inner: Pin<Box<Channel<R, C, M>>>,
+    runtime: R,
+}
+
+impl<R: Runtime, C: ChannelController, M> SingleManager<R, C, M> {
+    /// Create new channel.
+    ///
+    /// # Parameters
+    /// - `runtime` : Runtime used. Must be [`Clone`]-able.
+    /// - `config` : Channel configuration.
+    /// - `meta` : Channel metadata.
+    pub fn new(runtime: R, config: C::Config, meta: M) -> Self
+    where
+        R: 'static + Clone,
+        C: 'static,
+    {
+        let (sender, receiver) = bounded(0);
+        let inner = Arc::new(ChannelInner {
+            config,
+            sender,
+            receiver,
+        });
+
+        Self {
+            inner: Box::pin(Channel {
+                handle: runtime
+                    .spawn(handle_channel(runtime.clone(), inner.clone()))
+                    .into(),
+                inner,
+                meta,
+            }),
+            runtime,
+        }
+    }
+
+    /// Bind stream into channel.
+    ///
+    /// # Parameters
+    /// - `runtime` : Runtime used. Must be [`Clone`]-able.
+    /// - `stream` : Stream to be bound.
+    /// - `config` : Channel configuration.
+    /// - `meta` : Channel metadata.
+    pub fn with_stream(runtime: R, stream: R::Stream, config: C::Config, meta: M) -> IoResult<Self>
+    where
+        R: 'static + Clone,
+        C: 'static,
+    {
+        let (sender, receiver) = bounded(0);
+        let inner = Arc::new(ChannelInner {
+            config,
+            sender,
+            receiver,
+        });
+        let peer_addr = stream.peer_addr()?;
+
+        Ok(Self {
+            inner: Box::pin(Channel {
+                handle: runtime
+                    .spawn(handle_stream(
+                        runtime.clone(),
+                        inner.clone(),
+                        stream,
+                        peer_addr,
+                    ))
+                    .into(),
+                inner,
+                meta,
+            }),
+            runtime,
+        })
+    }
+
+    /// Create new channel with default metadata.
+    ///
+    /// # Parameters
+    /// - `runtime` : Runtime used. Must be [`Clone`]-able.
+    /// - `config` : Channel configuration.
+    pub fn with_default_meta(runtime: R, config: C::Config) -> Self
+    where
+        R: 'static + Clone,
+        C: 'static,
+        M: Default,
+    {
+        Self::new(runtime, config, M::default())
+    }
+
+    /// Bind stream into channel with default metadata.
+    ///
+    /// # Parameters
+    /// - `runtime` : Runtime used. Must be [`Clone`]-able.
+    /// - `stream` : Stream to be bound.
+    /// - `config` : Channel configuration.
+    pub fn with_stream_default_meta(
+        runtime: R,
+        stream: R::Stream,
+        config: C::Config,
+    ) -> IoResult<Self>
+    where
+        R: 'static + Clone,
+        C: 'static,
+        M: Default,
+    {
+        Self::with_stream(runtime, stream, config, M::default())
+    }
+
+    /// Gets [`ChannelRef`] to self.
+    pub fn as_ref(&mut self) -> ChannelRef<'_, R, C, M> {
+        ChannelRef {
+            inner: self.inner.as_mut(),
+            runtime: &self.runtime,
+        }
+    }
+
+    /// Gets reference to channel metadata.
+    #[inline(always)]
+    pub fn meta(&mut self) -> Pin<&mut M> {
+        self.inner.as_mut().meta()
+    }
+
+    /// Gets reference to channel configuration.
+    #[inline(always)]
+    pub fn config(&self) -> &C::Config {
+        self.inner.config()
+    }
+
+    /// Send a control message.
+    #[inline(always)]
+    pub async fn send_control(
+        &mut self,
+        msg: C::ControlMsg,
+    ) -> Result<(), errors::SendControlMsgError> {
+        self.inner.as_mut().send_control(msg).await
+    }
+
+    /// Send a control message and wait for completion.
+    ///
+    /// Useful for sending shutdown message.
+    #[inline(always)]
+    pub async fn send_and_completion(
+        &mut self,
+        msg: C::ControlMsg,
+    ) -> Result<(), errors::HandleError> {
+        self.inner.as_mut().send_and_completion(msg).await
+    }
+
+    /// Waits controller for completion.
+    #[inline(always)]
+    pub async fn completion(&mut self) -> Result<(), errors::HandleError> {
+        self.inner.as_mut().completion().await
+    }
+
+    /// Restarts controller if stopped.
+    ///
+    /// Sometimes it's useful to reuse state.
+    pub fn restart(&mut self) -> bool
+    where
+        R: 'static + Clone,
+        C: 'static,
+    {
+        self.inner.as_mut().restart(&self.runtime)
+    }
+
+    /// Restarts controller if stopped (with attached stream).
+    pub fn restart_with(&mut self, stream: R::Stream) -> bool
+    where
+        R: 'static + Clone,
+        C: 'static,
+    {
+        self.inner.as_mut().restart_with(&self.runtime, stream)
     }
 }
 
