@@ -44,7 +44,41 @@ To put it simply, Arti's low-level code is fucked.
 
 EOTK is nice and all, but relying on C Tor limits it's scalability.
 
+### What about Oniux?
+
+It's parallelization, AKA horizontal scaling. Also it's client/user applications only.
+
 ### License?
 
 Since this project is _heavily_ inspired by Arti, we'll use the same license of Apache 2.0.
 We would _love_ to use stronger license like LGPL, but the ramifications are _unknown._
+
+### What is the design policy/language?
+
+Our policy in designing this project is as follows:
+- We don't believe in "splitting into bunch of small crates then glue up everything".
+  It's simply too much headache for marginal compile time speedup.
+  Instead, this project will be split up into 3 layer/crates:
+  1. Low-level crate: Contains things needed to parse and handle Tor protocol.
+     Cryptography code also lives here.
+  2. Mid-level crates: Contains implementation of Tor protocol.
+     It may be split up into relay, user, hidden service, etc.
+  3. High-level crates: Glue low-level and mid-level and provide ready-to-use API.
+     This is where actual onioncloud implementation will reside.
+- Commits are history, not a story. Don't erase it, keep it real.
+- Test implementation to ensure correct behavior and cover edge cases.
+- Not using coverage as guiding principle, as it's too much burden.
+- Use proptest to make testing edge case easier.
+  In the future we might use fuzzing to further test code.
+- Use sans-io to make protocol implementation and testing easier.
+  Our variation/deviation of sans-io is as follows:
+  - I/O is using `WouldBlock` error code to signal yielding/pending, instead of passing buffers around.
+    This simplifies I/O and allows for more traditional sync IO code to handle async IO (to some degree).
+  - Output of event handling is bundled into one return value, instead of calling a poll functions (like timer/timeout).
+    Simplifies `Handle` trait and allows future extensibility at the cost of complex return value.
+- Use async, but make it executor independent.
+- Message passing/channels async model to simplify managers/runtime.
+- No async trait/AFIT, it's PITA to reason about.
+- `zerocopy` for parsing packets/cells.
+
+Future contributors _must_ follows these policy. Future ones might be added.
