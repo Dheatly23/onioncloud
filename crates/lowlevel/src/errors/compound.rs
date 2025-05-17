@@ -52,6 +52,8 @@ pub enum UserControllerError {
     #[error(transparent)]
     CellFormatError(#[from] super::CellFormatError),
     #[error(transparent)]
+    VersionsNegotiateError(#[from] super::VersionsNegotiateError),
+    #[error(transparent)]
     PeerMismatchError(#[from] super::PeerMismatchError),
 }
 
