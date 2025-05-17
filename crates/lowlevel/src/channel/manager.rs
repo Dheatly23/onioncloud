@@ -199,6 +199,11 @@ impl<R: Runtime, C: ChannelController, M> Channel<R, C, M> {
         self.project().meta
     }
 
+    /// Gets reference to channel configuration.
+    fn config(&self) -> &C::Config {
+        &self.inner.config
+    }
+
     /// Send a control message.
     async fn send_control(
         self: Pin<&mut Self>,
@@ -248,6 +253,12 @@ impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
     #[inline(always)]
     pub fn meta(&mut self) -> Pin<&mut M> {
         self.inner.as_mut().meta()
+    }
+
+    /// Gets reference to channel configuration.
+    #[inline(always)]
+    pub fn config(&self) -> &C::Config {
+        self.inner.config()
     }
 
     /// Send a control message.
@@ -337,6 +348,12 @@ impl<R: Runtime, C: ChannelController, M> ChannelRemoved<R, C, M> {
     #[inline(always)]
     pub fn meta(&mut self) -> Pin<&mut M> {
         self.0.as_mut().meta()
+    }
+
+    /// Gets reference to channel configuration.
+    #[inline(always)]
+    pub fn config(&self) -> &C::Config {
+        self.0.config()
     }
 
     /// Send a control message.
