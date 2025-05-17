@@ -1,6 +1,8 @@
 use std::collections::vec_deque::VecDeque;
 use std::io::{ErrorKind, Result as IoResult};
 use std::num::NonZeroU32;
+use std::ops::ControlFlow;
+use std::ops::ControlFlow::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,6 +28,16 @@ use crate::crypto::relay::{RelayId, RelayIdEd};
 use crate::errors;
 use crate::linkver::StandardLinkver;
 use crate::util::sans_io::Handle;
+
+/// Trait for [`UserController`] configuration type.
+pub trait UserConfig: ChannelConfig {
+    /// Get [`CellCache`].
+    ///
+    /// # Implementer's Note
+    ///
+    /// To maximize cache utilization, cache should be as global as possible.
+    fn get_cache(&self) -> Arc<dyn Send + Sync + CellCache>;
+}
 
 #[derive(Clone)]
 struct LinkCfg {
@@ -58,7 +70,7 @@ pub struct UserController<Cfg> {
 
     state: State<Cfg>,
 
-    last_packet: Instant,
+    last_packet: Option<Instant>,
     is_timeout: bool,
 }
 
@@ -75,9 +87,7 @@ enum State<Cfg> {
     Shutdown,
 }
 
-#[derive(Default)]
 enum InitState {
-    #[default]
     Init,
     VersionsWrite(CellWriter<Versions>),
     ConfigRead(Reader, ConfigReadState),
@@ -107,7 +117,7 @@ pub struct CircuitMeta {
     closing: bool,
 }
 
-impl<Cfg: 'static + ChannelConfig + Send + Sync> ChannelController for UserController<Cfg> {
+impl<Cfg: 'static + UserConfig + Send + Sync> ChannelController for UserController<Cfg> {
     type Error = errors::UserControllerError;
     type Config = Cfg;
     type ControlMsg = ();
@@ -115,11 +125,24 @@ impl<Cfg: 'static + ChannelConfig + Send + Sync> ChannelController for UserContr
     type CircMeta = CircuitMeta;
 
     fn new(config: Arc<dyn Send + Sync + AsRef<Self::Config>>) -> Self {
-        todo!()
+        Self {
+            link_cfg: LinkCfg {
+                linkver: Default::default(),
+                cache: (*config).as_ref().get_cache(),
+            },
+
+            state: State::Init {
+                state: InitState::Init,
+                cfg: config,
+            },
+
+            last_packet: None,
+            is_timeout: false,
+        }
     }
 }
 
-impl<'a, Cfg: 'static + ChannelConfig + Send + Sync>
+impl<'a, Cfg: 'static + UserConfig + Send + Sync>
     Handle<(
         ChannelInput<'a>,
         &'a mut CircuitMap<CachedCell, CircuitMeta>,
@@ -135,39 +158,73 @@ impl<'a, Cfg: 'static + ChannelConfig + Send + Sync>
             &'a mut CircuitMap<CachedCell, CircuitMeta>,
         ),
     ) -> Self::Return {
+        let last_packet = self.last_packet.get_or_insert_with(|| input.time());
+
         loop {
             match self.state {
                 State::Init {
-                    state: ref mut s @ InitState::Init,
+                    ref mut state,
                     ref cfg,
-                } => {
-                    let peer_addr = input.peer_addr();
-                    let addrs = (**cfg).as_ref().peer_addrs();
-                    if !addrs.contains(peer_addr) {
-                        return Err(errors::PeerMismatchError::new(
-                            *peer_addr,
-                            addrs.iter().copied(),
-                        )
-                        .into());
-                    }
-
-                    *s = InitState::VersionsWrite(CellWriter::with_cell_config(
-                        (*self.link_cfg.linkver).as_ref().versions_cell(),
-                        &self.link_cfg,
-                    )?);
+                } => match state.handle(&self.link_cfg, last_packet, cfg, &mut input)? {
+                    Break(()) => break,
+                    Continue(false) => (),
+                    Continue(true) => todo!(),
+                },
+                State::Steady(ref mut state) => {
+                    return state.handle(&self.link_cfg, last_packet, input, circ_map);
                 }
                 State::Shutdown => {
                     let mut ret = ChannelOutput::new();
                     ret.shutdown(true);
                     return Ok(ret);
                 }
-                _ => todo!(),
             }
         }
+
+        let mut ret = ChannelOutput::new();
+        // Should not receive cell messages
+        ret.cell_msg_pause(true.into());
+        Ok(ret)
     }
 }
 
-impl<Cfg: 'static + ChannelConfig + Send + Sync> Handle<Timeout> for UserController<Cfg> {
+impl InitState {
+    fn handle<Cfg: 'static + UserConfig + Send + Sync>(
+        &mut self,
+        link_cfg: &LinkCfg,
+        last_packet: &mut Instant,
+        cfg: &Arc<dyn Send + Sync + AsRef<Cfg>>,
+        input: &mut ChannelInput<'_>,
+    ) -> Result<ControlFlow<(), bool>, errors::UserControllerError> {
+        *self = match self {
+            Self::Init => {
+                let peer_addr = input.peer_addr();
+                let addrs = (**cfg).as_ref().peer_addrs();
+                if !addrs.contains(peer_addr) {
+                    return Err(
+                        errors::PeerMismatchError::new(*peer_addr, addrs.iter().copied()).into(),
+                    );
+                }
+
+                Self::VersionsWrite(CellWriter::with_cell_config(
+                    (*link_cfg.linkver).as_ref().versions_cell(),
+                    &link_cfg,
+                )?)
+            }
+            Self::VersionsWrite(w) => match write_cell(w, input)? {
+                false => return Ok(Break(())),
+                true => {
+                    Self::ConfigRead(Reader::new(link_cfg.clone()), ConfigReadState::NeedVersions)
+                }
+            },
+            _ => todo!(),
+        };
+
+        Ok(Continue(false))
+    }
+}
+
+impl<Cfg: 'static + UserConfig + Send + Sync> Handle<Timeout> for UserController<Cfg> {
     type Return = Result<(), errors::UserControllerError>;
 
     #[instrument(name = "handle_timeout", skip_all)]
@@ -177,7 +234,7 @@ impl<Cfg: 'static + ChannelConfig + Send + Sync> Handle<Timeout> for UserControl
     }
 }
 
-impl<Cfg: 'static + ChannelConfig + Send + Sync> Handle<ControlMsg<()>> for UserController<Cfg> {
+impl<Cfg: 'static + UserConfig + Send + Sync> Handle<ControlMsg<()>> for UserController<Cfg> {
     type Return = Result<(), errors::UserControllerError>;
 
     #[instrument(name = "handle_control", skip_all)]
@@ -186,9 +243,7 @@ impl<Cfg: 'static + ChannelConfig + Send + Sync> Handle<ControlMsg<()>> for User
     }
 }
 
-impl<Cfg: 'static + ChannelConfig + Send + Sync> Handle<CellMsg<CachedCell>>
-    for UserController<Cfg>
-{
+impl<Cfg: 'static + UserConfig + Send + Sync> Handle<CellMsg<CachedCell>> for UserController<Cfg> {
     type Return = Result<CellMsgPause, errors::UserControllerError>;
 
     #[instrument(name = "handle_cell", skip_all)]
