@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use std::net::SocketAddr;
 
+use arrayvec::ArrayVec;
 use thiserror::Error;
 
 use crate::cell::CellHeader;
@@ -149,3 +151,47 @@ pub(crate) enum CertTypeInner {
 }
 
 display2debug! {CertTypeInner}
+
+#[derive(Error)]
+pub struct PeerMismatchError {
+    peer: SocketAddr,
+    addrs: ArrayVec<SocketAddr, 8>,
+    has_more: bool,
+}
+
+impl PeerMismatchError {
+    pub(crate) fn new(peer: SocketAddr, addrs: impl IntoIterator<Item = SocketAddr>) -> Self {
+        let mut ret = Self {
+            peer,
+            addrs: ArrayVec::new(),
+            has_more: false,
+        };
+
+        for a in addrs {
+            if ret.addrs.try_push(a).is_err() {
+                ret.has_more = true;
+                break;
+            }
+        }
+
+        ret
+    }
+}
+
+impl Display for PeerMismatchError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "peer address {} is not in [", self.peer)?;
+
+        for (i, v) in self.addrs.iter().enumerate() {
+            write!(f, "{}{v}", if i == 0 { "" } else { ", " })?;
+        }
+
+        if self.has_more {
+            write!(f, ", ..]")
+        } else {
+            write!(f, "]")
+        }
+    }
+}
+
+display2debug! {PeerMismatchError}

@@ -51,6 +51,8 @@ pub enum UserControllerError {
     InvalidCellHeader(#[from] super::InvalidCellHeader),
     #[error(transparent)]
     CellFormatError(#[from] super::CellFormatError),
+    #[error(transparent)]
+    PeerMismatchError(#[from] super::PeerMismatchError),
 }
 
 remap! {

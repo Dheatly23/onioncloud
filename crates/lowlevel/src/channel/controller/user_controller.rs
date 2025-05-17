@@ -21,7 +21,7 @@ use crate::cell::writer::CellWriter;
 use crate::cell::{Cell, CellHeader, CellLike, FixedCell};
 use crate::channel::circ_map::{CircuitMap, NewCircuit};
 use crate::channel::controller::{CellMsg, ChannelController, ControlMsg, Timeout};
-use crate::channel::{ChannelConfig, ChannelInput, ChannelOutput};
+use crate::channel::{CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput};
 use crate::crypto::relay::{RelayId, RelayIdEd};
 use crate::errors;
 use crate::linkver::StandardLinkver;
@@ -102,9 +102,99 @@ struct SteadyState {
     pending_close: VecDeque<(NonZeroU32, DestroyReason)>,
 }
 
-struct CircuitMeta {
+pub struct CircuitMeta {
     last_full: Instant,
     closing: bool,
+}
+
+impl<Cfg: 'static + ChannelConfig + Send + Sync> ChannelController for UserController<Cfg> {
+    type Error = errors::UserControllerError;
+    type Config = Cfg;
+    type ControlMsg = ();
+    type Cell = CachedCell;
+    type CircMeta = CircuitMeta;
+
+    fn new(config: Arc<dyn Send + Sync + AsRef<Self::Config>>) -> Self {
+        todo!()
+    }
+}
+
+impl<'a, Cfg: 'static + ChannelConfig + Send + Sync>
+    Handle<(
+        ChannelInput<'a>,
+        &'a mut CircuitMap<CachedCell, CircuitMeta>,
+    )> for UserController<Cfg>
+{
+    type Return = Result<ChannelOutput, errors::UserControllerError>;
+
+    #[instrument(level = "debug", skip_all)]
+    fn handle(
+        &mut self,
+        (mut input, circ_map): (
+            ChannelInput<'a>,
+            &'a mut CircuitMap<CachedCell, CircuitMeta>,
+        ),
+    ) -> Self::Return {
+        loop {
+            match self.state {
+                State::Init {
+                    state: ref mut s @ InitState::Init,
+                    ref cfg,
+                } => {
+                    let peer_addr = input.peer_addr();
+                    let addrs = (**cfg).as_ref().peer_addrs();
+                    if !addrs.contains(peer_addr) {
+                        return Err(errors::PeerMismatchError::new(
+                            *peer_addr,
+                            addrs.iter().copied(),
+                        )
+                        .into());
+                    }
+
+                    *s = InitState::VersionsWrite(CellWriter::with_cell_config(
+                        (*self.link_cfg.linkver).as_ref().versions_cell(),
+                        &self.link_cfg,
+                    )?);
+                }
+                State::Shutdown => {
+                    let mut ret = ChannelOutput::new();
+                    ret.shutdown(true);
+                    return Ok(ret);
+                }
+                _ => todo!(),
+            }
+        }
+    }
+}
+
+impl<Cfg: 'static + ChannelConfig + Send + Sync> Handle<Timeout> for UserController<Cfg> {
+    type Return = Result<(), errors::UserControllerError>;
+
+    #[instrument(name = "handle_timeout", skip_all)]
+    fn handle(&mut self, _: Timeout) -> Self::Return {
+        self.is_timeout = true;
+        Ok(())
+    }
+}
+
+impl<Cfg: 'static + ChannelConfig + Send + Sync> Handle<ControlMsg<()>> for UserController<Cfg> {
+    type Return = Result<(), errors::UserControllerError>;
+
+    #[instrument(name = "handle_control", skip_all)]
+    fn handle(&mut self, _: ControlMsg<()>) -> Self::Return {
+        todo!()
+    }
+}
+
+impl<Cfg: 'static + ChannelConfig + Send + Sync> Handle<CellMsg<CachedCell>>
+    for UserController<Cfg>
+{
+    type Return = Result<CellMsgPause, errors::UserControllerError>;
+
+    #[instrument(name = "handle_cell", skip_all)]
+    fn handle(&mut self, _: CellMsg<CachedCell>) -> Self::Return {
+        todo!()
+    }
 }
 
 struct InBuffer<T> {
@@ -170,15 +260,11 @@ impl<T> InBuffer<T> {
         debug_assert!(self.free <= 64);
     }
 
-    fn scan_pop<E>(
-        &mut self,
-        mut f: impl FnMut(&mut Option<T>) -> Result<(), E>,
-    ) -> Result<usize, E> {
+    fn scan_pop<E>(&mut self, mut f: impl FnMut(&mut Option<T>) -> Result<(), E>) -> Result<(), E> {
         assert!(self.head <= 64);
         assert!(self.tail <= 64);
         assert!(self.free <= 64);
 
-        let mut n = 0;
         let mut i = self.head;
         loop {
             if i == 64 {
@@ -195,8 +281,6 @@ impl<T> InBuffer<T> {
                 ret?;
                 break;
             }
-
-            n += 1;
             (self.head, self.free, self.index[ix]) = (self.index[ix].0, i, (self.free, 64));
             debug_assert!(self.head <= 64);
             debug_assert!(self.free < 64);
@@ -224,7 +308,6 @@ impl<T> InBuffer<T> {
             if data.is_some() {
                 (i, j) = (j, k);
             } else {
-                n += 1;
                 self.index[usize::from(i)].0 = k;
                 (self.free, j, self.index[ix]) = (j, k, (self.free, 64));
                 if j != 64 {
@@ -237,7 +320,7 @@ impl<T> InBuffer<T> {
             ret?;
         }
 
-        Ok(n)
+        Ok(())
     }
 }
 
@@ -339,7 +422,7 @@ fn read_cell(
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 const FULL_TIMEOUT: Duration = Duration::from_millis(100);
 
-fn update_last_packet(ptr: &mut Instant, input: &mut ChannelInput<'_>) {
+fn update_last_packet(ptr: &mut Instant, input: &ChannelInput<'_>) {
     *ptr = input.time() + IDLE_TIMEOUT;
 }
 
@@ -349,9 +432,9 @@ impl SteadyState {
         &mut self,
         cfg: &LinkCfg,
         last_packet: &mut Instant,
-        input: &mut ChannelInput<'_>,
+        mut input: ChannelInput<'_>,
         circ_map: &mut CircuitMap<CachedCell, CircuitMeta>,
-    ) -> Result<(), errors::UserControllerError> {
+    ) -> Result<ChannelOutput, errors::UserControllerError> {
         const FLAG_READ: u8 = 1 << 0;
         const FLAG_WRITE: u8 = 1 << 1;
         const FLAG_WRITE_EMPTY: u8 = 1 << 2;
@@ -359,15 +442,15 @@ impl SteadyState {
 
         let mut flags = 0;
         loop {
-            if flag & FLAG_READ == 0 {
+            if flags & FLAG_READ == 0 {
                 // Read data from stream
                 while !self.in_buffer.is_full() {
-                    let Some(cell) = read_cell(&mut self.cell_read, input)? else {
+                    let Some(cell) = read_cell(&mut self.cell_read, &mut input)? else {
                         flags |= FLAG_READ;
                         break;
                     };
                     if cell.circuit != 0 {
-                        update_last_packet(last_packet, input);
+                        update_last_packet(last_packet, &input);
                         self.in_buffer.push(cfg.cache.cache(cell));
                         continue;
                     }
@@ -394,7 +477,7 @@ impl SteadyState {
                         // User controller cannot create circuit by peer
                         self.pending_close.push_back((id, DestroyReason::Protocol));
                         // Pending DESTROY cell, clear flag
-                        flag &= !FLAG_WRITE_EMPTY;
+                        flags &= !FLAG_WRITE_EMPTY;
                         return Ok(());
                     }
 
@@ -438,7 +521,7 @@ impl SteadyState {
                                     circ.meta.closing = true;
                                     self.pending_close.push_back((id, DestroyReason::Internal));
                                     // Pending DESTROY cell, clear flag
-                                    flag &= !FLAG_WRITE_EMPTY;
+                                    flags &= !FLAG_WRITE_EMPTY;
                                 }
                             }
                         }
@@ -449,16 +532,21 @@ impl SteadyState {
 
                 // Cannot receive anymore
                 if self.in_buffer.is_full() {
-                    flag |= FLAG_READ;
+                    flags |= FLAG_READ;
                 }
             }
 
             // Write data into stream
-            if flag & (FLAG_WRITE | FLAG_WRITE_EMPTY) == 0 {
+            if flags & (FLAG_WRITE | FLAG_WRITE_EMPTY) == 0 {
                 loop {
-                    if !write_cell(&mut self.cell_write, input)? {
+                    let finished = self.cell_write.is_finished();
+                    if !write_cell(&mut self.cell_write, &mut input)? {
                         flags |= FLAG_WRITE;
                         break;
+                    }
+                    if !finished {
+                        // Writer just finished writing
+                        update_last_packet(last_packet, &input);
                     }
 
                     let cell = if let Some((id, reason)) = self.pending_close.pop_front() {
@@ -468,7 +556,17 @@ impl SteadyState {
                         cfg.cache
                             .cache(Destroy::new(cfg.cache.get_cached(), id, reason).into())
                     } else if let Some(cell) = self.out_buffer.pop() {
-                        cell
+                        let mut cell = cell.map(Some);
+
+                        if let Some(cell) = cast::<Destroy>(&mut cell)? {
+                            circ_map.remove(cell.circuit);
+                            cfg.cache.cache(cell.into())
+                        } else if let Ok(cell) = cell.try_map(|c, _| c.ok_or(())) {
+                            cell
+                        } else {
+                            // Should not happen
+                            continue;
+                        }
                     } else {
                         flags |= FLAG_WRITE_EMPTY;
                         break;
@@ -477,10 +575,31 @@ impl SteadyState {
                 }
             }
 
-            if flag & FLAG_READ != 0 && flag & (FLAG_WRITE | FLAG_WRITE_EMPTY) != 0 {
+            if flags & FLAG_READ != 0 && flags & (FLAG_WRITE | FLAG_WRITE_EMPTY) != 0 {
                 break;
             }
         }
+
+        let mut timeout = *last_packet;
+        if flags & FLAG_FULL_TIMEOUT != 0 {
+            // Full timeout
+            timeout = timeout.min(input.time() + FULL_TIMEOUT);
+        }
+
+        let mut ret = ChannelOutput::new();
+        ret.timeout(timeout);
+        // Pause cell messages if out buffer is full
+        ret.cell_msg_pause(self.out_buffer.is_full().into());
+        Ok(ret)
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    fn handle_cell(
+        &mut self,
+        cell: CachedCell,
+    ) -> Result<CellMsgPause, errors::UserControllerError> {
+        self.out_buffer.push_back(cell);
+        Ok(self.out_buffer.is_full().into())
     }
 }
 
