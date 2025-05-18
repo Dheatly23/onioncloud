@@ -1,7 +1,10 @@
 use std::io::{Result as IoResult, Write};
 
+use zerocopy::IntoBytes;
+use zerocopy::byteorder::big_endian::U16;
+
 use super::dispatch::{CellType, WithCellConfig};
-use super::{CellHeader, CellLike, CellRef, FixedCell};
+use super::{CellHeader, CellHeaderBig, CellHeaderSmall, CellLike, CellRef, FixedCell};
 use crate::cache::{Cached, CellCache};
 use crate::errors;
 use crate::util::sans_io::Handle;
@@ -10,8 +13,16 @@ use crate::util::wrap_eof;
 /// Writer for [`Cell`].
 pub struct CellWriter<C> {
     cell: Option<C>,
-    is_4bytes: bool,
-    index: usize,
+    index: CellWriterIndex,
+}
+
+enum CellWriterIndex {
+    HeaderSmall(CellHeaderSmall, u8),
+    HeaderBig(CellHeaderBig, u8),
+    HeaderDone,
+    CellSize(U16, u8),
+    Data(usize),
+    End,
 }
 
 impl<C: CellLike> CellWriter<C> {
@@ -21,10 +32,18 @@ impl<C: CellLike> CellWriter<C> {
     /// - `cell` : The cell to be written.
     /// - `circuit_4bytes` : [`true`] if circuit ID is 4 bytes.
     pub fn new(cell: C, circuit_4bytes: bool) -> Self {
+        let header = CellHeader::new(cell.circuit(), cell.command());
+        Self::with_header(cell, circuit_4bytes, header)
+    }
+
+    fn with_header(cell: C, circuit_4bytes: bool, header: CellHeader) -> Self {
         Self {
             cell: Some(cell),
-            is_4bytes: circuit_4bytes,
-            index: 0,
+            index: if circuit_4bytes {
+                CellWriterIndex::HeaderBig(header.into(), 0)
+            } else {
+                CellWriterIndex::HeaderSmall(header.into(), 0)
+            },
         }
     }
 
@@ -32,20 +51,18 @@ impl<C: CellLike> CellWriter<C> {
     pub fn with_cell_config<Cfg: WithCellConfig>(
         cell: C,
         cfg: &Cfg,
-    ) -> Result<Self, errors::CellError> {
-        Self::check_cell_config(&cell, cfg).map(|t| Self::new(cell, t))
+    ) -> Result<Self, errors::CellDataError> {
+        Self::check_cell_config(&cell, cfg).map(|(t, h)| Self::with_header(cell, t, h))
     }
 
     fn check_cell_config<Cfg: WithCellConfig>(
         cell: &C,
         cfg: &Cfg,
-    ) -> Result<bool, errors::CellError> {
-        match (
-            cfg.cell_type(&CellHeader::new(cell.circuit(), cell.command()))?,
-            cell.cell(),
-        ) {
+    ) -> Result<(bool, CellHeader), errors::CellDataError> {
+        let header = CellHeader::new(cell.circuit(), cell.command());
+        match (cfg.cell_type(&header)?, cell.cell()) {
             (CellType::Fixed, CellRef::Fixed(_)) | (CellType::Variable, CellRef::Variable(_)) => {
-                Ok(cfg.is_circ_id_4bytes())
+                Ok((cfg.is_circ_id_4bytes(), header))
             }
             _ => Err(errors::CellFormatError.into()),
         }
@@ -63,86 +80,61 @@ where
     T: CellLike + Into<FixedCell>,
     C: CellCache + WithCellConfig,
 {
-    type Error = errors::CellError;
+    type Error = errors::CellDataError;
 
     fn try_from(v: Cached<T, C>) -> Result<Self, Self::Error> {
-        Self::check_cell_config(&v, Cached::cache(&v)).map(|t| Self::new(v, t))
+        Self::check_cell_config(&v, Cached::cache(&v)).map(|(t, h)| Self::with_header(v, t, h))
     }
+}
+
+fn write_u8(i: &mut u8, b: &[u8], writer: &mut dyn Write) -> IoResult<()> {
+    debug_assert!(b.len() < 255);
+    while usize::from(*i) < b.len() {
+        *i += wrap_eof(writer.write(&b[usize::from(*i)..]))? as u8;
+    }
+
+    Ok(())
 }
 
 fn write_cell(
     writer: &mut dyn Write,
     cell: &dyn CellLike,
-    ix: &mut usize,
-    is_4bytes: bool,
+    ix: &mut CellWriterIndex,
 ) -> IoResult<()> {
-    // Write header
-    let mut i = match (is_4bytes, *ix) {
-        (false, 0..3) => {
-            let circuit = cell.circuit();
-            debug_assert!(
-                circuit < u32::from(u16::MAX),
-                "circuit ID {circuit} is too large to fit into protocol"
-            );
-            let [a, b] = (circuit as u16).to_be_bytes();
-            let b = [a, b, cell.command()];
-
-            while *ix < 3 {
-                *ix += wrap_eof(writer.write(&b[*ix..]))?;
+    loop {
+        *ix = match ix {
+            CellWriterIndex::HeaderSmall(b, i) => {
+                write_u8(i, b.as_bytes(), writer)?;
+                CellWriterIndex::HeaderDone
             }
-            *ix - 3
-        }
-        (false, i @ 3..) => i - 3,
-        (true, 0..5) => {
-            let [a, b, c, d] = cell.circuit().to_be_bytes();
-            let b = [a, b, c, d, cell.command()];
-
-            while *ix < 5 {
-                *ix += wrap_eof(writer.write(&b[*ix..]))?;
+            CellWriterIndex::HeaderBig(b, i) => {
+                write_u8(i, b.as_bytes(), writer)?;
+                CellWriterIndex::HeaderDone
             }
-            *ix - 5
-        }
-        (true, i @ 5..) => i - 5,
-    };
-
-    // Write cell data
-    match cell.cell() {
-        // Fixed data
-        CellRef::Fixed(b) => {
-            let b = b.data();
-
-            while i < b.len() {
-                let n = wrap_eof(writer.write(&b[i..]))?;
-                i += n;
-                *ix += n;
+            CellWriterIndex::HeaderDone => match cell.cell() {
+                CellRef::Fixed(_) => CellWriterIndex::Data(0),
+                CellRef::Variable(b) => CellWriterIndex::CellSize((b.len() as u16).into(), 0),
+            },
+            CellWriterIndex::CellSize(b, i) => {
+                write_u8(i, b.as_bytes(), writer)?;
+                CellWriterIndex::Data(0)
             }
-        }
-        CellRef::Variable(b) => {
-            let b = b.data();
+            CellWriterIndex::Data(i) => {
+                let b = match cell.cell() {
+                    CellRef::Fixed(b) => b.data(),
+                    CellRef::Variable(b) => b.data(),
+                };
 
-            if i < 2 {
-                // Variable length
-                let b = (b.len() as u16).to_be_bytes();
-
-                while i < 2 {
-                    let n = wrap_eof(writer.write(&b[i..]))?;
-                    i += n;
-                    *ix += n;
+                while *i < b.len() {
+                    let n = wrap_eof(writer.write(&b[*i..]))?;
+                    *i += n;
                 }
-            }
 
-            // Variable data
-            i -= 2;
-
-            while i < b.len() {
-                let n = wrap_eof(writer.write(&b[i..]))?;
-                i += n;
-                *ix += n;
+                CellWriterIndex::End
             }
-        }
+            CellWriterIndex::End => break Ok(()),
+        };
     }
-
-    Ok(())
 }
 
 /// Handle a [`Write`] stream.
@@ -155,7 +147,7 @@ impl<C: CellLike> Handle<&mut dyn Write> for CellWriter<C> {
 
     fn handle(&mut self, writer: &mut dyn Write) -> Self::Return {
         if let Some(cell) = self.cell.as_ref() {
-            write_cell(writer, cell, &mut self.index, self.is_4bytes)?;
+            write_cell(writer, cell, &mut self.index)?;
             self.cell = None;
         }
 

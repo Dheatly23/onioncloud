@@ -15,6 +15,8 @@ use std::ops::Deref;
 use std::pin::Pin;
 
 use futures_io::AsyncRead;
+use zerocopy::byteorder::big_endian::{U16, U32};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use crate::{errors, util};
 
@@ -549,5 +551,57 @@ impl CellHeader {
     /// - `circuit_4bytes` : `true` if circuit ID length is 4 bytes.
     pub async fn read<R: AsyncRead>(reader: Pin<&mut R>, circuit_4bytes: bool) -> IoResult<Self> {
         util::async_reader(reader, reader::CellHeaderReader::new(circuit_4bytes)).await
+    }
+}
+
+/// Cell header with 4-bytes circuit ID.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+pub(crate) struct CellHeaderBig {
+    pub(crate) circuit: U32,
+    pub(crate) command: u8,
+}
+
+impl<'a> From<&'a CellHeaderBig> for CellHeader {
+    fn from(v: &'a CellHeaderBig) -> Self {
+        Self::new(v.circuit.get(), v.command)
+    }
+}
+
+impl From<CellHeader> for CellHeaderBig {
+    fn from(v: CellHeader) -> Self {
+        Self {
+            circuit: v.circuit.into(),
+            command: v.command,
+        }
+    }
+}
+
+/// Cell header with 2-bytes circuit ID.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+pub(crate) struct CellHeaderSmall {
+    pub(crate) circuit: U16,
+    pub(crate) command: u8,
+}
+
+impl<'a> From<&'a CellHeaderSmall> for CellHeader {
+    fn from(v: &'a CellHeaderSmall) -> Self {
+        Self::new(v.circuit.get().into(), v.command)
+    }
+}
+
+impl From<CellHeader> for CellHeaderSmall {
+    fn from(v: CellHeader) -> Self {
+        debug_assert!(
+            v.circuit < u32::from(u16::MAX),
+            "circuit ID {} is too large to fit into 2 bytes",
+            v.circuit
+        );
+
+        Self {
+            circuit: (v.circuit as u16).into(),
+            command: v.command,
+        }
     }
 }

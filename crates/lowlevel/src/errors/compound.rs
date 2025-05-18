@@ -27,6 +27,16 @@ macro_rules! remap {
     };
 }
 
+/// Cell data error.
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum CellDataError {
+    #[error(transparent)]
+    InvalidCellHeader(#[from] super::InvalidCellHeader),
+    #[error(transparent)]
+    CellFormatError(#[from] super::CellFormatError),
+}
+
 /// Cell error.
 #[derive(Error, Debug)]
 #[non_exhaustive]
@@ -37,6 +47,13 @@ pub enum CellError {
     InvalidCellHeader(#[from] super::InvalidCellHeader),
     #[error(transparent)]
     CellFormatError(#[from] super::CellFormatError),
+}
+
+remap! {
+    CellDataError => CellError {
+        InvalidCellHeader,
+        CellFormatError,
+    }
 }
 
 /// User controller error.
@@ -60,6 +77,13 @@ pub enum UserControllerError {
 remap! {
     CellError => UserControllerError {
         Io,
+        InvalidCellHeader,
+        CellFormatError,
+    }
+}
+
+remap! {
+    CellDataError => UserControllerError {
         InvalidCellHeader,
         CellFormatError,
     }

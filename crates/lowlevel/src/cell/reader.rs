@@ -1,7 +1,12 @@
 use std::io::{Read, Result as IoResult};
-use std::mem::replace;
+use std::mem::{replace, size_of};
 
-use super::{Cell, CellHeader, FIXED_CELL_SIZE, FixedCell, VariableCell};
+use zerocopy::byteorder::big_endian::U16;
+use zerocopy::{transmute_mut, transmute_ref};
+
+use super::{
+    Cell, CellHeader, CellHeaderBig, CellHeaderSmall, FIXED_CELL_SIZE, FixedCell, VariableCell,
+};
 use crate::util::sans_io::Handle;
 use crate::util::wrap_eof;
 
@@ -73,10 +78,10 @@ impl Handle<&mut dyn Read> for VariableCellReader {
     }
 }
 
-pub(crate) enum VariableCellReaderInner {
+enum VariableCellReaderInner {
     Initial {
         header: CellHeader,
-        buf: [u8; 2],
+        len: U16,
         index: u8,
     },
     Data {
@@ -91,7 +96,7 @@ impl VariableCellReaderInner {
     pub(crate) fn new(header: CellHeader) -> Self {
         Self::Initial {
             header,
-            buf: [0; 2],
+            len: U16::new(0),
             index: 0,
         }
     }
@@ -100,7 +105,8 @@ impl VariableCellReaderInner {
     pub(crate) fn handle(&mut self, reader: &mut dyn Read) -> IoResult<Cell> {
         loop {
             match self {
-                Self::Initial { header, buf, index } => {
+                Self::Initial { header, len, index } => {
+                    let buf: &mut [u8; 2] = transmute_mut!(len);
                     while usize::from(*index) < buf.len() {
                         let n = wrap_eof(reader.read(&mut buf[usize::from(*index)..]))?;
                         debug_assert!(n <= buf.len());
@@ -108,11 +114,11 @@ impl VariableCellReaderInner {
                     }
                     debug_assert_eq!(usize::from(*index), buf.len());
 
-                    let n = u16::from_be_bytes(*buf) as usize;
+                    let len = usize::from(len.get());
                     let header = header.dup();
                     *self = Self::Data {
                         header,
-                        data: VariableCell::from(vec![0; n]),
+                        data: VariableCell::from(vec![0; len]),
                         index: 0,
                     };
                 }
@@ -139,7 +145,7 @@ impl VariableCellReaderInner {
 
 /// Reader for [`CellHeader`].
 pub struct CellHeaderReader {
-    buf: [u8; 5],
+    buf: [u8; const { size_of::<CellHeaderBig>() }],
     flags: u8,
 }
 
@@ -150,7 +156,7 @@ impl CellHeaderReader {
     /// - `circuit_4bytes` : [`true`] if circuit ID is 4 bytes long. (See [`dispatch::WithCellConfig::is_circ_id_4bytes`]).
     pub fn new(circuit_4bytes: bool) -> Self {
         Self {
-            buf: [0; 5],
+            buf: [0; const { size_of::<CellHeaderBig>() }],
             flags: if circuit_4bytes { 1 << 7 } else { 0 },
         }
     }
@@ -164,33 +170,31 @@ impl Handle<&mut dyn Read> for CellHeaderReader {
 
     fn handle(&mut self, reader: &mut dyn Read) -> Self::Return {
         Ok(if self.flags & (1 << 7) != 0 {
-            while self.flags != (1 << 7) | 5 {
+            const SIZE: usize = size_of::<CellHeaderBig>();
+            while self.flags != (1 << 7) | (SIZE as u8) {
                 let n = wrap_eof(reader.read(&mut self.buf[(self.flags & !(1 << 7)) as usize..]))?;
-                debug_assert!(n <= 5, "{n} > 5");
+                debug_assert!(n <= SIZE, "{n} > {SIZE}");
                 self.flags += n as u8;
-                debug_assert!(self.flags & !(1 << 7) <= 5);
+                debug_assert!(self.flags & !(1 << 7) <= SIZE as u8);
             }
 
             self.flags = 1 << 7;
-            let [a, b, c, d, e] = self.buf;
-            CellHeader {
-                circuit: u32::from_be_bytes([a, b, c, d]),
-                command: e,
-            }
+            let header: &CellHeaderBig = transmute_ref!(&self.buf);
+            header.into()
         } else {
-            while self.flags != 3 {
-                let n = wrap_eof(reader.read(&mut self.buf[self.flags as usize..3]))?;
-                debug_assert!(n <= 3, "{n} > 3");
+            const SIZE: usize = size_of::<CellHeaderSmall>();
+
+            while self.flags != SIZE as u8 {
+                let n = wrap_eof(reader.read(&mut self.buf[self.flags as usize..SIZE]))?;
+                debug_assert!(n <= SIZE, "{n} > {SIZE}");
                 self.flags += n as u8;
-                debug_assert!(self.flags <= 3);
+                debug_assert!(self.flags <= SIZE as u8);
             }
 
             self.flags = 0;
-            let [a, b, c, ..] = self.buf;
-            CellHeader {
-                circuit: u16::from_be_bytes([a, b]).into(),
-                command: c,
-            }
+            let header: &CellHeaderSmall =
+                transmute_ref!(<&[u8; SIZE]>::try_from(&self.buf[..SIZE]).unwrap());
+            header.into()
         })
     }
 }
