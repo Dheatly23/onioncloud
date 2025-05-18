@@ -654,6 +654,7 @@ dependencies = [
  "aes",
  "anyhow",
  "arrayvec",
+ "base64ct",
  "cipher",
  "crossbeam-queue",
  "ctr",

@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use arrayvec::ArrayVec;
 use thiserror::Error;
@@ -153,13 +153,13 @@ pub(crate) enum CertTypeInner {
 display2debug! {CertTypeInner}
 
 #[derive(Error)]
-pub struct PeerMismatchError {
+pub struct PeerSocketMismatchError {
     peer: SocketAddr,
     addrs: ArrayVec<SocketAddr, 8>,
     has_more: bool,
 }
 
-impl PeerMismatchError {
+impl PeerSocketMismatchError {
     pub(crate) fn new(peer: SocketAddr, addrs: impl IntoIterator<Item = SocketAddr>) -> Self {
         let mut ret = Self {
             peer,
@@ -178,7 +178,7 @@ impl PeerMismatchError {
     }
 }
 
-impl Display for PeerMismatchError {
+impl Display for PeerSocketMismatchError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "peer address {} is not in [", self.peer)?;
 
@@ -194,4 +194,74 @@ impl Display for PeerMismatchError {
     }
 }
 
-display2debug! {PeerMismatchError}
+display2debug! {PeerSocketMismatchError}
+
+/// CERTS cell related error (non-cryptographic).
+#[derive(Error)]
+#[non_exhaustive]
+pub enum CertsError {
+    #[error("duplicate certificate ID {0}")]
+    Duplicate(u8),
+    #[error("certificate ID {0} is not found")]
+    NotFound(u8),
+    #[error("no link certificate provided")]
+    NoLinkCert,
+}
+
+display2debug! {CertsError}
+
+/// NETINFO cell related error.
+#[derive(Error)]
+#[non_exhaustive]
+pub enum NetinfoError {
+    #[error("invalid peer address")]
+    InvalidPeerAddr,
+    #[error("this address not found: {0}")]
+    ThisAddrNotFound(#[from] PeerIpMismatchError),
+}
+
+display2debug! {NetinfoError}
+
+#[derive(Error)]
+pub struct PeerIpMismatchError {
+    peer: IpAddr,
+    addrs: ArrayVec<IpAddr, 8>,
+    has_more: bool,
+}
+
+impl PeerIpMismatchError {
+    pub(crate) fn new(peer: IpAddr, addrs: impl IntoIterator<Item = IpAddr>) -> Self {
+        let mut ret = Self {
+            peer,
+            addrs: ArrayVec::new(),
+            has_more: false,
+        };
+
+        for a in addrs {
+            if ret.addrs.try_push(a).is_err() {
+                ret.has_more = true;
+                break;
+            }
+        }
+
+        ret
+    }
+}
+
+impl Display for PeerIpMismatchError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "peer address {} is not in [", self.peer)?;
+
+        for (i, v) in self.addrs.iter().enumerate() {
+            write!(f, "{}{v}", if i == 0 { "" } else { ", " })?;
+        }
+
+        if self.has_more {
+            write!(f, ", ..]")
+        } else {
+            write!(f, "]")
+        }
+    }
+}
+
+display2debug! {PeerIpMismatchError}

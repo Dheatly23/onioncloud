@@ -71,7 +71,17 @@ pub enum UserControllerError {
     #[error(transparent)]
     VersionsNegotiateError(#[from] super::VersionsNegotiateError),
     #[error(transparent)]
-    PeerMismatchError(#[from] super::PeerMismatchError),
+    PeerSocketMismatchError(#[from] super::PeerSocketMismatchError),
+    #[error(transparent)]
+    CertsError(#[from] super::CertsError),
+    #[error(transparent)]
+    CertFormatError(#[from] super::CertFormatError),
+    #[error(transparent)]
+    CertVerifyError(#[from] super::CertVerifyError),
+    #[error(transparent)]
+    CertTypeError(#[from] super::CertTypeError),
+    #[error(transparent)]
+    NetinfoError(#[from] super::NetinfoError),
 }
 
 remap! {

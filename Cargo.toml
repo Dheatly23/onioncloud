@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 aes = "0.8"
 arrayvec = "0.7"
+base64ct = "1"
 cipher = "0.4"
 crossbeam-queue = "0.3"
 ctr = "0.9"

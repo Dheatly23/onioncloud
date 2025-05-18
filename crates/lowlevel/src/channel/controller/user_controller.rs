@@ -6,14 +6,18 @@ use std::ops::ControlFlow::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64ct::{Base64Url, Encoding};
+use digest::{Digest, Output};
 use flume::TrySendError;
 use futures_channel::oneshot::Sender;
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::cache::{Cached, CellCache, cast};
 use crate::cell::auth::AuthChallenge;
 use crate::cell::certs::Certs;
-use crate::cell::create::{Create2, Created2};
+use crate::cell::create::Create2;
 use crate::cell::destroy::{Destroy, DestroyReason};
 use crate::cell::dispatch::{CellReader, CellType, WithCellConfig};
 use crate::cell::netinfo::Netinfo;
@@ -24,9 +28,11 @@ use crate::cell::{Cell, CellHeader, CellLike, FixedCell};
 use crate::channel::circ_map::{CircuitMap, NewCircuit};
 use crate::channel::controller::{CellMsg, ChannelController, ControlMsg, Timeout};
 use crate::channel::{CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput};
-use crate::crypto::relay::{RelayId, RelayIdEd};
+use crate::crypto::EdPublicKey;
+use crate::crypto::cert::{UnverifiedEdCert, UnverifiedRsaCert, extract_rsa_from_x509};
 use crate::errors;
 use crate::linkver::StandardLinkver;
+use crate::util::print_hex;
 use crate::util::sans_io::Handle;
 
 /// Trait for [`UserController`] configuration type.
@@ -83,7 +89,7 @@ enum State<Cfg> {
         state: InitState,
         cfg: Arc<dyn Send + Sync + AsRef<Cfg>>,
     },
-    Steady(Box<SteadyState>),
+    Steady(SteadyState),
     Shutdown,
 }
 
@@ -208,9 +214,11 @@ impl InitState {
                 let peer_addr = input.peer_addr();
                 let addrs = (**cfg).as_ref().peer_addrs();
                 if !addrs.contains(peer_addr) {
-                    return Err(
-                        errors::PeerMismatchError::new(*peer_addr, addrs.iter().copied()).into(),
-                    );
+                    return Err(errors::PeerSocketMismatchError::new(
+                        *peer_addr,
+                        addrs.iter().copied(),
+                    )
+                    .into());
                 }
 
                 *self = Self::VersionsWrite(CellWriter::with_cell_config(
@@ -228,8 +236,8 @@ impl InitState {
                     );
                 }
             },
-            Self::ConfigRead(reader, state) => {
-                let Some(cell) = read_cell(reader, input)? else {
+            Self::ConfigRead(r, state) => {
+                let Some(cell) = read_cell(r, input)? else {
                     return Ok(Break(()));
                 };
                 update_last_packet(last_packet, input);
@@ -245,7 +253,123 @@ impl InitState {
                             *state = ConfigReadState::NeedCerts;
                         }
                     }
-                    _ => todo!(),
+                    ConfigReadState::NeedCerts => {
+                        if let Some(cell) = cast::<Certs>(&mut cell)? {
+                            let mut cert_2 = None;
+                            let mut cert_4 = None;
+                            let mut cert_5 = None;
+                            let mut cert_7 = None;
+
+                            for c in &cell {
+                                let p = match c.ty {
+                                    2 => &mut cert_2,
+                                    4 => &mut cert_4,
+                                    5 => &mut cert_5,
+                                    7 => &mut cert_7,
+                                    _ => continue,
+                                };
+
+                                if p.is_some() {
+                                    return Err(errors::CertsError::Duplicate(c.ty).into());
+                                }
+                                *p = Some(c.data);
+                            }
+
+                            let cfg = (**cfg).as_ref();
+
+                            let Some(data) = cert_2 else {
+                                return Err(errors::CertsError::NotFound(2).into());
+                            };
+                            let (pk_rsa, id) = extract_rsa_from_x509(data)?;
+
+                            let relay_id = cfg.peer_id();
+                            if id.ct_ne(relay_id).into() {
+                                error!(
+                                    "relay ID mismatch (expect {}, got {})",
+                                    print_hex(relay_id),
+                                    print_hex(&id)
+                                );
+                                return Err(errors::CertVerifyError.into());
+                            }
+
+                            let Some(data) = cert_7 else {
+                                return Err(errors::CertsError::NotFound(7).into());
+                            };
+                            let pk_id = UnverifiedRsaCert::new(data)?.verify(&pk_rsa)?.key;
+
+                            if let Some(relay_id) = cfg.peer_id_ed() {
+                                if id.ct_ne(relay_id).into() {
+                                    error!(
+                                        "relay ED25519 ID mismatch (expect {}, got {})",
+                                        Base64Url::encode_string(relay_id),
+                                        Base64Url::encode_string(&pk_id),
+                                    );
+                                    return Err(errors::CertVerifyError.into());
+                                }
+                            }
+
+                            let Some(data) = cert_4 else {
+                                return Err(errors::CertsError::NotFound(4).into());
+                            };
+                            let unverified = UnverifiedEdCert::new(data)?;
+                            let pk_sign = unverified.header.key;
+                            check_cert(unverified, 4, 1, &pk_id, true)?;
+
+                            let Some(data) = cert_5 else {
+                                return Err(errors::CertsError::NotFound(5).into());
+                            };
+                            let unverified = UnverifiedEdCert::new(data)?;
+                            let subject = Output::<Sha256>::from(unverified.header.key);
+                            check_cert(unverified, 5, 3, &pk_sign, false)?;
+
+                            let Some(link_cert) = input.link_cert() else {
+                                return Err(errors::CertsError::NoLinkCert.into());
+                            };
+                            let hash = Sha256::digest(link_cert);
+                            if subject.ct_ne(&hash).into() {
+                                error!("link certificate hash does not match");
+                                return Err(errors::CertVerifyError.into());
+                            }
+
+                            *state = ConfigReadState::NeedAuthChallenge;
+                        }
+                    }
+                    ConfigReadState::NeedAuthChallenge => {
+                        if let Some(_) = cast::<AuthChallenge>(&mut cell)? {
+                            *state = ConfigReadState::NeedNetinfo;
+                        }
+                    }
+                    ConfigReadState::NeedNetinfo => {
+                        if let Some(cell) = cast::<Netinfo>(&mut cell)? {
+                            let peer_addr = cell.peer_addr();
+
+                            let Some(peer_addr) = peer_addr else {
+                                return Err(errors::NetinfoError::InvalidPeerAddr.into());
+                            };
+                            let addrs = (**cfg).as_ref().peer_addrs();
+                            for a in cell.this_addrs() {
+                                if addrs.iter().all(|b| b.ip() != a) {
+                                    return Err(errors::NetinfoError::ThisAddrNotFound(
+                                        errors::PeerIpMismatchError::new(
+                                            a,
+                                            addrs.iter().map(|a| a.ip()),
+                                        ),
+                                    )
+                                    .into());
+                                }
+                            }
+
+                            *self = Self::NetinfoWrite(CellWriter::with_cell_config(
+                                link_cfg.cache.cache(Netinfo::new(
+                                    link_cfg.get_cached(),
+                                    0,
+                                    input.peer_addr().ip(),
+                                    [peer_addr],
+                                )),
+                                &link_cfg,
+                            )?);
+                        }
+                    }
                 }
 
                 if let Some(cell) = &*cell {
@@ -256,7 +380,10 @@ impl InitState {
                     .into());
                 }
             }
-            _ => todo!(),
+            Self::NetinfoWrite(w) => match write_cell(w, input)? {
+                false => return Ok(Break(())),
+                true => todo!(),
+            },
         }
 
         Ok(Continue(false))
@@ -492,10 +619,7 @@ fn write_cell<T: CellLike>(
     input: &mut ChannelInput<'_>,
 ) -> IoResult<bool> {
     match handler.handle(input.writer()) {
-        Ok(()) => {
-            debug!("writing cell finished");
-            Ok(true)
-        }
+        Ok(()) => Ok(true),
         Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(false),
         Err(e) => Err(e),
     }
@@ -511,6 +635,51 @@ fn read_cell(
         Err(errors::CellError::Io(e)) if e.kind() == ErrorKind::WouldBlock => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+fn check_cert(
+    mut unverified: UnverifiedEdCert<'_>,
+    cert_ty: u8,
+    key_ty: u8,
+    pk: &EdPublicKey,
+    needs_signed_by: bool,
+) -> Result<(), errors::UserControllerError> {
+    unverified.header.check_type(cert_ty, key_ty)?;
+
+    let mut signed_with = None;
+    while let Some(v) = unverified.next_ext() {
+        let (header, data) = v?;
+
+        match header.ty {
+            4 if signed_with.is_none() => signed_with = Some(data),
+            4 => continue,
+            _ => (),
+        }
+
+        if header.flags & 1 != 0 {
+            error!(
+                "unhandled required certificate extension field {}",
+                header.ty
+            );
+            return Err(errors::CertVerifyError.into());
+        }
+    }
+
+    if needs_signed_by && signed_with.is_none() {
+        error!("certificate does not contain signed-by key extension");
+        return Err(errors::CertVerifyError.into());
+    }
+
+    unverified.verify(pk)?;
+
+    if let Some(k) = signed_with {
+        if k != pk {
+            error!("signed-by key does not match signing key");
+            return Err(errors::CertVerifyError.into());
+        }
+    }
+
+    Ok(())
 }
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 5);
@@ -701,7 +870,6 @@ impl SteadyState {
 mod tests {
     use super::*;
 
-    use proptest::collection::vec;
     use proptest::prelude::*;
     use proptest::strategy::LazyJust;
     use proptest_state_machine::*;
