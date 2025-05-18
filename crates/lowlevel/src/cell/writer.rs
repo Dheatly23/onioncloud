@@ -4,8 +4,8 @@ use zerocopy::IntoBytes;
 use zerocopy::byteorder::big_endian::U16;
 
 use super::dispatch::{CellType, WithCellConfig};
-use super::{CellHeader, CellHeaderBig, CellHeaderSmall, CellLike, CellRef, FixedCell};
-use crate::cache::{Cached, CellCache};
+use super::{CellHeader, CellHeaderBig, CellHeaderSmall, CellLike, CellRef};
+use crate::cache::{Cachable, Cached, CellCache};
 use crate::errors;
 use crate::util::sans_io::Handle;
 use crate::util::wrap_eof;
@@ -77,7 +77,7 @@ impl<C: CellLike> CellWriter<C> {
 /// Wraps a [`Cached`] cell to be written.
 impl<T, C> TryFrom<Cached<T, C>> for CellWriter<Cached<T, C>>
 where
-    T: CellLike + Into<FixedCell>,
+    T: CellLike + Cachable,
     C: CellCache + WithCellConfig,
 {
     type Error = errors::CellDataError;
@@ -163,7 +163,7 @@ mod tests {
     use proptest::prelude::*;
 
     use crate::cell::padding::{Padding, VPadding};
-    use crate::cell::{Cell, FIXED_CELL_SIZE, VariableCell};
+    use crate::cell::{Cell, FIXED_CELL_SIZE, FixedCell, VariableCell};
     use crate::util::{TestConfig, circ_id_strat, var_cell_strat};
 
     proptest! {
