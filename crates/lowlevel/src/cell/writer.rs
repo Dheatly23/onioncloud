@@ -126,8 +126,7 @@ fn write_cell(
                 };
 
                 while *i < b.len() {
-                    let n = wrap_eof(writer.write(&b[*i..]))?;
-                    *i += n;
+                    *i += wrap_eof(writer.write(&b[*i..]))?;
                 }
 
                 CellWriterIndex::End
