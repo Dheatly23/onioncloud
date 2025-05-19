@@ -13,3 +13,9 @@ pub type EdSignature = [u8; 64];
 
 /// RSA public key.
 pub type RsaPublicKey = rsa::RsaPublicKey;
+
+/// SHA1 hash output.
+pub type Sha1Output = [u8; 20];
+
+/// SHA256 hash output.
+pub type Sha256Output = [u8; 32];
