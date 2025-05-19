@@ -214,11 +214,9 @@ impl InitState {
                 let peer_addr = input.peer_addr();
                 let addrs = (**cfg).as_ref().peer_addrs();
                 if !addrs.contains(peer_addr) {
-                    return Err(errors::PeerSocketMismatchError::new(
-                        *peer_addr,
-                        addrs.iter().copied(),
-                    )
-                    .into());
+                    return Err(
+                        errors::PeerSocketMismatchError::new(*peer_addr, addrs.into()).into(),
+                    );
                 }
 
                 *self = Self::VersionsWrite(CellWriter::with_cell_config(
@@ -335,25 +333,30 @@ impl InitState {
                         }
                     }
                     ConfigReadState::NeedAuthChallenge => {
-                        if let Some(_) = cast::<AuthChallenge>(&mut cell)? {
+                        if cast::<AuthChallenge>(&mut cell)?.is_some() {
                             *state = ConfigReadState::NeedNetinfo;
                         }
                     }
                     ConfigReadState::NeedNetinfo => {
                         if let Some(cell) = cast::<Netinfo>(&mut cell)? {
+                            let cell = link_cfg.cache.cache(cell);
                             let peer_addr = cell.peer_addr();
 
                             let Some(peer_addr) = peer_addr else {
                                 return Err(errors::NetinfoError::InvalidPeerAddr.into());
                             };
-                            let addrs = (**cfg).as_ref().peer_addrs();
+                            let mut addrs = (**cfg)
+                                .as_ref()
+                                .peer_addrs()
+                                .iter()
+                                .map(|a| a.ip())
+                                .collect::<Vec<_>>();
+                            addrs.sort_unstable();
+                            addrs.dedup();
                             for a in cell.this_addrs() {
-                                if addrs.iter().all(|b| b.ip() != a) {
+                                if addrs.binary_search(&a).is_err() {
                                     return Err(errors::NetinfoError::ThisAddrNotFound(
-                                        errors::PeerIpMismatchError::new(
-                                            a,
-                                            addrs.iter().map(|a| a.ip()),
-                                        ),
+                                        errors::PeerIpMismatchError::new(a, addrs.into()),
                                     )
                                     .into());
                                 }
@@ -736,7 +739,8 @@ impl SteadyState {
                     let id = NonZeroU32::new(cell.circuit).unwrap();
                     let mut cell = Cached::map(cell, Some);
 
-                    if let Some(_) = cast::<Create2>(&mut cell)? {
+                    if let Some(cell) = cast::<Create2>(&mut cell)? {
+                        cfg.cache.cache_cell(cell.into());
                         // User controller cannot create circuit by peer
                         self.pending_close.push_back((id, DestroyReason::Protocol));
                         // Pending DESTROY cell, clear flag

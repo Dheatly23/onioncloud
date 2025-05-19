@@ -2,10 +2,10 @@ use std::error::Error;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::net::{IpAddr, SocketAddr};
 
-use arrayvec::ArrayVec;
 use thiserror::Error;
 
 use crate::cell::CellHeader;
+use crate::util::print_list;
 
 macro_rules! display2debug {
     ($i:ident) => {
@@ -155,42 +155,23 @@ display2debug! {CertTypeInner}
 #[derive(Error)]
 pub struct PeerSocketMismatchError {
     peer: SocketAddr,
-    addrs: ArrayVec<SocketAddr, 8>,
-    has_more: bool,
+    addrs: Box<[SocketAddr]>,
 }
 
 impl PeerSocketMismatchError {
-    pub(crate) fn new(peer: SocketAddr, addrs: impl IntoIterator<Item = SocketAddr>) -> Self {
-        let mut ret = Self {
-            peer,
-            addrs: ArrayVec::new(),
-            has_more: false,
-        };
-
-        for a in addrs {
-            if ret.addrs.try_push(a).is_err() {
-                ret.has_more = true;
-                break;
-            }
-        }
-
-        ret
+    pub(crate) fn new(peer: SocketAddr, addrs: Box<[SocketAddr]>) -> Self {
+        Self { peer, addrs }
     }
 }
 
 impl Display for PeerSocketMismatchError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "peer address {} is not in [", self.peer)?;
-
-        for (i, v) in self.addrs.iter().enumerate() {
-            write!(f, "{}{v}", if i == 0 { "" } else { ", " })?;
-        }
-
-        if self.has_more {
-            write!(f, ", ..]")
-        } else {
-            write!(f, "]")
-        }
+        write!(
+            f,
+            "peer address {} is not in {}",
+            self.peer,
+            print_list(&self.addrs)
+        )
     }
 }
 
@@ -217,7 +198,7 @@ pub enum NetinfoError {
     #[error("invalid peer address")]
     InvalidPeerAddr,
     #[error("this address not found: {0}")]
-    ThisAddrNotFound(#[from] PeerIpMismatchError),
+    ThisAddrNotFound(#[source] PeerIpMismatchError),
 }
 
 display2debug! {NetinfoError}
@@ -225,42 +206,23 @@ display2debug! {NetinfoError}
 #[derive(Error)]
 pub struct PeerIpMismatchError {
     peer: IpAddr,
-    addrs: ArrayVec<IpAddr, 8>,
-    has_more: bool,
+    addrs: Box<[IpAddr]>,
 }
 
 impl PeerIpMismatchError {
-    pub(crate) fn new(peer: IpAddr, addrs: impl IntoIterator<Item = IpAddr>) -> Self {
-        let mut ret = Self {
-            peer,
-            addrs: ArrayVec::new(),
-            has_more: false,
-        };
-
-        for a in addrs {
-            if ret.addrs.try_push(a).is_err() {
-                ret.has_more = true;
-                break;
-            }
-        }
-
-        ret
+    pub(crate) fn new(peer: IpAddr, addrs: Box<[IpAddr]>) -> Self {
+        Self { peer, addrs }
     }
 }
 
 impl Display for PeerIpMismatchError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "peer address {} is not in [", self.peer)?;
-
-        for (i, v) in self.addrs.iter().enumerate() {
-            write!(f, "{}{v}", if i == 0 { "" } else { ", " })?;
-        }
-
-        if self.has_more {
-            write!(f, ", ..]")
-        } else {
-            write!(f, "]")
-        }
+        write!(
+            f,
+            "peer address {} is not in {}",
+            self.peer,
+            print_list(&self.addrs)
+        )
     }
 }
 
