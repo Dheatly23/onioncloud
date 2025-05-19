@@ -128,6 +128,8 @@ struct SteadyState {
 
     pending_open: VecDeque<Sender<Result<NewCircuit<CachedCell>, errors::NoFreeCircIDError>>>,
     pending_close: VecDeque<(NonZeroU32, DestroyReason)>,
+
+    close_scan: Instant,
 }
 
 pub struct CircuitMeta {
@@ -204,6 +206,8 @@ impl<'a, Cfg: 'static + UserConfig + Send + Sync>
 
                             pending_open: take(pending_open),
                             pending_close: VecDeque::new(),
+
+                            close_scan: input.time() + CLOSE_SCAN_TIMEOUT,
                         })
                     }
                 },
@@ -731,6 +735,7 @@ fn check_cert(
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 const FULL_TIMEOUT: Duration = Duration::from_millis(100);
+const CLOSE_SCAN_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn update_last_packet(ptr: &mut Instant, input: &ChannelInput<'_>) {
     *ptr = input.time() + IDLE_TIMEOUT;
@@ -745,6 +750,18 @@ impl SteadyState {
         mut input: ChannelInput<'_>,
         circ_map: &mut CircuitMap<CachedCell, CircuitMeta>,
     ) -> Result<ChannelOutput, errors::UserControllerError> {
+        // Scan for close circuits
+        if self.close_scan <= input.time() {
+            circ_map.retain(|&id, circuit| {
+                let r = circuit.is_closed();
+                if r {
+                    self.pending_close.push_back((id, DestroyReason::Internal));
+                }
+                !r
+            });
+            self.close_scan = input.time() + CLOSE_SCAN_TIMEOUT;
+        }
+
         // Process pending open
         for send in self.pending_open.drain(..) {
             if let Err(Ok(NewCircuit { id, .. })) = send.send(
@@ -906,6 +923,7 @@ impl SteadyState {
         }
 
         let mut timeout = *last_packet;
+        timeout = timeout.min(self.close_scan);
         if flags & FLAG_FULL_TIMEOUT != 0 {
             // Full timeout
             timeout = timeout.min(input.time() + FULL_TIMEOUT);
