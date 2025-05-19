@@ -1,5 +1,6 @@
 use std::collections::vec_deque::VecDeque;
 use std::io::{ErrorKind, Result as IoResult};
+use std::mem::take;
 use std::num::NonZeroU32;
 use std::ops::ControlFlow;
 use std::ops::ControlFlow::*;
@@ -80,14 +81,25 @@ pub struct UserController<Cfg> {
     is_timeout: bool,
 }
 
+/// User controller control messages.
+pub enum UserControlMsg {
+    /// Force shutdown of channel.
+    Shutdown,
+    /// Create new circuit.
+    NewCircuit(Sender<Result<NewCircuit<CachedCell>, errors::NoFreeCircIDError>>),
+}
+
 type Reader = CellReader<LinkCfg>;
 type CachedCell<C = Cell> = Cached<C, Arc<dyn Send + Sync + CellCache>>;
 type CachedCellWriter<C = Cell> = CellWriter<CachedCell<C>>;
 
+// NOTE: Controller isn't going to be moved a lot.
+#[allow(clippy::large_enum_variant)]
 enum State<Cfg> {
     Init {
         state: InitState,
         cfg: Arc<dyn Send + Sync + AsRef<Cfg>>,
+        pending_open: VecDeque<Sender<Result<NewCircuit<CachedCell>, errors::NoFreeCircIDError>>>,
     },
     Steady(SteadyState),
     Shutdown,
@@ -101,10 +113,10 @@ enum InitState {
 }
 
 enum ConfigReadState {
-    NeedVersions,
-    NeedCerts,
-    NeedAuthChallenge,
-    NeedNetinfo,
+    Versions,
+    Certs,
+    AuthChallenge,
+    Netinfo,
 }
 
 struct SteadyState {
@@ -126,7 +138,7 @@ pub struct CircuitMeta {
 impl<Cfg: 'static + UserConfig + Send + Sync> ChannelController for UserController<Cfg> {
     type Error = errors::UserControllerError;
     type Config = Cfg;
-    type ControlMsg = ();
+    type ControlMsg = UserControlMsg;
     type Cell = CachedCell;
     type CircMeta = CircuitMeta;
 
@@ -140,6 +152,7 @@ impl<Cfg: 'static + UserConfig + Send + Sync> ChannelController for UserControll
             state: State::Init {
                 state: InitState::Init,
                 cfg: config,
+                pending_open: VecDeque::new(),
             },
 
             last_packet: None,
@@ -177,10 +190,22 @@ impl<'a, Cfg: 'static + UserConfig + Send + Sync>
                 State::Init {
                     ref mut state,
                     ref cfg,
+                    ref mut pending_open,
                 } => match state.handle(&self.link_cfg, last_packet, cfg, &mut input)? {
                     Break(()) => break,
                     Continue(false) => (),
-                    Continue(true) => todo!(),
+                    Continue(true) => {
+                        self.state = State::Steady(SteadyState {
+                            cell_read: Reader::new(self.link_cfg.clone()),
+                            cell_write: CellWriter::new_finished(),
+
+                            in_buffer: InBuffer::new(),
+                            out_buffer: OutBuffer::new(),
+
+                            pending_open: take(pending_open),
+                            pending_close: VecDeque::new(),
+                        })
+                    }
                 },
                 State::Steady(ref mut state) => {
                     return state.handle(&self.link_cfg, last_packet, input, circ_map);
@@ -228,10 +253,8 @@ impl InitState {
                 false => return Ok(Break(())),
                 true => {
                     update_last_packet(last_packet, input);
-                    *self = Self::ConfigRead(
-                        Reader::new(link_cfg.clone()),
-                        ConfigReadState::NeedVersions,
-                    );
+                    *self =
+                        Self::ConfigRead(Reader::new(link_cfg.clone()), ConfigReadState::Versions);
                 }
             },
             Self::ConfigRead(r, state) => {
@@ -242,16 +265,16 @@ impl InitState {
                 let mut cell = link_cfg.cache.cache(Some(cell));
 
                 match state {
-                    ConfigReadState::NeedVersions => {
+                    ConfigReadState::Versions => {
                         if let Some(cell) = cast::<Versions>(&mut cell)? {
                             let linkver = (*link_cfg.linkver).as_ref();
                             linkver.versions_negotiate(cell)?;
                             debug!("version negotiated: {}", linkver.version());
 
-                            *state = ConfigReadState::NeedCerts;
+                            *state = ConfigReadState::Certs;
                         }
                     }
-                    ConfigReadState::NeedCerts => {
+                    ConfigReadState::Certs => {
                         if let Some(cell) = cast::<Certs>(&mut cell)? {
                             let mut cert_2 = None;
                             let mut cert_4 = None;
@@ -329,15 +352,15 @@ impl InitState {
                                 return Err(errors::CertVerifyError.into());
                             }
 
-                            *state = ConfigReadState::NeedAuthChallenge;
+                            *state = ConfigReadState::AuthChallenge;
                         }
                     }
-                    ConfigReadState::NeedAuthChallenge => {
+                    ConfigReadState::AuthChallenge => {
                         if cast::<AuthChallenge>(&mut cell)?.is_some() {
-                            *state = ConfigReadState::NeedNetinfo;
+                            *state = ConfigReadState::Netinfo;
                         }
                     }
-                    ConfigReadState::NeedNetinfo => {
+                    ConfigReadState::Netinfo => {
                         if let Some(cell) = cast::<Netinfo>(&mut cell)? {
                             let cell = link_cfg.cache.cache(cell);
                             let peer_addr = cell.peer_addr();
@@ -403,12 +426,26 @@ impl<Cfg: 'static + UserConfig + Send + Sync> Handle<Timeout> for UserController
     }
 }
 
-impl<Cfg: 'static + UserConfig + Send + Sync> Handle<ControlMsg<()>> for UserController<Cfg> {
+impl<Cfg: 'static + UserConfig + Send + Sync> Handle<ControlMsg<UserControlMsg>>
+    for UserController<Cfg>
+{
     type Return = Result<(), errors::UserControllerError>;
 
     #[instrument(level = "debug", name = "handle_control", skip_all)]
-    fn handle(&mut self, _: ControlMsg<()>) -> Self::Return {
-        todo!()
+    fn handle(&mut self, msg: ControlMsg<UserControlMsg>) -> Self::Return {
+        match msg.0 {
+            UserControlMsg::Shutdown => self.state = State::Shutdown,
+            UserControlMsg::NewCircuit(msg) => match self.state {
+                State::Init {
+                    ref mut pending_open,
+                    ..
+                } => pending_open.push_back(msg),
+                State::Steady(ref mut s) => s.pending_open.push_back(msg),
+                State::Shutdown => (),
+            },
+        }
+
+        Ok(())
     }
 }
 
@@ -416,8 +453,15 @@ impl<Cfg: 'static + UserConfig + Send + Sync> Handle<CellMsg<CachedCell>> for Us
     type Return = Result<CellMsgPause, errors::UserControllerError>;
 
     #[instrument(level = "debug", name = "handle_cell", skip_all)]
-    fn handle(&mut self, _: CellMsg<CachedCell>) -> Self::Return {
-        todo!()
+    fn handle(&mut self, msg: CellMsg<CachedCell>) -> Self::Return {
+        match self.state {
+            State::Steady(ref mut s) => {
+                s.out_buffer.push_back(msg.0);
+                Ok(s.out_buffer.is_full().into())
+            }
+            State::Shutdown => Ok(true.into()),
+            State::Init { .. } => unreachable!("init state does not create circuits"),
+        }
     }
 }
 
@@ -701,6 +745,20 @@ impl SteadyState {
         mut input: ChannelInput<'_>,
         circ_map: &mut CircuitMap<CachedCell, CircuitMeta>,
     ) -> Result<ChannelOutput, errors::UserControllerError> {
+        // Process pending open
+        for send in self.pending_open.drain(..) {
+            if let Err(Ok(NewCircuit { id, .. })) = send.send(
+                circ_map
+                    .open_with(true, cfg.is_circ_id_4bytes(), 64, |_| CircuitMeta {
+                        last_full: input.time(),
+                        closing: false,
+                    })
+                    .map(|v| v.0),
+            ) {
+                circ_map.remove(id);
+            }
+        }
+
         const FLAG_READ: u8 = 1 << 0;
         const FLAG_WRITE: u8 = 1 << 1;
         const FLAG_WRITE_EMPTY: u8 = 1 << 2;

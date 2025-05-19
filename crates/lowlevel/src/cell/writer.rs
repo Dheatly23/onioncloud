@@ -36,6 +36,16 @@ impl<C: CellLike> CellWriter<C> {
         Self::with_header(cell, circuit_4bytes, header)
     }
 
+    /// Create finished [`CellWriter`].
+    ///
+    /// It does not write anything and is always finished.
+    pub fn new_finished() -> Self {
+        Self {
+            cell: None,
+            index: CellWriterIndex::End,
+        }
+    }
+
     fn with_header(cell: C, circuit_4bytes: bool, header: CellHeader) -> Self {
         Self {
             cell: Some(cell),
