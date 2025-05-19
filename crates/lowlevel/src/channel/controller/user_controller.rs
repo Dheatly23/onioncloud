@@ -777,13 +777,14 @@ impl SteadyState {
     ) -> Result<ChannelOutput, errors::UserControllerError> {
         // Scan for close circuits
         if self.close_scan <= input.time() {
-            circ_map.retain(|&id, circuit| {
-                let r = circuit.is_closed();
-                if r {
+            for (&id, circuit) in circ_map.items() {
+                if !circuit.meta.closing && circuit.is_closed() {
+                    debug!(id, "circuit is closing");
+                    circuit.meta.closing = true;
                     self.pending_close.push_back((id, DestroyReason::Internal));
                 }
-                !r
-            });
+            }
+
             self.close_scan = input.time() + CLOSE_SCAN_TIMEOUT;
         }
 
@@ -859,7 +860,6 @@ impl SteadyState {
 
                     if let Some(cell) = cast::<Destroy>(&mut cell)? {
                         debug!(id, "peer is closing circuit");
-                        circ.meta.closing = true;
                         match circ.send(cfg.cache.cache(cell.into())) {
                             Ok(()) => (),
                             Err(TrySendError::Full(_)) => warn!(
@@ -869,6 +869,7 @@ impl SteadyState {
                             // Circuit is closing while peer is closing.
                             Err(TrySendError::Disconnected(_)) => (),
                         }
+                        circ_map.remove(id);
                     } else if let Ok(cell) = Cached::try_map(cell, |v, _| v.ok_or(())) {
                         if circ.meta.last_full >= input.time() {
                             // Sender recently full, return cell

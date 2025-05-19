@@ -228,11 +228,6 @@ impl<Cell: 'static, Meta> CircuitMap<Cell, Meta> {
         self.map.iter_mut()
     }
 
-    /// Scans all circuit and retains those where predicate returns `true`.
-    pub fn retain(&mut self, f: impl FnMut(&NonZeroU32, &mut Circuit<Cell, Meta>) -> bool) {
-        self.map.retain(f)
-    }
-
     /// Receive cell from aggregate channel.
     ///
     /// **NOTE: Do not call this from [`ChannelController`](`super::controller::ChannelController`).**
