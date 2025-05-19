@@ -871,7 +871,7 @@ impl SteadyState {
                         }
                         circ_map.remove(id);
                     } else if let Ok(cell) = Cached::try_map(cell, |v, _| v.ok_or(())) {
-                        if circ.meta.last_full >= input.time() {
+                        if circ.meta.last_full > input.time() {
                             // Sender recently full, return cell
                             *p = Some(cell);
                         } else {
