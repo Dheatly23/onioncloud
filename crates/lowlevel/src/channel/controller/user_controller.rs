@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64ct::{Base64Url, Encoding};
-use digest::{Digest, Output};
+use digest::Digest;
 use flume::TrySendError;
 use futures_channel::oneshot::Sender;
 use sha2::Sha256;
@@ -29,8 +29,8 @@ use crate::cell::{Cell, CellHeader, CellLike, FixedCell};
 use crate::channel::circ_map::{CircuitMap, NewCircuit};
 use crate::channel::controller::{CellMsg, ChannelController, ControlMsg, Timeout};
 use crate::channel::{CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput};
-use crate::crypto::EdPublicKey;
 use crate::crypto::cert::{UnverifiedEdCert, UnverifiedRsaCert, extract_rsa_from_x509};
+use crate::crypto::{EdPublicKey, Sha256Output};
 use crate::errors;
 use crate::linkver::StandardLinkver;
 use crate::util::print_hex;
@@ -369,13 +369,13 @@ impl InitState {
                                 return Err(errors::CertsError::NotFound(5).into());
                             };
                             let unverified = UnverifiedEdCert::new(data)?;
-                            let subject = Output::<Sha256>::from(unverified.header.key);
+                            let subject = unverified.header.key;
                             check_cert(unverified, 5, 3, &pk_sign, false)?;
 
                             let Some(link_cert) = input.link_cert() else {
                                 return Err(errors::CertsError::NoLinkCert.into());
                             };
-                            let hash = Sha256::digest(link_cert);
+                            let hash = Sha256Output::from(Sha256::digest(link_cert));
                             if subject.ct_ne(&hash).into() {
                                 error!("link certificate hash does not match");
                                 return Err(errors::CertVerifyError.into());
