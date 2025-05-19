@@ -72,6 +72,27 @@ impl CellCache for LinkCfg {
     }
 }
 
+/// User channel controller.
+///
+/// It cannot open remote-requested circuit, only user-initiated.
+///
+/// # Configuration
+///
+/// Controller's coniguration type must implement [`UserConfig`].
+///
+/// # User's Notes
+///
+/// - Controller **does not** automatically send CREATE cell.
+///
+///   It is the responsibility of circuit controller to do so.
+/// - Circuit controllers **must not** send any cell with circuit ID other than their own.
+/// - To gracefully shutdown circuit, do the following:
+///
+///   1. Send DESTROY cell.
+///   2. Receive and drop all cells until receiver is closed.
+///
+///   Controller will automatically intercept DESTROY cells to properly clean up circuit on it's end.
+/// - Non-graceful circuit shutdown (AKA receiver gets dropped) will be detected in 5 seconds or upon any cell received.
 pub struct UserController<Cfg> {
     link_cfg: LinkCfg,
 
@@ -81,7 +102,7 @@ pub struct UserController<Cfg> {
     is_timeout: bool,
 }
 
-/// User controller control messages.
+/// [`UserController`] control messages.
 pub enum UserControlMsg {
     /// Force shutdown of channel.
     Shutdown,
@@ -132,6 +153,10 @@ struct SteadyState {
     close_scan: Instant,
 }
 
+/// [`UserController`] circuit metadata type.
+///
+/// It is marked public only for [`ChannelController`] purposes.
+/// It cannot be created.
 pub struct CircuitMeta {
     last_full: Instant,
     closing: bool,

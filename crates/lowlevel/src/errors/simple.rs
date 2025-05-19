@@ -17,6 +17,7 @@ macro_rules! display2debug {
     };
 }
 
+/// Invalid length.
 #[derive(Error)]
 #[error("invalid length")]
 pub struct InvalidLength;
@@ -35,8 +36,8 @@ pub(crate) struct StreamUtf8Error;
 
 display2debug! {StreamUtf8Error}
 
+/// Invalid cell header.
 #[derive(Error, Debug)]
-#[error("invalid cell header")]
 pub struct InvalidCellHeader {
     header: Option<CellHeader>,
 }
@@ -44,6 +45,19 @@ pub struct InvalidCellHeader {
 impl Default for InvalidCellHeader {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Display for InvalidCellHeader {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "invalid cell header")?;
+
+        match self.header {
+            Some(CellHeader { circuit, command }) => {
+                write!(f, " (command: {command}, circuit: {circuit})")
+            }
+            None => Ok(()),
+        }
     }
 }
 
@@ -59,41 +73,53 @@ impl InvalidCellHeader {
     }
 }
 
+/// Generic cell format error.
+///
+/// The detail of format error are intentionally obscured.
 #[derive(Error)]
 #[error("bad cell format")]
 pub struct CellFormatError;
 
 display2debug! {CellFormatError}
 
+/// Protocol version negotiation error.
 #[derive(Error)]
 #[error("version negotiation error")]
+#[non_exhaustive]
 pub struct VersionsNegotiateError;
 
 display2debug! {VersionsNegotiateError}
 
+/// Failed to find free circuit ID.
 #[derive(Error)]
 #[error("no free circuit ID found")]
 pub struct NoFreeCircIDError;
 
 display2debug! {NoFreeCircIDError}
 
+/// Delegated task returns an error.
 #[derive(Error)]
 #[error("task handle returns an error")]
 pub struct HandleError;
 
 display2debug! {HandleError}
 
+/// Error in sending control message.
 #[derive(Error)]
 #[non_exhaustive]
 pub enum SendControlMsgError {
+    /// Channel errors.
     #[error("failed to send control message: {0}")]
     HandleError(#[from] HandleError),
+
+    /// Channel gracefully shutdown.
     #[error("failed to send control message: task handle finished")]
     HandleFinalized,
 }
 
 display2debug! {SendControlMsgError}
 
+/// Error in parsing relay ID.
 pub struct RelayIdParseError(pub(crate) ParseRelayIdInner);
 
 impl Display for RelayIdParseError {
@@ -118,18 +144,29 @@ pub(crate) enum ParseRelayIdInner {
 
 display2debug! {ParseRelayIdInner}
 
+/// Certificate format error.
+///
+/// It **only** covers format-related error.
+/// For validation/verification, use [`CertVerifyError`] instead.
 #[derive(Error)]
 #[error("malformed certificate format")]
 pub struct CertFormatError;
 
 display2debug! {CertFormatError}
 
+/// Certificate verification error.
+///
+/// It could be a number of errors, including:
+/// - Cryptographic signature error.
+/// - Some **field/extension value** are not as expected or does not exist.
+/// - Certificate expired.
 #[derive(Error)]
-#[error("bad certificate signature")]
+#[error("certificate verification error")]
 pub struct CertVerifyError;
 
 display2debug! {CertVerifyError}
 
+/// Ed25519 certificate subject/key type mismatch.
 pub struct CertTypeError(pub(crate) CertTypeInner);
 
 impl Display for CertTypeError {
@@ -152,6 +189,7 @@ pub(crate) enum CertTypeInner {
 
 display2debug! {CertTypeInner}
 
+/// Unexpected peer socket address.
 #[derive(Error)]
 pub struct PeerSocketMismatchError {
     peer: SocketAddr,
@@ -195,14 +233,17 @@ display2debug! {CertsError}
 #[derive(Error)]
 #[non_exhaustive]
 pub enum NetinfoError {
+    /// Invalid peer address.
     #[error("invalid peer address")]
     InvalidPeerAddr,
+    /// One of this address is not expected.
     #[error("this address not found: {0}")]
     ThisAddrNotFound(#[source] PeerIpMismatchError),
 }
 
 display2debug! {NetinfoError}
 
+/// Unexpected peer IP address.
 #[derive(Error)]
 pub struct PeerIpMismatchError {
     peer: IpAddr,
