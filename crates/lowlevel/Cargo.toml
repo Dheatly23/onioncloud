@@ -8,12 +8,10 @@ publish.workspace = true
 
 [dependencies]
 aes.workspace = true
-arrayvec.workspace = true
 base64ct.workspace = true
 cipher.workspace = true
 crossbeam-queue.workspace = true
 ctr.workspace = true
-digest.workspace = true
 futures-channel.workspace = true
 futures-core.workspace = true
 futures-io.workspace = true
@@ -26,8 +24,6 @@ rsa.workspace = true
 rustls.workspace = true
 rustls-webpki.workspace = true
 scopeguard.workspace = true
-sha1.workspace = true
-sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 

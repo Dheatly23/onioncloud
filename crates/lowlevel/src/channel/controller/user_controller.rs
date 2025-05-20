@@ -8,10 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64ct::{Base64Url, Encoding};
-use digest::Digest;
 use flume::TrySendError;
 use futures_channel::oneshot::Sender;
-use sha2::Sha256;
+use ring::digest::{SHA256, digest};
 use subtle::ConstantTimeEq;
 use tracing::{debug, error, info, instrument, trace, warn};
 
@@ -375,7 +374,8 @@ impl InitState {
                             let Some(link_cert) = input.link_cert() else {
                                 return Err(errors::CertsError::NoLinkCert.into());
                             };
-                            let hash = Sha256Output::from(Sha256::digest(link_cert));
+                            let hash: Sha256Output =
+                                digest(&SHA256, link_cert).as_ref().try_into().unwrap();
                             if subject.ct_ne(&hash).into() {
                                 error!("link certificate hash does not match");
                                 return Err(errors::CertVerifyError.into());

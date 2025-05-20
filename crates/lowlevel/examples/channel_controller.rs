@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Error as AnyError, Result as AnyResult, bail};
-use digest::{Digest, Output};
 use onioncloud_lowlevel::cache::{Cached, CellCache, StandardCellCache, cast};
 use onioncloud_lowlevel::cell::auth::AuthChallenge;
 use onioncloud_lowlevel::cell::certs::Certs;
@@ -23,17 +22,17 @@ use onioncloud_lowlevel::channel::circ_map::CircuitMap;
 use onioncloud_lowlevel::channel::controller::{CellMsg, ChannelController, ControlMsg, Timeout};
 use onioncloud_lowlevel::channel::manager::ChannelManager;
 use onioncloud_lowlevel::channel::{CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput};
-use onioncloud_lowlevel::crypto::EdPublicKey;
 use onioncloud_lowlevel::crypto::cert::{
     UnverifiedEdCert, UnverifiedRsaCert, extract_rsa_from_x509,
 };
 use onioncloud_lowlevel::crypto::relay::{RelayId, from_str as relay_from_str};
+use onioncloud_lowlevel::crypto::{EdPublicKey, Sha256Output};
 use onioncloud_lowlevel::errors;
 use onioncloud_lowlevel::errors::CellError;
 use onioncloud_lowlevel::linkver::StandardLinkver;
 use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
 use onioncloud_lowlevel::util::sans_io::Handle;
-use sha2::Sha256;
+use ring::digest::{SHA256, digest};
 use subtle::ConstantTimeEq;
 use tracing::{debug, info, instrument, warn};
 
@@ -323,7 +322,7 @@ impl<'a>
                                 if let Some(data) = cert_5 {
                                     info!("got certificate ID 5 sign->link");
                                     let unverified = UnverifiedEdCert::new(data)?;
-                                    let subject = Output::<Sha256>::from(unverified.header.key);
+                                    let subject = unverified.header.key;
 
                                     let Some(k) = &pk_sign else {
                                         bail!("ed25519 relay signing key not provided")
@@ -334,7 +333,8 @@ impl<'a>
                                     let Some(link_cert) = input.link_cert() else {
                                         bail!("link certificate not provided")
                                     };
-                                    let hash = Sha256::digest(link_cert);
+                                    let hash: Sha256Output =
+                                        digest(&SHA256, link_cert).as_ref().try_into().unwrap();
                                     if subject.ct_ne(&hash).into() {
                                         bail!("link certificate hash does not match")
                                     }

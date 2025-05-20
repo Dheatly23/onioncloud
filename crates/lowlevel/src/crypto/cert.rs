@@ -4,14 +4,12 @@
 
 use std::time::{Duration, SystemTime};
 
-use digest::Digest;
+use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY, SHA256, digest};
 use ring::signature::{ED25519, VerificationAlgorithm};
 use rsa::pkcs1::EncodeRsaPublicKey;
 use rsa::pkcs1v15::Pkcs1v15Sign;
 use rsa::pkcs8::DecodePublicKey;
 use rustls::pki_types::CertificateDer;
-use sha1::Sha1;
-use sha2::Sha256;
 use webpki::EndEntityCert;
 use zerocopy::byteorder::big_endian::{U16, U32};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
@@ -235,12 +233,12 @@ impl UnverifiedRsaCert {
     ///
     /// Returns verified certificate header.
     pub fn verify(&self, pk: &RsaPublicKey) -> Result<&RsaCertHeader, errors::CertVerifyError> {
-        let mut hasher = Sha256::new();
+        let mut hasher = Context::new(&SHA256);
         hasher.update(Self::PREFIX);
         hasher.update(self.header.as_bytes());
         match pk.verify(
             Pkcs1v15Sign::new_unprefixed(),
-            &hasher.finalize(),
+            hasher.finish().as_ref(),
             &self.sig,
         ) {
             Ok(()) if verify_exp(self.header.expiry.get()) => Ok(&self.header),
@@ -261,12 +259,15 @@ pub fn extract_rsa_from_x509(
         .map_err(|_| errors::CertFormatError)?
         .subject_public_key_info();
     let pk = RsaPublicKey::from_public_key_der(&spki).map_err(|_| errors::CertFormatError)?;
-    let id = Sha1::digest(
+    let id: RelayId = digest(
+        &SHA1_FOR_LEGACY_USE_ONLY,
         pk.to_pkcs1_der()
             .map_err(|_| errors::CertFormatError)?
             .as_bytes(),
     )
-    .into();
+    .as_ref()
+    .try_into()
+    .unwrap();
     Ok((pk, id))
 }
 
@@ -299,14 +300,11 @@ mod tests {
                 key,
                 expiry: u32::MAX.into(),
             };
+            let mut hasher = Context::new(&SHA256);
+            hasher.update(UnverifiedRsaCert::PREFIX);
+            hasher.update(cert.as_bytes());
             let sig = private_key
-                .sign(
-                    Pkcs1v15Sign::new_unprefixed(),
-                    &Sha256::new()
-                        .chain_update(UnverifiedRsaCert::PREFIX)
-                        .chain_update(cert.as_bytes())
-                        .finalize(),
-                )
+                .sign(Pkcs1v15Sign::new_unprefixed(), hasher.finish().as_ref())
                 .unwrap();
 
             let mut v = Vec::with_capacity(cert.as_bytes().len() + 1 + sig.len());

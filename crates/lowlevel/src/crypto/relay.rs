@@ -1,7 +1,7 @@
 use crate::errors::{ParseRelayIdInner, RelayIdParseError};
 
 /// Relay ID/fingerprint, represented as 20 bytes.
-pub type RelayId = [u8; 20];
+pub type RelayId = super::Sha1Output;
 
 /// Relay Ed25519 public key.
 ///
