@@ -924,12 +924,12 @@ impl SteadyState {
                         cfg.cache
                             .cache(Destroy::new(cfg.cache.get_cached(), id, reason).into())
                     } else if let Some(cell) = self.out_buffer.pop() {
-                        let mut cell = cell.map(Some);
+                        let mut cell = Cached::map(cell, Some);
 
                         if let Some(cell) = cast::<Destroy>(&mut cell)? {
                             circ_map.remove(cell.circuit);
                             cfg.cache.cache(cell.into())
-                        } else if let Ok(cell) = cell.try_map(|c, _| c.ok_or(())) {
+                        } else if let Ok(cell) = Cached::try_map(cell, |c, _| c.ok_or(())) {
                             cell
                         } else {
                             // Should not happen

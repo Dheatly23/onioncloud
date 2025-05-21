@@ -293,23 +293,36 @@ impl<T: Cachable, C: CellCache> Cached<T, C> {
 
     /// Maps cell data.
     ///
+    /// NOTE: This is an associated function instead of method.
+    ///
+    /// # Example
+    ///
     /// ```
     /// use onioncloud_lowlevel::cell::FixedCell;
     /// use onioncloud_lowlevel::cell::padding::Padding;
     /// use onioncloud_lowlevel::cache::{Cached, StandardCellCache};
     ///
     /// let cell = Cached::new(StandardCellCache::default(), FixedCell::default());
-    /// let cell = cell.map(Padding::new);
+    /// let cell = Cached::map(cell, Padding::new);
     /// ```
-    pub fn map<U: Cachable>(self, f: impl FnOnce(T) -> U) -> Cached<U, C> {
-        let (cell, cache) = Self::decompose(self);
+    pub fn map<U: Cachable>(this: Self, f: impl FnOnce(T) -> U) -> Cached<U, C> {
+        let (cell, cache) = Self::decompose(this);
         Cached::new(cache, f(cell))
+    }
+
+    /// Maps from one type to another.
+    pub fn map_into<U: Cachable + From<T>>(this: Self) -> Cached<U, C> {
+        Cached::map(this, U::from)
     }
 
     /// Try to map cell data.
     ///
     /// Due to [`Try`] trait being unstable, it only supports [`Result`].
     /// Within the closure, caching is done manually using reference to cache.
+    ///
+    /// NOTE: This is an associated function instead of method.
+    ///
+    /// # Example
     ///
     /// ```
     /// use onioncloud_lowlevel::cell::FixedCell;
@@ -318,7 +331,7 @@ impl<T: Cachable, C: CellCache> Cached<T, C> {
     /// let cell = Cached::new(StandardCellCache::default(), FixedCell::default());
     ///
     /// // Example of error
-    /// assert!(cell.try_map(|cell, cache| {
+    /// assert!(Cached::try_map(cell, |cell, cache| {
     ///     if false {
     ///         Ok(cell)
     ///     } else {
@@ -330,10 +343,10 @@ impl<T: Cachable, C: CellCache> Cached<T, C> {
     /// }).is_err());
     /// ```
     pub fn try_map<U: Cachable, E>(
-        self,
+        this: Self,
         f: impl FnOnce(T, &C) -> Result<U, E>,
     ) -> Result<Cached<U, C>, E> {
-        let (cell, cache) = Self::decompose(self);
+        let (cell, cache) = Self::decompose(this);
         let cell = f(cell, &cache)?;
         Ok(Cached::new(cache, cell))
     }
