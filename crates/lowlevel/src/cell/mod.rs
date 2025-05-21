@@ -6,6 +6,7 @@ pub mod dispatch;
 pub mod netinfo;
 pub mod padding;
 pub mod reader;
+pub mod relay;
 pub mod versions;
 pub mod writer;
 
