@@ -10,6 +10,7 @@ use super::{
     Cell, CellHeader, CellLike, CellRef, FIXED_CELL_SIZE, FixedCell, TryFromCell, to_fixed,
 };
 use crate::errors;
+use crate::private::Sealed;
 
 /// RELAY and RELAY_EARLY cell header.
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -44,54 +45,56 @@ pub(crate) struct RelayCell {
     pub(crate) data: [u8; RELAY_DATA_LENGTH],
 }
 
-/// Common abstraction of RELAY and RELAY_EARLY.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RelayInner(FixedCell);
-
-impl RelayInner {
+/// Common trait for [`Relay`] and [`RelayEarly`] cells.
+pub trait RelayLike: Sealed + AsRef<[u8; FIXED_CELL_SIZE]> + AsMut<[u8; FIXED_CELL_SIZE]> {
     /// Gets command.
     fn command(&self) -> u8 {
-        self.cast().header.command
+        cast(self).header.command
     }
 
     /// Sets command.
     fn set_command(&mut self, value: u8) {
-        self.cast_mut().header.command = value;
+        cast_mut(self).header.command = value;
     }
 
     /// Gets recognized.
     fn recognized(&self) -> [u8; 2] {
-        self.cast().header.recognized
+        cast(self).header.recognized
     }
 
     /// Sets recognized.
     fn set_recognized(&mut self, value: [u8; 2]) {
-        self.cast_mut().header.recognized = value;
+        cast_mut(self).header.recognized = value;
+    }
+
+    /// Check if cell is recognized.
+    fn is_recognized(&self) -> bool {
+        self.recognized() == [0; 2]
     }
 
     /// Gets stream ID.
     fn stream(&self) -> u16 {
-        self.cast().header.stream.get()
+        cast(self).header.stream.get()
     }
 
     /// Sets stream ID.
     fn set_stream(&mut self, value: u16) {
-        self.cast_mut().header.stream.set(value);
+        cast_mut(self).header.stream.set(value);
     }
 
     /// Gets digest.
     fn digest(&self) -> [u8; 4] {
-        self.cast().header.digest
+        cast(self).header.digest
     }
 
     /// Sets digest.
     fn set_digest(&mut self, value: [u8; 4]) {
-        self.cast_mut().header.digest = value;
+        cast_mut(self).header.digest = value;
     }
 
     /// Gets length.
     fn len(&self) -> u16 {
-        self.cast().header.len.get()
+        cast(self).header.len.get()
     }
 
     /// Get payload.
@@ -100,7 +103,7 @@ impl RelayInner {
     ///
     /// Panics if length field is invalid. This can happen if the cell content is encrypted.
     fn data(&self) -> &[u8] {
-        let cell = self.cast();
+        let cell = cast(self);
         &cell.data[..usize::from(cell.header.len.get())]
     }
 
@@ -110,7 +113,7 @@ impl RelayInner {
     ///
     /// Panics if `data` is longer than [`RELAY_DATA_LENGTH`].
     fn set_data(&mut self, data: &[u8]) {
-        let cell = self.cast_mut();
+        let cell = cast_mut(self);
         assert!(
             data.len() <= cell.data.len(),
             "data is too long ({} > {})",
@@ -122,32 +125,35 @@ impl RelayInner {
             .len
             .set(data.len().try_into().expect("data must fit cell"));
     }
+}
 
-    fn cast(&self) -> &RelayCell {
-        transmute_ref!(self.0.data())
-    }
+fn cast<T: ?Sized + RelayLike>(this: &T) -> &RelayCell {
+    transmute_ref!(this.as_ref())
+}
 
-    fn cast_mut(&mut self) -> &mut RelayCell {
-        transmute_mut!(self.0.data_mut())
-    }
+fn cast_mut<T: ?Sized + RelayLike>(this: &mut T) -> &mut RelayCell {
+    transmute_mut!(this.as_mut())
 }
 
 /// Represents a RELAY cell.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Relay {
     pub circuit: NonZeroU32,
-    cell: RelayInner,
+    cell: FixedCell,
 }
+
+impl Sealed for Relay {}
+impl RelayLike for Relay {}
 
 impl AsRef<[u8; FIXED_CELL_SIZE]> for Relay {
     fn as_ref(&self) -> &[u8; FIXED_CELL_SIZE] {
-        self.cell.0.data()
+        self.cell.data()
     }
 }
 
 impl AsMut<[u8; FIXED_CELL_SIZE]> for Relay {
     fn as_mut(&mut self) -> &mut [u8; FIXED_CELL_SIZE] {
-        self.cell.0.data_mut()
+        self.cell.data_mut()
     }
 }
 
@@ -188,7 +194,7 @@ impl CellLike for Relay {
     }
 
     fn cell(&self) -> CellRef<'_> {
-        CellRef::Fixed(&self.cell.0)
+        CellRef::Fixed(&self.cell)
     }
 }
 
@@ -202,7 +208,7 @@ impl Relay {
     pub fn from_cell(circuit: NonZeroU32, data: FixedCell) -> Self {
         Self {
             circuit,
-            cell: RelayInner(data),
+            cell: data,
         }
     }
 
@@ -245,82 +251,9 @@ impl Relay {
         Self::from_cell(circuit, cell)
     }
 
-    /// Gets command.
-    pub fn command(&self) -> u8 {
-        self.cell.command()
-    }
-
-    /// Sets command.
-    pub fn set_command(&mut self, value: u8) -> &mut Self {
-        self.cell.set_command(value);
-        self
-    }
-
-    /// Gets recognized.
-    pub fn recognized(&self) -> [u8; 2] {
-        self.cell.recognized()
-    }
-
-    /// Checks if cell is recognized.
-    pub fn is_recognized(&self) -> bool {
-        self.recognized() == [0; 2]
-    }
-
-    /// Sets recognized.
-    pub fn set_recognized(&mut self, value: [u8; 2]) -> &mut Self {
-        self.cell.set_recognized(value);
-        self
-    }
-
-    /// Gets stream ID.
-    pub fn stream(&self) -> u16 {
-        self.cell.stream()
-    }
-
-    /// Sets stream ID.
-    pub fn set_stream(&mut self, value: u16) -> &mut Self {
-        self.cell.set_stream(value);
-        self
-    }
-
-    /// Gets digest.
-    pub fn digest(&self) -> [u8; 4] {
-        self.cell.digest()
-    }
-
-    /// Sets digest.
-    pub fn set_digest(&mut self, value: [u8; 4]) -> &mut Self {
-        self.cell.set_digest(value);
-        self
-    }
-
-    /// Gets length.
-    pub fn len(&self) -> u16 {
-        self.cell.len()
-    }
-
-    /// Get payload.
-    ///
-    /// # Panics
-    ///
-    /// Panics if length field is invalid. This can happen if the cell content is encrypted.
-    pub fn data(&self) -> &[u8] {
-        self.cell.data()
-    }
-
-    /// Set payload.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `data` is longer than [`RELAY_DATA_LENGTH`].
-    pub fn set_data(&mut self, data: &[u8]) -> &mut Self {
-        self.cell.set_data(data);
-        self
-    }
-
     /// Unwraps into inner [`FixedCell`].
     pub fn into_inner(self) -> FixedCell {
-        self.cell.0
+        self.cell
     }
 }
 
@@ -328,18 +261,21 @@ impl Relay {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RelayEarly {
     pub circuit: NonZeroU32,
-    cell: RelayInner,
+    cell: FixedCell,
 }
+
+impl Sealed for RelayEarly {}
+impl RelayLike for RelayEarly {}
 
 impl AsRef<[u8; FIXED_CELL_SIZE]> for RelayEarly {
     fn as_ref(&self) -> &[u8; FIXED_CELL_SIZE] {
-        self.cell.0.data()
+        self.cell.data()
     }
 }
 
 impl AsMut<[u8; FIXED_CELL_SIZE]> for RelayEarly {
     fn as_mut(&mut self) -> &mut [u8; FIXED_CELL_SIZE] {
-        self.cell.0.data_mut()
+        self.cell.data_mut()
     }
 }
 
@@ -383,7 +319,7 @@ impl CellLike for RelayEarly {
     }
 
     fn cell(&self) -> CellRef<'_> {
-        CellRef::Fixed(&self.cell.0)
+        CellRef::Fixed(&self.cell)
     }
 }
 
@@ -397,7 +333,7 @@ impl RelayEarly {
     pub fn from_cell(circuit: NonZeroU32, data: FixedCell) -> Self {
         Self {
             circuit,
-            cell: RelayInner(data),
+            cell: data,
         }
     }
 
@@ -440,81 +376,8 @@ impl RelayEarly {
         Self::from_cell(circuit, cell)
     }
 
-    /// Gets command.
-    pub fn command(&self) -> u8 {
-        self.cell.command()
-    }
-
-    /// Sets command.
-    pub fn set_command(&mut self, value: u8) -> &mut Self {
-        self.cell.set_command(value);
-        self
-    }
-
-    /// Gets recognized.
-    pub fn recognized(&self) -> [u8; 2] {
-        self.cell.recognized()
-    }
-
-    /// Checks if cell is recognized.
-    pub fn is_recognized(&self) -> bool {
-        self.recognized() == [0; 2]
-    }
-
-    /// Sets recognized.
-    pub fn set_recognized(&mut self, value: [u8; 2]) -> &mut Self {
-        self.cell.set_recognized(value);
-        self
-    }
-
-    /// Gets stream ID.
-    pub fn stream(&self) -> u16 {
-        self.cell.stream()
-    }
-
-    /// Sets stream ID.
-    pub fn set_stream(&mut self, value: u16) -> &mut Self {
-        self.cell.set_stream(value);
-        self
-    }
-
-    /// Gets digest.
-    pub fn digest(&self) -> [u8; 4] {
-        self.cell.digest()
-    }
-
-    /// Sets digest.
-    pub fn set_digest(&mut self, value: [u8; 4]) -> &mut Self {
-        self.cell.set_digest(value);
-        self
-    }
-
-    /// Gets length.
-    pub fn len(&self) -> u16 {
-        self.cell.len()
-    }
-
-    /// Get payload.
-    ///
-    /// # Panics
-    ///
-    /// Panics if length field is invalid. This can happen if the cell content is encrypted.
-    pub fn data(&self) -> &[u8] {
-        self.cell.data()
-    }
-
-    /// Set payload.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `data` is longer than [`RELAY_DATA_LENGTH`].
-    pub fn set_data(&mut self, data: &[u8]) -> &mut Self {
-        self.cell.set_data(data);
-        self
-    }
-
     /// Unwraps into inner [`FixedCell`].
     pub fn into_inner(self) -> FixedCell {
-        self.cell.0
+        self.cell
     }
 }

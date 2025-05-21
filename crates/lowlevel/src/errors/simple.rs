@@ -268,3 +268,10 @@ impl Display for PeerIpMismatchError {
 }
 
 display2debug! {PeerIpMismatchError}
+
+/// Cell digest mismatch.
+#[derive(Error)]
+#[error("cell digest mismatch")]
+pub struct CellDigestError;
+
+display2debug! {CellDigestError}
