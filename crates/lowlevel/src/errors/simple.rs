@@ -30,6 +30,19 @@ impl From<cipher::InvalidLength> for InvalidLength {
     }
 }
 
+/// Unspecified symmetric cipher error.
+#[derive(Error)]
+#[error("cipher error")]
+pub struct CipherError;
+
+display2debug! {CipherError}
+
+impl From<cipher::StreamCipherError> for CipherError {
+    fn from(_: cipher::StreamCipherError) -> Self {
+        Self
+    }
+}
+
 #[derive(Error)]
 #[error("cannot convert stream data into UTF-8")]
 pub(crate) struct StreamUtf8Error;

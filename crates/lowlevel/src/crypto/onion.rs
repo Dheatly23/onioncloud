@@ -1,9 +1,11 @@
 use std::mem::size_of;
 use std::slice::from_ref;
 
+use cipher::{KeyIvInit, StreamCipher};
 use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY, SHA256};
 
-use super::{Sha1Output, Sha256Output};
+use super::{Cipher128, CipherKey128, Sha1Output, Sha256Output};
+use crate::cell::FIXED_CELL_SIZE;
 use crate::cell::relay::RelayLike;
 use crate::errors;
 
@@ -44,8 +46,10 @@ impl CircuitDigest {
     ///
     /// # Parameters
     ///
-    /// - `forward` : Seed for forward digest. Should be obtained through circuit creation/extension.
-    /// - `backward` : Seed for backward digest. Should be obtained through circuit creation/extension.
+    /// All paraneters should be obtained through circuit creation/extension.
+    ///
+    /// - `forward` : Seed for forward digest.
+    /// - `backward` : Seed for backward digest.
     pub fn new(forward: Sha1Output, backward: Sha1Output) -> Self {
         let mut fc = Context::new(&SHA1_FOR_LEGACY_USE_ONLY);
         fc.update(&forward);
@@ -129,7 +133,90 @@ impl RelayDigest for CircuitDigest {
 
 /// Trait for onion skin layer.
 pub trait OnionLayer {
-    // TODO: Interface methods
+    /// Encrypts cell going forward.
+    fn encrypt_forward(
+        &mut self,
+        data: &mut [u8; FIXED_CELL_SIZE],
+    ) -> Result<(), errors::CipherError>;
+
+    /// Encrypts cell going backward.
+    fn encrypt_backward(
+        &mut self,
+        data: &mut [u8; FIXED_CELL_SIZE],
+    ) -> Result<(), errors::CipherError>;
+
+    /// Decrypts cell going forward.
+    fn decrypt_forward(
+        &mut self,
+        data: &mut [u8; FIXED_CELL_SIZE],
+    ) -> Result<(), errors::CipherError>;
+
+    /// Decrypts cell going backward.
+    fn decrypt_backward(
+        &mut self,
+        data: &mut [u8; FIXED_CELL_SIZE],
+    ) -> Result<(), errors::CipherError>;
+}
+
+/// Default onion skin layer.
+pub struct OnionLayer128 {
+    forward: Cipher128,
+    backward: Cipher128,
+}
+
+impl OnionLayer128 {
+    /// Create new [`OnionLayer128`].
+    ///
+    /// # Parameters
+    ///
+    /// All paraneters should be obtained through circuit creation/extension.
+    ///
+    /// - `forward` : Key for forward cells.
+    /// - `backward` : Key for backward cells.
+    pub fn new(forward: CipherKey128, backward: CipherKey128) -> Self {
+        Self {
+            forward: Cipher128::new((&forward).into(), &Default::default()),
+            backward: Cipher128::new((&backward).into(), &Default::default()),
+        }
+    }
+}
+
+impl OnionLayer for OnionLayer128 {
+    fn encrypt_forward(
+        &mut self,
+        data: &mut [u8; FIXED_CELL_SIZE],
+    ) -> Result<(), errors::CipherError> {
+        self.forward
+            .try_apply_keystream(data)
+            .map_err(errors::CipherError::from)
+    }
+
+    fn encrypt_backward(
+        &mut self,
+        data: &mut [u8; FIXED_CELL_SIZE],
+    ) -> Result<(), errors::CipherError> {
+        self.backward
+            .try_apply_keystream(data)
+            .map_err(errors::CipherError::from)
+    }
+
+    fn decrypt_forward(
+        &mut self,
+        data: &mut [u8; FIXED_CELL_SIZE],
+    ) -> Result<(), errors::CipherError> {
+        self.forward
+            .try_apply_keystream(data)
+            .map_err(errors::CipherError::from)
+    }
+
+    fn decrypt_backward(
+        &mut self,
+        data: &mut [u8; FIXED_CELL_SIZE],
+    ) -> Result<(), errors::CipherError> {
+        self.backward
+            .try_apply_keystream(data)
+            .map_err(errors::CipherError::from)
+    }
 }
 
 pub struct OnionLayerFast {}
