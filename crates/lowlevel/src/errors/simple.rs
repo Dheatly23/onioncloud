@@ -288,3 +288,11 @@ display2debug! {PeerIpMismatchError}
 pub struct CellDigestError;
 
 display2debug! {CellDigestError}
+
+/// Generic circuit handshake error.
+#[derive(Error, Default)]
+#[error("circuit handshake error")]
+#[non_exhaustive]
+pub struct CircuitHandshakeError {}
+
+display2debug! {CircuitHandshakeError}

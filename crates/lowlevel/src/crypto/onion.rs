@@ -1,12 +1,18 @@
 use std::mem::size_of;
+use std::num::NonZeroU32;
 use std::slice::from_ref;
 
 use cipher::{KeyIvInit, StreamCipher};
+use rand::prelude::*;
 use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY, SHA256};
+use subtle::ConstantTimeEq;
+use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use super::{Cipher128, CipherKey128, Sha1Output, Sha256Output};
-use crate::cell::FIXED_CELL_SIZE;
+use crate::cache::{Cached, CellCache};
+use crate::cell::create::{CreateFast, CreatedFast};
 use crate::cell::relay::RelayLike;
+use crate::cell::{FIXED_CELL_SIZE, FixedCell};
 use crate::errors;
 
 /// Trait for relay rolling digest.
@@ -231,9 +237,123 @@ impl OnionLayer for OnionLayer128 {
     }
 }
 
-pub struct OnionLayerFast {}
+/// Onion handshake output.
+#[non_exhaustive]
+pub struct OnionLayerData {
+    /// Encryption layer used.
+    pub encrypt: OnionLayer128,
 
-pub fn kdf_tor(key: &[&[u8]], out: &mut [u8]) {
+    /// Digest layer used.
+    ///
+    /// Previous digest layer should be discarded, because it's no longer useful.
+    pub digest: CircuitDigest,
+}
+
+/// CREATE_FAST/CREATED_FAST handshake.
+///
+/// Must only be used for one-hop directory circuit.
+pub struct OnionLayerFast {
+    key: Sha1Output,
+}
+
+impl OnionLayerFast {
+    fn from_cell(circuit: NonZeroU32, cell: FixedCell) -> (Self, CreateFast) {
+        let key = ThreadRng::default().r#gen::<Sha1Output>();
+        (Self { key }, CreateFast::new(cell, circuit, key))
+    }
+
+    /// Starts handshake as client.
+    ///
+    /// The resulting [`CreateFast`] cell should be send to server.
+    pub fn new<C: CellCache>(cache: &C, circuit: NonZeroU32) -> (Self, CreateFast) {
+        Self::from_cell(circuit, cache.get_cached())
+    }
+
+    /// Same as [`new`], but wraps cell in [`Cached`].
+    pub fn with_cache<C: CellCache + Clone>(
+        cache: &C,
+        circuit: NonZeroU32,
+    ) -> (Self, Cached<CreateFast, C>) {
+        let (this, cell) = Self::new(cache, circuit);
+        (this, cache.cache(cell))
+    }
+
+    fn derive_server_inner(
+        input: &CreateFast,
+        cell: FixedCell,
+    ) -> Result<(OnionLayerData, CreatedFast), errors::CircuitHandshakeError> {
+        let key = ThreadRng::default().r#gen::<Sha1Output>();
+        let DerivedFast { kh, keys } = derive_fast(input.key(), &key);
+
+        Ok((
+            derive_keys(keys),
+            CreatedFast::new(cell, input.circuit, key, kh),
+        ))
+    }
+
+    /// Starts handshake as server.
+    ///
+    /// The resulting [`CreatedFast`] cell should be send to client to finish handshake.
+    pub fn derive_server<C: CellCache>(
+        cell: &CreateFast,
+        cache: &C,
+    ) -> Result<(OnionLayerData, CreatedFast), errors::CircuitHandshakeError> {
+        Self::derive_server_inner(cell, cache.get_cached())
+    }
+
+    /// Same as [`derive_server`], but with [`Cached`] cell instead.
+    pub fn derive_server_cached<C: CellCache + Clone>(
+        cell: &Cached<CreateFast, C>,
+    ) -> Result<(OnionLayerData, Cached<CreatedFast, C>), errors::CircuitHandshakeError> {
+        let cache = Cached::cache(cell);
+        let (this, cell) = Self::derive_server(&cell, cache)?;
+        Ok((this, cache.cache(cell)))
+    }
+
+    /// Finish handshake as client.
+    pub fn derive_client(
+        self,
+        cell: &CreatedFast,
+    ) -> Result<OnionLayerData, errors::CircuitHandshakeError> {
+        let DerivedFast { kh, keys } = derive_fast(&self.key, cell.key());
+        if kh.ct_ne(cell.derived()).into() {
+            return Err(errors::CircuitHandshakeError {});
+        }
+
+        Ok(derive_keys(keys))
+    }
+}
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct DerivedKeys {
+    df: Sha1Output,
+    db: Sha1Output,
+    kf: CipherKey128,
+    kb: CipherKey128,
+}
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct DerivedFast {
+    kh: Sha1Output,
+    keys: DerivedKeys,
+}
+
+fn derive_keys(keys: DerivedKeys) -> OnionLayerData {
+    OnionLayerData {
+        encrypt: OnionLayer128::new(keys.kf, keys.kb),
+        digest: CircuitDigest::new(keys.df, keys.db),
+    }
+}
+
+fn derive_fast(key_x: &Sha1Output, key_y: &Sha1Output) -> DerivedFast {
+    let mut out = DerivedFast::new_zeroed();
+    kdf_tor(&[&key_x[..], &key_y[..]], out.as_mut_bytes());
+    out
+}
+
+fn kdf_tor(key: &[&[u8]], out: &mut [u8]) {
     let mut hasher = Context::new(&SHA256);
     for k in key {
         hasher.update(k);
@@ -260,9 +380,36 @@ pub fn kdf_tor(key: &[&[u8]], out: &mut [u8]) {
 mod tests {
     use super::*;
 
+    use crate::cache::NullCellCache;
+    use crate::cell::relay::Relay;
+
     #[test]
     fn test_kdf_tor() {
         let mut out = [0; 255 * 32];
         kdf_tor(&[b"test123", b"test234"], &mut out);
+    }
+
+    #[test]
+    fn test_handshake_fast() {
+        let cache = NullCellCache;
+        let id = NonZeroU32::new(1).unwrap();
+
+        // Do handshake
+        let (mut client, mut server) = {
+            let (client, cell) = OnionLayerFast::with_cache(&cache, id);
+            let (server, cell) = OnionLayerFast::derive_server_cached(&cell).unwrap();
+            let client = client.derive_client(&cell).unwrap();
+            (client, server)
+        };
+
+        // Validate by simulating a cell.
+        static DATA: &[u8] = b"test data";
+        let mut cell = Relay::new(cache.get_cached(), id, 0, 0xdead, DATA);
+        client.encrypt.encrypt_forward(cell.as_mut()).unwrap();
+        server.encrypt.decrypt_forward(cell.as_mut()).unwrap();
+
+        assert_eq!(cell.command(), 0);
+        assert_eq!(cell.stream(), 0xdead);
+        assert_eq!(cell.data(), DATA);
     }
 }
