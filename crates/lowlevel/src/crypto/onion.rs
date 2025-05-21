@@ -11,9 +11,14 @@ use crate::errors;
 
 /// Trait for relay rolling digest.
 ///
+/// # User Note
+///
+/// Because wrap and unwrap are linked for each direction, user **should not** use both for the same value.
+/// Only use [`wrap_digest_forward`] and [`unwrap_digest_backward`], or [`unwrap_digest_forward`] and [`wrap_digest_backward`].
+///
 /// # Implementers Note
 ///
-/// Implementers should **only** modify the [`recognized`](`RelayLike::recognized`) and [`digest`](`RelayLike::digest`) field.
+/// Implementers **should only** modify the [`recognized`](`RelayLike::recognized`) and [`digest`](`RelayLike::digest`) field.
 /// All other relay fields should be left unchanged.
 pub trait RelayDigest {
     /// Set digest of cell going forward.
@@ -36,6 +41,7 @@ pub trait RelayDigest {
 }
 
 /// Circuit rolling digest handler.
+#[derive(Clone)]
 pub struct CircuitDigest {
     forward: Context,
     backward: Context,
@@ -132,6 +138,11 @@ impl RelayDigest for CircuitDigest {
 }
 
 /// Trait for onion skin layer.
+///
+/// # User Note
+///
+/// Because encrypt and decrypt are linked for each direction, user **should not** use both for the same value.
+/// Only use [`encrypt_forward`] and [`decrypt_backward`], or [`decrypt_forward`] and [`encrypt_backward`].
 pub trait OnionLayer {
     /// Encrypts cell going forward.
     fn encrypt_forward(
@@ -159,6 +170,7 @@ pub trait OnionLayer {
 }
 
 /// Default onion skin layer.
+#[derive(Clone)]
 pub struct OnionLayer128 {
     forward: Cipher128,
     backward: Cipher128,
