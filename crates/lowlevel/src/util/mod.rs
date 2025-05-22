@@ -2,19 +2,22 @@ mod channel;
 pub mod sans_io;
 
 use std::error::Error;
-use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::future::{Future, poll_fn};
 use std::io::{Error as IoError, ErrorKind, IoSliceMut, Read, Result as IoResult, Write};
+use std::mem::size_of;
 use std::pin::Pin;
 use std::task::Poll::*;
 use std::task::{Context, Poll};
 
+use base64ct::{Base64Url, Encoding};
 use futures_core::future::FusedFuture;
 use futures_core::ready;
 use futures_io::{AsyncRead, AsyncWrite};
 use pin_project::pin_project;
 use scopeguard::guard_on_unwind;
 
+use crate::crypto::EdPublicKey;
 use crate::errors;
 pub use channel::*;
 
@@ -398,8 +401,14 @@ where
     }
 }
 
-pub(crate) fn print_hex(s: &[u8]) -> impl '_ + Display {
+pub(crate) fn print_hex(s: &[u8]) -> impl '_ + Debug + Display {
     struct S<'a>(&'a [u8]);
+
+    impl Debug for S<'_> {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            Display::fmt(self, f)
+        }
+    }
 
     impl Display for S<'_> {
         fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
@@ -413,8 +422,14 @@ pub(crate) fn print_hex(s: &[u8]) -> impl '_ + Display {
     S(s)
 }
 
-pub(crate) fn print_list<T: Display>(s: &[T]) -> impl '_ + Display {
+pub(crate) fn print_list<T: Display>(s: &[T]) -> impl '_ + Debug + Display {
     struct S<'a, T>(&'a [T]);
+
+    impl<T: Display> Debug for S<'_, T> {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            Display::fmt(self, f)
+        }
+    }
 
     impl<T: Display> Display for S<'_, T> {
         fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
@@ -427,6 +442,35 @@ pub(crate) fn print_list<T: Display>(s: &[T]) -> impl '_ + Display {
     }
 
     S(s)
+}
+
+pub(crate) fn print_ed(key: &EdPublicKey) -> impl Debug + Display {
+    // Calculate length based on base64ct encoded_len_inner
+    const LEN: usize = const {
+        let q = size_of::<EdPublicKey>() * 4;
+        ((q / 3) + 3) & !3
+    };
+
+    struct S([u8; LEN]);
+
+    impl Debug for S {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            Display::fmt(self, f)
+        }
+    }
+
+    impl Display for S {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            // SAFETY: bytes are complete string
+            let s = unsafe { str::from_utf8_unchecked(&self.0) };
+            write!(f, "{}", s)
+        }
+    }
+
+    let mut a = [0; LEN];
+    let s = Base64Url::encode(key, &mut a).unwrap();
+    assert_eq!(s.len(), LEN);
+    S(a)
 }
 
 #[cfg(test)]
@@ -624,6 +668,12 @@ mod tests {
         );
 
         assert_eq!(buf.finalize(), EXAMPLE_DATA.len());
+    }
+
+    #[test]
+    fn test_encode_ed() {
+        let v = EdPublicKey::default();
+        println!("{}", print_ed(&v));
     }
 
     #[derive(Debug, Clone)]

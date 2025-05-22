@@ -1,4 +1,7 @@
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+
 use crate::errors::{ParseRelayIdInner, RelayIdParseError};
+use crate::util::{print_ed, print_hex};
 
 /// Relay ID/fingerprint, represented as 20 bytes.
 pub type RelayId = super::Sha1Output;
@@ -7,6 +10,33 @@ pub type RelayId = super::Sha1Output;
 ///
 /// Used in conjunction with [`RelayId`].
 pub type RelayIdEd = super::EdPublicKey;
+
+/// Type that contains all relay IDs.
+///
+/// All IDS should correspond to the same relay.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RelayIds {
+    /// Relay fingerprint.
+    pub id: RelayId,
+
+    /// Relay ed25519 identity key.
+    pub id_ed: RelayIdEd,
+}
+
+impl Debug for RelayIds {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("RelayIds")
+            .field("id", &print_hex(&self.id))
+            .field("id_ed", &print_ed(&self.id_ed))
+            .finish()
+    }
+}
+
+impl Display for RelayIds {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{}", print_hex(&self.id))
+    }
+}
 
 /// Parse a string into [`RelayId`].
 ///

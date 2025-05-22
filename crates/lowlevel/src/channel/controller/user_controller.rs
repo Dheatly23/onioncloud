@@ -7,7 +7,6 @@ use std::ops::ControlFlow::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use base64ct::{Base64Url, Encoding};
 use flume::TrySendError;
 use futures_channel::oneshot::Sender;
 use ring::digest::{SHA256, digest};
@@ -32,8 +31,8 @@ use crate::crypto::cert::{UnverifiedEdCert, UnverifiedRsaCert, extract_rsa_from_
 use crate::crypto::{EdPublicKey, Sha256Output};
 use crate::errors;
 use crate::linkver::StandardLinkver;
-use crate::util::print_hex;
 use crate::util::sans_io::Handle;
+use crate::util::{print_ed, print_hex};
 
 /// Trait for [`UserController`] configuration type.
 pub trait UserConfig: ChannelConfig {
@@ -350,8 +349,8 @@ impl InitState {
                                 if id.ct_ne(relay_id).into() {
                                     error!(
                                         "relay ED25519 ID mismatch (expect {}, got {})",
-                                        Base64Url::encode_string(relay_id),
-                                        Base64Url::encode_string(&pk_id),
+                                        print_ed(relay_id),
+                                        print_ed(&pk_id),
                                     );
                                     return Err(errors::CertVerifyError.into());
                                 }
