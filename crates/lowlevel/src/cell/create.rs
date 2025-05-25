@@ -146,6 +146,41 @@ impl Create2 {
         unsafe { Self::from_cell(circuit, cell) }
     }
 
+    /// Creates new CREATE2 cell with multipart data.
+    ///
+    /// # Parameters
+    ///
+    /// - `cell` : Cached [`FixedCell`].
+    /// - `circuit` : Circuit ID.
+    /// - `ty` : Handshake type.
+    /// - `data` : Handshake data in multiple byte slices.
+    ///
+    /// # Panics
+    ///
+    /// Panics if data does not fit the cell.
+    pub fn new_multipart(
+        mut cell: FixedCell,
+        circuit: NonZeroU32,
+        ty: u16,
+        data: &[&[u8]],
+    ) -> Self {
+        let Create2Cell { header, data: out } = transmute_mut!(cell.data_mut());
+
+        let mut len = 0;
+        let mut out = &mut out[..];
+        for v in data {
+            let (a, b) = out.split_at_mut(v.len());
+            a.copy_from_slice(v);
+            out = b;
+            len += v.len();
+        }
+        header.ty.set(ty);
+        header.len.set(len.try_into().expect("data must fit cell"));
+
+        // SAFETY: Data is valid
+        unsafe { Self::from_cell(circuit, cell) }
+    }
+
     /// Gets handshake type.
     pub fn handshake_type(&self) -> u16 {
         let Create2Cell { header, .. } = transmute_ref!(self.cell.data());

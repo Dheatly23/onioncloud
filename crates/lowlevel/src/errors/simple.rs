@@ -293,6 +293,12 @@ impl From<cipher::InvalidLength> for CircuitHandshakeError {
     }
 }
 
+impl From<cipher::StreamCipherError> for CircuitHandshakeError {
+    fn from(_: cipher::StreamCipherError) -> Self {
+        Self(CircuitHandshakeErrorInner::CryptoError)
+    }
+}
+
 impl From<hkdf::InvalidLength> for CircuitHandshakeError {
     fn from(_: hkdf::InvalidLength) -> Self {
         Self(CircuitHandshakeErrorInner::CryptoError)

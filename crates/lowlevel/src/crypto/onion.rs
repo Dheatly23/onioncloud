@@ -4,17 +4,20 @@ use std::num::NonZeroU32;
 use std::slice::from_ref;
 
 use cipher::{KeyIvInit, StreamCipher};
-use digest::{Digest, Mac};
+use digest::{Digest, ExtendableOutput, Mac, XofReader};
 use hkdf::HkdfExtract;
 use hmac::Hmac;
 use rand::prelude::*;
 use sha1::Sha1;
 use sha2::Sha256;
+use sha3::Shake256;
 use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use super::{Cipher128, CipherKey128, EdPublicKey, Sha1Output, Sha256Output};
+use super::{
+    Cipher128, Cipher256, CipherKey128, CipherKey256, EdPublicKey, Sha1Output, Sha256Output,
+};
 use crate::cache::{Cached, CellCache};
 use crate::cell::create::{Create2, CreateFast, Created2, CreatedFast};
 use crate::cell::relay::RelayLike;
@@ -393,14 +396,14 @@ pub struct OnionLayerNtor {
 
 impl OnionLayerNtor {
     /// Starts handshake as client.
-    pub fn new(id: RelayId, pk: EdPublicKey) -> Self {
+    pub fn new(id: &RelayId, pk: &EdPublicKey) -> Self {
         let sk_x = StaticSecret::random_from_rng(ThreadRng::default());
 
         Self {
             pk_x: (&sk_x).into(),
             sk_x,
-            pk_b: pk.into(),
-            id,
+            pk_b: (*pk).into(),
+            id: *id,
         }
     }
 
@@ -430,20 +433,39 @@ impl OnionLayerNtor {
         ))
     }
 
+    /// Starts handshake as server.
+    ///
+    /// Returns an [`OnionLayerData`] and payload that must be send to client to finish handshake.
+    ///
+    /// For convenience, there is [`derive_server`] that produce ready-to-send CREATED2 cell.
+    ///
+    /// # Parameters
+    ///
+    /// - `id` : This relay ID.
+    /// - `sk` : List of [`NtorOnionKey`] to be used.
+    /// - `input` : Handshake payload from client.
+    pub fn derive_server_inner(
+        id: &RelayId,
+        sk: &[NtorOnionKey],
+        input: &[u8],
+    ) -> Result<(OnionLayerData, impl AsRef<[u8]>), errors::CircuitHandshakeError> {
+        let Ok(data) = NtorCreateData::ref_from_bytes(input) else {
+            return Err(errors::CircuitHandshakeErrorInner::CellFormatError.into());
+        };
+
+        let (derived, pk_y, auth) = ntor_derive_server(data, id, sk)?;
+        Ok((derived, NtorCreatedData { pk_y, auth }))
+    }
+
     /// Inner implementation of derive server.
-    fn derive_server_inner(
+    fn derive_server_inner2(
         id: &RelayId,
         sk: &[NtorOnionKey],
         input: &Create2,
         cell: FixedCell,
     ) -> Result<(OnionLayerData, Created2), errors::CircuitHandshakeError> {
-        let Ok(data) = NtorCreateData::ref_from_bytes(input.data()) else {
-            return Err(errors::CircuitHandshakeErrorInner::CellFormatError.into());
-        };
-
-        let (derived, pk_y, auth) = ntor_derive_server(data, id, sk)?;
-        let data = NtorCreatedData { pk_y, auth };
-        Ok((derived, Created2::new(cell, input.circuit, data.as_bytes())))
+        let (derived, data) = Self::derive_server_inner(id, sk, input.data())?;
+        Ok((derived, Created2::new(cell, input.circuit, data.as_ref())))
     }
 
     /// Starts handshake as server.
@@ -465,7 +487,7 @@ impl OnionLayerNtor {
         cell: &Create2,
         cache: &C,
     ) -> Result<(OnionLayerData, Created2), errors::CircuitHandshakeError> {
-        Self::derive_server_inner(id, sk, cell, cache.get_cached())
+        Self::derive_server_inner2(id, sk, cell, cache.get_cached())
     }
 
     /// Same as [`derive_server`], but with [`Cached`] cell instead.
@@ -475,7 +497,7 @@ impl OnionLayerNtor {
         cell: &Cached<Create2, C>,
     ) -> Result<(OnionLayerData, Cached<Created2, C>), errors::CircuitHandshakeError> {
         let cache = Cached::cache(cell);
-        let (derived, cell) = Self::derive_server_inner(id, sk, cell, cache.get_cached())?;
+        let (derived, cell) = Self::derive_server_inner2(id, sk, cell, cache.get_cached())?;
         Ok((derived, cache.cache(cell)))
     }
 
@@ -593,6 +615,173 @@ fn ntor_derive(
     let mut out = DerivedKeys::new_zeroed();
     kdf.expand_multi_info(&[PROTOID, b":key_expand"], out.as_mut_bytes())?;
     Ok(derive_keys(out))
+}
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct Ntor3CreateHeader {
+    id: RelayId,
+    pk_b: EdPublicKey,
+    pk_x: EdPublicKey,
+}
+
+impl AsRef<[u8]> for Ntor3CreateHeader {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+pub struct OnionLayerNtor3 {
+    sk_x: StaticSecret,
+    pk_x: PublicKey,
+    pk_b: PublicKey,
+    xb: SharedSecret,
+    id: RelayId,
+    mac: Sha256Output,
+}
+
+static NTOR3_CIRC_VERIFY: &[u8] = b"circuit extend";
+
+impl OnionLayerNtor3 {
+    /// Starts handshake as client (in raw).
+    ///
+    /// You might want [`new_create`] instead of this internal function.
+    ///
+    /// It's useful if you want to roll out your own ntor-v3 handshake.
+    /// Afterwards, send client payload to server (see [`client_header`]).
+    ///
+    /// # Parameters
+    ///
+    /// - `id` : Peer relay ID.
+    /// - `pk` : Peer relay onion key.
+    /// - `client_msg` : Client message. It will be encrypted afterwards.
+    /// - `verify` : Shared verification string.
+    pub fn new_inner(
+        id: &RelayId,
+        pk: &EdPublicKey,
+        client_msg: &mut [u8],
+        verify: &[u8],
+    ) -> Result<Self, errors::CircuitHandshakeError> {
+        let sk_x = StaticSecret::random_from_rng(ThreadRng::default());
+        let pk_x = PublicKey::from(&sk_x);
+
+        let pk_b = PublicKey::from(*pk);
+        let xb = sk_x.diffie_hellman(&pk_b);
+        if !xb.was_contributory() {
+            return Err(errors::CircuitHandshakeError::crypto());
+        }
+
+        let derived = ntor3_derive_client_mac(&xb, id, &pk_x, pk, verify);
+        Cipher256::new(&derived.enc.into(), &Default::default()).try_apply_keystream(client_msg)?;
+
+        Ok(Self {
+            sk_x,
+            pk_x,
+            pk_b,
+            xb,
+            id: *id,
+            mac: derived.mac,
+        })
+    }
+
+    /// Get client message MAC.
+    ///
+    /// NOTE: `client_msg_*` methods should be used only when using [`new_inner`].
+    pub fn client_msg_mac(&self) -> Sha256Output {
+        self.mac
+    }
+
+    /// Get client payload header to be send to server.
+    ///
+    /// The entire client payload is:
+    ///
+    /// ```text
+    /// header | ENC(client_msg) | mac
+    /// ```
+    ///
+    /// NOTE: This method should be used only when using [`new_inner`].
+    pub fn client_header(&self) -> impl AsRef<[u8]> {
+        Ntor3CreateHeader {
+            id: self.id,
+            pk_b: self.pk_b.to_bytes(),
+            pk_x: self.pk_x.to_bytes(),
+        }
+    }
+
+    pub fn new_circuit_inner(
+        id: &RelayId,
+        pk: &EdPublicKey,
+        client_msg: &mut [u8],
+        circuit: NonZeroU32,
+        cell: FixedCell,
+    ) -> Result<(Self, Create2), errors::CircuitHandshakeError> {
+        let ret = Self::new_inner(id, pk, client_msg, NTOR3_CIRC_VERIFY)?;
+        let cell = Create2::new_multipart(
+            cell,
+            circuit,
+            3,
+            &[
+                ret.client_header().as_ref(),
+                client_msg,
+                &ret.client_msg_mac(),
+            ],
+        );
+        Ok((ret, cell))
+    }
+
+    /// Starts circuit handshake as client.
+    ///
+    /// The resulting [`Create2`] cell should be send to server.
+    ///
+    /// # Parameters
+    ///
+    /// - `id` : Peer relay ID.
+    /// - `pk` : Peer relay onion key.
+    /// - `client_msg` : Client message. It will be encrypted afterwards.
+    /// - `circuit` : Circuit ID.
+    /// - `cache` : Cell cache.
+    pub fn new_create<C: CellCache + Clone>(
+        id: &RelayId,
+        pk: &EdPublicKey,
+        client_msg: &mut [u8],
+        circuit: NonZeroU32,
+        cache: &C,
+    ) -> Result<(Self, Cached<Create2, C>), errors::CircuitHandshakeError> {
+        let (ret, cell) = Self::new_circuit_inner(id, pk, client_msg, circuit, cache.get_cached())?;
+        Ok((ret, cache.cache(cell)))
+    }
+}
+
+static PROTOID3: &[u8] = b"ntor3-curve25519-sha3_256-1";
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct Ntor3DerivedClientMsg {
+    enc: CipherKey256,
+    mac: Sha256Output,
+}
+
+fn ntor3_derive_client_mac(
+    xb: &SharedSecret,
+    id: &RelayId,
+    pk_x: &PublicKey,
+    pk_b: &EdPublicKey,
+    ver: &[u8],
+) -> Ntor3DerivedClientMsg {
+    use digest::Update;
+
+    let mut hasher = Shake256::default();
+    hasher.update(xb.as_bytes());
+    hasher.update(id);
+    hasher.update(pk_x.as_bytes());
+    hasher.update(pk_b);
+    hasher.update(PROTOID3);
+    hasher.update(&(ver.len() as u64).to_be_bytes());
+    hasher.update(ver);
+
+    let mut out = Ntor3DerivedClientMsg::new_zeroed();
+    hasher.finalize_xof_into(out.as_mut_bytes());
+    out
 }
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
