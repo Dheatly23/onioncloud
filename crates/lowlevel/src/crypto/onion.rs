@@ -1,19 +1,27 @@
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::mem::size_of;
 use std::num::NonZeroU32;
 use std::slice::from_ref;
 
 use cipher::{KeyIvInit, StreamCipher};
+use digest::{Digest, Mac};
+use hkdf::HkdfExtract;
+use hmac::Hmac;
 use rand::prelude::*;
-use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY, SHA256};
+use sha1::Sha1;
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
+use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use super::{Cipher128, CipherKey128, Sha1Output, Sha256Output};
+use super::{Cipher128, CipherKey128, EdPublicKey, Sha1Output, Sha256Output};
 use crate::cache::{Cached, CellCache};
-use crate::cell::create::{CreateFast, CreatedFast};
+use crate::cell::create::{Create2, CreateFast, Created2, CreatedFast};
 use crate::cell::relay::RelayLike;
 use crate::cell::{FIXED_CELL_SIZE, FixedCell};
+use crate::crypto::relay::RelayId;
 use crate::errors;
+use crate::util::print_ed;
 
 /// Trait for relay rolling digest.
 ///
@@ -49,8 +57,8 @@ pub trait RelayDigest {
 /// Circuit rolling digest handler.
 #[derive(Clone)]
 pub struct CircuitDigest {
-    forward: Context,
-    backward: Context,
+    forward: Sha1,
+    backward: Sha1,
 }
 
 impl CircuitDigest {
@@ -63,25 +71,20 @@ impl CircuitDigest {
     /// - `forward` : Seed for forward digest.
     /// - `backward` : Seed for backward digest.
     pub fn new(forward: Sha1Output, backward: Sha1Output) -> Self {
-        let mut fc = Context::new(&SHA1_FOR_LEGACY_USE_ONLY);
-        fc.update(&forward);
-        let mut bc = Context::new(&SHA1_FOR_LEGACY_USE_ONLY);
-        bc.update(&backward);
-
         Self {
-            forward: fc,
-            backward: bc,
+            forward: Sha1::new_with_prefix(forward),
+            backward: Sha1::new_with_prefix(backward),
         }
     }
 
     /// Get current rolling digest going forward.
     pub fn digest_forward(&self) -> Sha1Output {
-        self.forward.clone().finish().as_ref().try_into().unwrap()
+        self.forward.clone().finalize().into()
     }
 
     /// Get current rolling digest going backward.
     pub fn digest_backward(&self) -> Sha1Output {
-        self.backward.clone().finish().as_ref().try_into().unwrap()
+        self.backward.clone().finalize().into()
     }
 }
 
@@ -116,10 +119,9 @@ impl RelayDigest for CircuitDigest {
         let other: [u8; 4] = self.digest_forward()[..4].try_into().unwrap();
 
         if digest != other {
-            Err(errors::CellDigestError)
-        } else {
-            Ok(())
+            return Err(errors::CellDigestError);
         }
+        Ok(())
     }
 
     fn unwrap_digest_backward<T: ?Sized + RelayLike>(
@@ -136,10 +138,9 @@ impl RelayDigest for CircuitDigest {
         let other: [u8; 4] = self.digest_backward()[..4].try_into().unwrap();
 
         if digest != other {
-            Err(errors::CellDigestError)
-        } else {
-            Ok(())
+            return Err(errors::CellDigestError);
         }
+        Ok(())
     }
 }
 
@@ -257,25 +258,21 @@ pub struct OnionLayerFast {
 }
 
 impl OnionLayerFast {
-    fn from_cell(circuit: NonZeroU32, cell: FixedCell) -> (Self, CreateFast) {
-        let key = ThreadRng::default().r#gen::<Sha1Output>();
-        (Self { key }, CreateFast::new(cell, circuit, key))
-    }
-
     /// Starts handshake as client.
-    ///
-    /// The resulting [`CreateFast`] cell should be send to server.
-    pub fn new<C: CellCache>(cache: &C, circuit: NonZeroU32) -> (Self, CreateFast) {
-        Self::from_cell(circuit, cache.get_cached())
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self {
+            key: ThreadRng::default().r#gen(),
+        }
     }
 
-    /// Same as [`new`], but wraps cell in [`Cached`].
-    pub fn with_cache<C: CellCache + Clone>(
-        cache: &C,
+    /// Get CREATE_FAST cell to be send to server.
+    pub fn create_cell<C: CellCache + Clone>(
+        &self,
         circuit: NonZeroU32,
-    ) -> (Self, Cached<CreateFast, C>) {
-        let (this, cell) = Self::new(cache, circuit);
-        (this, cache.cache(cell))
+        cache: &C,
+    ) -> Cached<CreateFast, C> {
+        cache.cache(CreateFast::new(cache.get_cached(), circuit, self.key))
     }
 
     fn derive_server_inner(
@@ -306,7 +303,7 @@ impl OnionLayerFast {
         cell: &Cached<CreateFast, C>,
     ) -> Result<(OnionLayerData, Cached<CreatedFast, C>), errors::CircuitHandshakeError> {
         let cache = Cached::cache(cell);
-        let (this, cell) = Self::derive_server(&cell, cache)?;
+        let (this, cell) = Self::derive_server(cell, cache)?;
         Ok((this, cache.cache(cell)))
     }
 
@@ -316,12 +313,286 @@ impl OnionLayerFast {
         cell: &CreatedFast,
     ) -> Result<OnionLayerData, errors::CircuitHandshakeError> {
         let DerivedFast { kh, keys } = derive_fast(&self.key, cell.key());
-        if kh.ct_ne(cell.derived()).into() {
-            return Err(errors::CircuitHandshakeError {});
-        }
+        errors::CircuitHandshakeError::from_ct(kh.ct_eq(cell.derived()))?;
 
         Ok(derive_keys(keys))
     }
+}
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct NtorCreateData {
+    id: RelayId,
+    pk_b: EdPublicKey,
+    pk_x: EdPublicKey,
+}
+
+impl AsRef<[u8]> for NtorCreateData {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct NtorCreatedData {
+    pk_y: EdPublicKey,
+    auth: Sha256Output,
+}
+
+impl AsRef<[u8]> for NtorCreatedData {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+/// Ntor onion key.
+///
+/// Used for ntor handshake. Relays are expected to keep old onion keys (up to expiry).
+pub struct NtorOnionKey {
+    sk: StaticSecret,
+    pk: PublicKey,
+}
+
+impl From<StaticSecret> for NtorOnionKey {
+    fn from(sk: StaticSecret) -> Self {
+        Self {
+            pk: (&sk).into(),
+            sk,
+        }
+    }
+}
+
+impl Display for NtorOnionKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{}", print_ed(self.pk.as_bytes()))
+    }
+}
+
+impl Debug for NtorOnionKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        // Censor secret key
+        f.debug_struct("NtorOnionKey")
+            .field("pk", &print_ed(self.pk.as_bytes()))
+            .finish_non_exhaustive()
+    }
+}
+
+impl NtorOnionKey {
+    pub fn public_key(&self) -> &EdPublicKey {
+        self.pk.as_bytes()
+    }
+}
+
+pub struct OnionLayerNtor {
+    sk_x: StaticSecret,
+    pk_x: PublicKey,
+    pk_b: PublicKey,
+    id: RelayId,
+}
+
+impl OnionLayerNtor {
+    /// Starts handshake as client.
+    pub fn new(id: RelayId, pk: EdPublicKey) -> Self {
+        let sk_x = StaticSecret::random_from_rng(ThreadRng::default());
+
+        Self {
+            pk_x: (&sk_x).into(),
+            sk_x,
+            pk_b: pk.into(),
+            id,
+        }
+    }
+
+    /// Get client payload to be send to server.
+    ///
+    /// NOTE: It's recommended to use [`create_cell`] instead.
+    /// This is only used if you want to set the protocol ID yourself.
+    pub fn client_data(&self) -> impl AsRef<[u8]> {
+        NtorCreateData {
+            id: self.id,
+            pk_b: self.pk_b.to_bytes(),
+            pk_x: self.pk_x.to_bytes(),
+        }
+    }
+
+    /// Get CREATE2 cell to be send to server.
+    pub fn create_cell<C: CellCache + Clone>(
+        &self,
+        circuit: NonZeroU32,
+        cache: &C,
+    ) -> Cached<Create2, C> {
+        cache.cache(Create2::new(
+            cache.get_cached(),
+            circuit,
+            2,
+            self.client_data().as_ref(),
+        ))
+    }
+
+    /// Inner implementation of derive server.
+    fn derive_server_inner(
+        id: &RelayId,
+        sk: &[NtorOnionKey],
+        input: &Create2,
+        cell: FixedCell,
+    ) -> Result<(OnionLayerData, Created2), errors::CircuitHandshakeError> {
+        let Ok(data) = NtorCreateData::ref_from_bytes(input.data()) else {
+            return Err(errors::CircuitHandshakeErrorInner::CellFormatError.into());
+        };
+
+        let (derived, pk_y, auth) = ntor_derive_server(data, id, sk)?;
+        let data = NtorCreatedData { pk_y, auth };
+        Ok((derived, Created2::new(cell, input.circuit, data.as_bytes())))
+    }
+
+    /// Starts handshake as server.
+    ///
+    /// The resulting [`Created2`] cell should be send to client to finish handshake.
+    ///
+    /// ⚠ the handshake type of [`Create2`] cell is not checked.
+    /// It's the responsibility of user to dispatch handshake type.
+    ///
+    /// # Parameters
+    ///
+    /// - `id` : This relay ID.
+    /// - `sk` : List of [`NtorOnionKey`] to be used.
+    /// - `cell` : CREATE2 cell sent from client.
+    /// - `cache` : Cell cache.
+    pub fn derive_server<C: CellCache>(
+        id: &RelayId,
+        sk: &[NtorOnionKey],
+        cell: &Create2,
+        cache: &C,
+    ) -> Result<(OnionLayerData, Created2), errors::CircuitHandshakeError> {
+        Self::derive_server_inner(id, sk, cell, cache.get_cached())
+    }
+
+    /// Same as [`derive_server`], but with [`Cached`] cell instead.
+    pub fn derive_server_cached<C: CellCache + Clone>(
+        id: &RelayId,
+        sk: &[NtorOnionKey],
+        cell: &Cached<Create2, C>,
+    ) -> Result<(OnionLayerData, Cached<Created2, C>), errors::CircuitHandshakeError> {
+        let cache = Cached::cache(cell);
+        let (derived, cell) = Self::derive_server_inner(id, sk, cell, cache.get_cached())?;
+        Ok((derived, cache.cache(cell)))
+    }
+
+    /// Finish handshake as client.
+    pub fn derive_client(
+        self,
+        cell: &Created2,
+    ) -> Result<OnionLayerData, errors::CircuitHandshakeError> {
+        let Ok(data) = NtorCreatedData::ref_from_bytes(cell.data()) else {
+            return Err(errors::CircuitHandshakeErrorInner::CellFormatError.into());
+        };
+
+        let xy = self.sk_x.diffie_hellman(&PublicKey::from(data.pk_y));
+        let xb = self.sk_x.diffie_hellman(&self.pk_b);
+
+        let auth = ntor_auth(
+            &xy,
+            &xb,
+            &self.id,
+            self.pk_b.as_bytes(),
+            self.pk_x.as_bytes(),
+            &data.pk_y,
+        )?;
+        errors::CircuitHandshakeError::from_ct(auth.ct_eq(&data.auth))?;
+
+        ntor_derive(
+            xy,
+            xb,
+            &self.id,
+            self.pk_b.as_bytes(),
+            self.pk_x.as_bytes(),
+            &data.pk_y,
+        )
+    }
+}
+
+fn ntor_derive_server(
+    data: &NtorCreateData,
+    id: &RelayId,
+    sk: &[NtorOnionKey],
+) -> Result<(OnionLayerData, EdPublicKey, Sha256Output), errors::CircuitHandshakeError> {
+    if data.id != *id {
+        return Err(errors::CircuitHandshakeErrorInner::ServerRelayIdMismatch(*id).into());
+    }
+
+    let Some(sk) = sk.iter().find(|k| *k.pk.as_bytes() == data.pk_b) else {
+        return Err(errors::CircuitHandshakeErrorInner::ServerOnionKeyNotFound.into());
+    };
+
+    let sk_y = StaticSecret::random_from_rng(ThreadRng::default());
+    let pk_y = PublicKey::from(&sk_y).to_bytes();
+
+    let pk_x = PublicKey::from(data.pk_x);
+    let xy = sk_y.diffie_hellman(&pk_x);
+    let xb = sk.sk.diffie_hellman(&pk_x);
+
+    let auth = ntor_auth(&xy, &xb, id, sk.pk.as_bytes(), &data.pk_x, &pk_y)?;
+    let keys = ntor_derive(xy, xb, id, sk.pk.as_bytes(), &data.pk_x, &pk_y)?;
+    Ok((keys, pk_y, auth))
+}
+
+static PROTOID: &[u8] = b"ntor-curve25519-sha256-1";
+
+fn ntor_auth(
+    xy: &SharedSecret,
+    xb: &SharedSecret,
+    id: &RelayId,
+    pk_b: &EdPublicKey,
+    pk_x: &EdPublicKey,
+    pk_y: &EdPublicKey,
+) -> Result<Sha256Output, errors::CircuitHandshakeError> {
+    if !xy.was_contributory() || !xb.was_contributory() {
+        return Err(errors::CircuitHandshakeError::crypto());
+    }
+
+    let mut hmac = Hmac::<Sha256>::new_from_slice(b"ntor-curve25519-sha256-1:verify")?;
+    hmac.update(xy.as_bytes());
+    hmac.update(xb.as_bytes());
+    hmac.update(id);
+    hmac.update(pk_b);
+    hmac.update(pk_x);
+    hmac.update(pk_y);
+    hmac.update(PROTOID);
+    let verify: Sha256Output = hmac.finalize().into_bytes().into();
+
+    let mut hmac = Hmac::<Sha256>::new_from_slice(b"ntor-curve25519-sha256-1:mac")?;
+    hmac.update(&verify);
+    hmac.update(id);
+    hmac.update(pk_b);
+    hmac.update(pk_y);
+    hmac.update(pk_x);
+    hmac.update(PROTOID);
+    hmac.update(b"Server");
+    Ok(hmac.finalize().into_bytes().into())
+}
+
+fn ntor_derive(
+    xy: SharedSecret,
+    xb: SharedSecret,
+    id: &RelayId,
+    pk_b: &EdPublicKey,
+    pk_x: &EdPublicKey,
+    pk_y: &EdPublicKey,
+) -> Result<OnionLayerData, errors::CircuitHandshakeError> {
+    let mut kdf = HkdfExtract::<Sha256>::new(Some(b"ntor-curve25519-sha256-1:key_extract"));
+    kdf.input_ikm(xy.as_bytes());
+    kdf.input_ikm(xb.as_bytes());
+    kdf.input_ikm(id);
+    kdf.input_ikm(pk_b);
+    kdf.input_ikm(pk_x);
+    kdf.input_ikm(pk_y);
+    kdf.input_ikm(PROTOID);
+    let (_, kdf) = kdf.finalize();
+
+    let mut out = DerivedKeys::new_zeroed();
+    kdf.expand_multi_info(&[PROTOID, b":key_expand"], out.as_mut_bytes())?;
+    Ok(derive_keys(out))
 }
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -354,7 +625,7 @@ fn derive_fast(key_x: &Sha1Output, key_y: &Sha1Output) -> DerivedFast {
 }
 
 fn kdf_tor(key: &[&[u8]], out: &mut [u8]) {
-    let mut hasher = Context::new(&SHA256);
+    let mut hasher = Sha256::new();
     for k in key {
         hasher.update(k);
     }
@@ -365,14 +636,8 @@ fn kdf_tor(key: &[&[u8]], out: &mut [u8]) {
 
         let mut hasher = hasher.clone();
         hasher.update(from_ref(&n));
-        let hash = hasher.finish();
-        let hash = hash.as_ref();
-        debug_assert!(o.len() <= hash.len());
-        o.copy_from_slice(if o.len() == hash.len() {
-            hash
-        } else {
-            &hash[..o.len()]
-        });
+        let hash = Sha256Output::from(hasher.finalize());
+        o.copy_from_slice(&hash[..o.len()]);
     }
 }
 
@@ -396,7 +661,8 @@ mod tests {
 
         // Do handshake
         let (mut client, mut server) = {
-            let (client, cell) = OnionLayerFast::with_cache(&cache, id);
+            let client = OnionLayerFast::new();
+            let cell = client.create_cell(id, &cache);
             let (server, cell) = OnionLayerFast::derive_server_cached(&cell).unwrap();
             let client = client.derive_client(&cell).unwrap();
             (client, server)

@@ -4,12 +4,14 @@
 
 use std::time::{Duration, SystemTime};
 
-use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY, SHA256, digest};
-use ring::signature::{ED25519, VerificationAlgorithm};
+use digest::Digest;
+use ed25519_dalek::VerifyingKey;
 use rsa::pkcs1::EncodeRsaPublicKey;
 use rsa::pkcs1v15::Pkcs1v15Sign;
 use rsa::pkcs8::DecodePublicKey;
 use rustls::pki_types::CertificateDer;
+use sha1::Sha1;
+use sha2::Sha256;
 use webpki::EndEntityCert;
 use zerocopy::byteorder::big_endian::{U16, U32};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
@@ -163,15 +165,11 @@ impl<'a> UnverifiedEdCert<'a> {
                 .get_unchecked(..(sig as *const EdSignature).byte_offset_from(self.data) as usize)
         };
 
-        if ED25519
-            .verify(pk[..].into(), msg.into(), sig[..].into())
-            .is_ok()
-            && verify_exp(self.header.expiry.get())
-        {
-            Ok(())
-        } else {
-            Err(errors::CertVerifyError)
+        VerifyingKey::from_bytes(pk)?.verify_strict(msg, &sig.into())?;
+        if !verify_exp(self.header.expiry.get()) {
+            return Err(errors::CertVerifyError);
         }
+        Ok(())
     }
 }
 
@@ -233,12 +231,12 @@ impl UnverifiedRsaCert {
     ///
     /// Returns verified certificate header.
     pub fn verify(&self, pk: &RsaPublicKey) -> Result<&RsaCertHeader, errors::CertVerifyError> {
-        let mut hasher = Context::new(&SHA256);
+        let mut hasher = Sha256::new();
         hasher.update(Self::PREFIX);
         hasher.update(self.header.as_bytes());
         match pk.verify(
             Pkcs1v15Sign::new_unprefixed(),
-            hasher.finish().as_ref(),
+            &hasher.finalize(),
             &self.sig,
         ) {
             Ok(()) if verify_exp(self.header.expiry.get()) => Ok(&self.header),
@@ -259,15 +257,12 @@ pub fn extract_rsa_from_x509(
         .map_err(|_| errors::CertFormatError)?
         .subject_public_key_info();
     let pk = RsaPublicKey::from_public_key_der(&spki).map_err(|_| errors::CertFormatError)?;
-    let id: RelayId = digest(
-        &SHA1_FOR_LEGACY_USE_ONLY,
+    let id: RelayId = Sha1::digest(
         pk.to_pkcs1_der()
             .map_err(|_| errors::CertFormatError)?
             .as_bytes(),
     )
-    .as_ref()
-    .try_into()
-    .unwrap();
+    .into();
     Ok((pk, id))
 }
 
@@ -275,9 +270,8 @@ pub fn extract_rsa_from_x509(
 mod tests {
     use super::*;
 
+    use ed25519_dalek::{Signer, SigningKey};
     use rand::prelude::*;
-    use ring::rand::SystemRandom;
-    use ring::signature::{Ed25519KeyPair, KeyPair};
     use rsa::RsaPrivateKey;
     use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 
@@ -300,11 +294,11 @@ mod tests {
                 key,
                 expiry: u32::MAX.into(),
             };
-            let mut hasher = Context::new(&SHA256);
+            let mut hasher = Sha256::new();
             hasher.update(UnverifiedRsaCert::PREFIX);
             hasher.update(cert.as_bytes());
             let sig = private_key
-                .sign(Pkcs1v15Sign::new_unprefixed(), hasher.finish().as_ref())
+                .sign(Pkcs1v15Sign::new_unprefixed(), &hasher.finalize())
                 .unwrap();
 
             let mut v = Vec::with_capacity(cert.as_bytes().len() + 1 + sig.len());
@@ -326,12 +320,9 @@ mod tests {
     #[test]
     fn test_ed_cert() {
         let mut rng = ThreadRng::default();
-        let private_key = {
-            let key = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
-            println!("Private key:{}", print_hex(key.as_ref()));
-            Ed25519KeyPair::from_pkcs8(key.as_ref()).unwrap()
-        };
-        let public_key = private_key.public_key();
+        let private_key = SigningKey::generate(&mut rng);
+        println!("Private key:{}", print_hex(private_key.as_bytes()));
+        let public_key = private_key.verifying_key();
 
         // Sign
         let key = rng.r#gen::<EdPublicKey>();
@@ -348,8 +339,8 @@ mod tests {
             v.push(1);
             v.extend_from_slice(cert.as_bytes());
 
-            let sig = private_key.sign(&v);
-            v.extend_from_slice(sig.as_ref());
+            let sig = private_key.sign(&v).to_bytes();
+            v.extend(sig);
             v
         };
         println!("Cert: {}", print_hex(&cert));

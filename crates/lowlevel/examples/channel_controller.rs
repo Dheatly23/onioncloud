@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Error as AnyError, Result as AnyResult, bail};
+use digest::Digest;
 use onioncloud_lowlevel::cache::{Cached, CellCache, StandardCellCache, cast};
 use onioncloud_lowlevel::cell::auth::AuthChallenge;
 use onioncloud_lowlevel::cell::certs::Certs;
@@ -32,7 +33,7 @@ use onioncloud_lowlevel::errors::CellError;
 use onioncloud_lowlevel::linkver::StandardLinkver;
 use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
 use onioncloud_lowlevel::util::sans_io::Handle;
-use ring::digest::{SHA256, digest};
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tracing::{debug, info, instrument, warn};
 
@@ -333,8 +334,7 @@ impl<'a>
                                     let Some(link_cert) = input.link_cert() else {
                                         bail!("link certificate not provided")
                                     };
-                                    let hash: Sha256Output =
-                                        digest(&SHA256, link_cert).as_ref().try_into().unwrap();
+                                    let hash = Sha256Output::from(Sha256::digest(link_cert));
                                     if subject.ct_ne(&hash).into() {
                                         bail!("link certificate hash does not match")
                                     }

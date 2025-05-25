@@ -12,31 +12,33 @@ base64ct.workspace = true
 cipher.workspace = true
 crossbeam-queue.workspace = true
 ctr.workspace = true
+digest.workspace = true
+ed25519-dalek.workspace = true
 futures-channel.workspace = true
 futures-core.workspace = true
 futures-io.workspace = true
 futures-sink.workspace = true
+futures-util.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
 once_cell.workspace = true
 pin-project.workspace = true
 rand.workspace = true
-ring.workspace = true
 rsa.workspace = true
-rustls.workspace = true
 rustls-webpki.workspace = true
+rustls.workspace = true
 scopeguard.workspace = true
+sha1.workspace = true
+sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
+x25519-dalek.workspace = true
 
 [dependencies.flume]
 workspace = true
 features = [
   "async",
-]
-
-[dependencies.futures-util]
-workspace = true
-features = [
-  "sink",
 ]
 
 [dependencies.tokio]
@@ -52,15 +54,6 @@ features = [
 [dependencies.tokio-util]
 workspace = true
 optional = true
-features = [
-  "compat",
-]
-
-[dependencies.tracing]
-workspace = true
-features = [
-  "attributes",
-]
 
 [dependencies.zerocopy]
 workspace = true

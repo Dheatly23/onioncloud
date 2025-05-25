@@ -5,7 +5,8 @@ use std::net::{IpAddr, SocketAddr};
 use thiserror::Error;
 
 use crate::cell::CellHeader;
-use crate::util::print_list;
+use crate::crypto::relay::RelayId;
+use crate::util::{print_hex, print_list};
 
 macro_rules! display2debug {
     ($i:ident) => {
@@ -132,31 +133,6 @@ pub enum SendControlMsgError {
 
 display2debug! {SendControlMsgError}
 
-/// Error in parsing relay ID.
-pub struct RelayIdParseError(pub(crate) ParseRelayIdInner);
-
-impl Display for RelayIdParseError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        Display::fmt(&self.0, f)
-    }
-}
-
-display2debug! {RelayIdParseError}
-
-impl Error for RelayIdParseError {}
-
-#[derive(Error)]
-pub(crate) enum ParseRelayIdInner {
-    #[error("cannot represent relay ID from empty string")]
-    Empty,
-    #[error("string is too short")]
-    TooShort,
-    #[error("invalid digit found in string")]
-    InvalidDigit,
-}
-
-display2debug! {ParseRelayIdInner}
-
 /// Certificate format error.
 ///
 /// It **only** covers format-related error.
@@ -179,28 +155,11 @@ pub struct CertVerifyError;
 
 display2debug! {CertVerifyError}
 
-/// Ed25519 certificate subject/key type mismatch.
-pub struct CertTypeError(pub(crate) CertTypeInner);
-
-impl Display for CertTypeError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        Display::fmt(&self.0, f)
+impl From<ed25519_dalek::SignatureError> for CertVerifyError {
+    fn from(_: ed25519_dalek::SignatureError) -> Self {
+        Self
     }
 }
-
-display2debug! {CertTypeError}
-
-impl Error for CertTypeError {}
-
-#[derive(Error)]
-pub(crate) enum CertTypeInner {
-    #[error("certificate type mismatch (expected {expect}, got {actual})")]
-    CertTy { expect: u8, actual: u8 },
-    #[error("certificate key mismatch (expected {expect}, got {actual})")]
-    KeyTy { expect: u8, actual: u8 },
-}
-
-display2debug! {CertTypeInner}
 
 /// Unexpected peer socket address.
 #[derive(Error)]
@@ -290,9 +249,66 @@ pub struct CellDigestError;
 display2debug! {CellDigestError}
 
 /// Generic circuit handshake error.
-#[derive(Error, Default)]
-#[error("circuit handshake error")]
-#[non_exhaustive]
-pub struct CircuitHandshakeError {}
+#[derive(Default)]
+pub struct CircuitHandshakeError(pub(crate) CircuitHandshakeErrorInner);
+
+impl Display for CircuitHandshakeError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "error in circuit handshake: {}", self.0)
+    }
+}
+
+impl Error for CircuitHandshakeError {}
 
 display2debug! {CircuitHandshakeError}
+
+#[derive(Error, Default)]
+pub(crate) enum CircuitHandshakeErrorInner {
+    #[error("cell format error")]
+    CellFormatError,
+    #[error("cryptographic operation error")]
+    CryptoError,
+    #[error("authentication error")]
+    AuthError,
+    #[error("relay mismatch (expected {})", print_hex(.0))]
+    ServerRelayIdMismatch(RelayId),
+    #[error("onion key not found or expired")]
+    ServerOnionKeyNotFound,
+    #[error("unknown error")]
+    #[default]
+    Other,
+}
+
+display2debug! {CircuitHandshakeErrorInner}
+
+impl From<CircuitHandshakeErrorInner> for CircuitHandshakeError {
+    fn from(v: CircuitHandshakeErrorInner) -> Self {
+        Self(v)
+    }
+}
+
+impl From<cipher::InvalidLength> for CircuitHandshakeError {
+    fn from(_: cipher::InvalidLength) -> Self {
+        Self(CircuitHandshakeErrorInner::CryptoError)
+    }
+}
+
+impl From<hkdf::InvalidLength> for CircuitHandshakeError {
+    fn from(_: hkdf::InvalidLength) -> Self {
+        Self(CircuitHandshakeErrorInner::CryptoError)
+    }
+}
+
+impl CircuitHandshakeError {
+    pub fn from_ct(v: subtle::Choice) -> Result<(), Self> {
+        if v.into() {
+            Ok(())
+        } else {
+            Err(Self(CircuitHandshakeErrorInner::AuthError))
+        }
+    }
+
+    pub const fn crypto() -> Self {
+        Self(CircuitHandshakeErrorInner::CryptoError)
+    }
+}
