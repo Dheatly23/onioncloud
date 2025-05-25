@@ -97,6 +97,11 @@ pub trait RelayLike: Sealed + AsRef<[u8; FIXED_CELL_SIZE]> + AsMut<[u8; FIXED_CE
         cast(self).header.len.get()
     }
 
+    /// Returns [`true`] if length is 0.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Get payload.
     ///
     /// # Panics
