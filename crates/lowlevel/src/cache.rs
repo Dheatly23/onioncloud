@@ -252,6 +252,13 @@ impl<T: Cachable, C: CellCache> Cached<T, C> {
         &this.cache
     }
 
+    /// Split reference into cell cache and cell.
+    ///
+    /// Useful for using cache for other cells.
+    pub fn split_mut(this: &mut Self) -> (&mut T, &C) {
+        (&mut this.cell, &this.cache)
+    }
+
     /// Unwraps into inner value without caching.
     ///
     /// Useful to manipulate inner value.

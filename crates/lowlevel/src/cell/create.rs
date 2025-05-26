@@ -183,14 +183,12 @@ impl Create2 {
 
     /// Gets handshake type.
     pub fn handshake_type(&self) -> u16 {
-        let Create2Cell { header, .. } = transmute_ref!(self.cell.data());
-        header.ty.get()
+        self.cast().header.ty.get()
     }
 
     /// Gets handshake length.
     pub fn len(&self) -> u16 {
-        let Create2Cell { header, .. } = transmute_ref!(self.cell.data());
-        header.len.get()
+        self.cast().header.len.get()
     }
 
     /// Checks if there is no payload.
@@ -200,8 +198,14 @@ impl Create2 {
 
     /// Gets handshake data.
     pub fn data(&self) -> &[u8] {
-        let Create2Cell { header, data } = transmute_ref!(self.cell.data());
+        let Create2Cell { header, data } = self.cast();
         &data[..header.len.get().into()]
+    }
+
+    /// Gets handshake data mutably.
+    pub fn data_mut(&mut self) -> &mut [u8] {
+        let Create2Cell { header, data } = transmute_mut!(self.cell.data_mut());
+        &mut data[..header.len.get().into()]
     }
 
     /// Unwraps into inner [`FixedCell`].
@@ -212,6 +216,10 @@ impl Create2 {
     fn check(data: &[u8; FIXED_CELL_SIZE]) -> bool {
         let Create2Cell { header, data } = transmute_ref!(data);
         usize::from(header.len.get()) <= data.len()
+    }
+
+    fn cast(&self) -> &Create2Cell {
+        transmute_ref!(self.cell.data())
     }
 }
 
@@ -305,10 +313,36 @@ impl Created2 {
         unsafe { Self::from_cell(circuit, cell) }
     }
 
+    /// Creates new CREATED2 cell with multipart data.
+    ///
+    /// # Parameters
+    ///
+    /// - `cell` : Cached [`FixedCell`].
+    /// - `circuit` : Circuit ID.
+    /// - `data` : Handshake data in multiple byte slices.
+    ///
+    /// # Panics
+    ///
+    /// Panics if data does not fit the cell.
+    pub fn new_multipart(mut cell: FixedCell, circuit: NonZeroU32, data: &[&[u8]]) -> Self {
+        let Created2Cell { header, data: out } = transmute_mut!(cell.data_mut());
+        let mut len = 0;
+        let mut out = &mut out[..];
+        for v in data {
+            let (a, b) = out.split_at_mut(v.len());
+            a.copy_from_slice(v);
+            out = b;
+            len += v.len();
+        }
+        header.len.set(len.try_into().expect("data must fit cell"));
+
+        // SAFETY: Data is valid
+        unsafe { Self::from_cell(circuit, cell) }
+    }
+
     /// Gets handshake length.
     pub fn len(&self) -> u16 {
-        let Created2Cell { header, .. } = transmute_ref!(self.cell.data());
-        header.len.get()
+        self.cast().header.len.get()
     }
 
     /// Checks if there is no payload.
@@ -318,8 +352,14 @@ impl Created2 {
 
     /// Gets handshake data.
     pub fn data(&self) -> &[u8] {
-        let Created2Cell { header, data } = transmute_ref!(self.cell.data());
+        let Created2Cell { header, data } = self.cast();
         &data[..header.len.get().into()]
+    }
+
+    /// Gets handshake data mutably.
+    pub fn data_mut(&mut self) -> &mut [u8] {
+        let Created2Cell { header, data } = transmute_mut!(self.cell.data_mut());
+        &mut data[..header.len.get().into()]
     }
 
     /// Unwraps into inner [`FixedCell`].
@@ -330,6 +370,10 @@ impl Created2 {
     fn check(data: &[u8; FIXED_CELL_SIZE]) -> bool {
         let Created2Cell { header, data } = transmute_ref!(data);
         usize::from(header.len.get()) <= data.len()
+    }
+
+    fn cast(&self) -> &Created2Cell {
+        transmute_ref!(self.cell.data())
     }
 }
 

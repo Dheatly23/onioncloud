@@ -4,13 +4,13 @@ use std::num::NonZeroU32;
 use std::slice::from_ref;
 
 use cipher::{KeyIvInit, StreamCipher};
-use digest::{Digest, ExtendableOutput, Mac, XofReader};
+use digest::{Digest, ExtendableOutput, Mac};
 use hkdf::HkdfExtract;
 use hmac::Hmac;
 use rand::prelude::*;
 use sha1::Sha1;
 use sha2::Sha256;
-use sha3::Shake256;
+use sha3::{Sha3_256, Shake256};
 use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout, Unaligned};
@@ -671,16 +671,13 @@ impl OnionLayerNtor3 {
             return Err(errors::CircuitHandshakeError::crypto());
         }
 
-        let derived = ntor3_derive_client_mac(&xb, id, &pk_x, pk, verify);
-        Cipher256::new(&derived.enc.into(), &Default::default()).try_apply_keystream(client_msg)?;
-
         Ok(Self {
+            mac: ntor3_client_derive_client_mac(&xb, id, pk_x.as_bytes(), pk, client_msg, verify)?,
             sk_x,
             pk_x,
             pk_b,
             xb,
             id: *id,
-            mac: derived.mac,
         })
     }
 
@@ -750,9 +747,233 @@ impl OnionLayerNtor3 {
         let (ret, cell) = Self::new_circuit_inner(id, pk, client_msg, circuit, cache.get_cached())?;
         Ok((ret, cache.cache(cell)))
     }
+
+    pub fn derive_server_inner<'a>(
+        id: &'a RelayId,
+        sk: &'a [NtorOnionKey],
+        input: &'a mut [u8],
+    ) -> Result<(OnionLayerNtor3Server<'a>, &'a mut [u8]), errors::CircuitHandshakeError> {
+        OnionLayerNtor3Server::derive(id, sk, input, NTOR3_CIRC_VERIFY)
+    }
+
+    pub fn derive_server<
+        'a,
+        E: From<errors::CircuitHandshakeError>,
+        C: CellCache,
+        O: 'a + AsRef<[u8]> + AsMut<[u8]>,
+    >(
+        id: &'a RelayId,
+        sk: &'a [NtorOnionKey],
+        cell: &'a mut Create2,
+        cache: &C,
+        server_fn: impl FnOnce(&'a mut [u8]) -> Result<O, E>,
+    ) -> Result<(OnionLayerData, Created2), E> {
+        let circuit = cell.circuit;
+        let (server, client_msg) = Self::derive_server_inner(id, sk, cell.data_mut())?;
+        let mut server_msg = server_fn(client_msg)?;
+        let (derived, data) = server.finalize(server_msg.as_mut())?;
+        Ok((
+            derived,
+            Created2::new_multipart(
+                cache.get_cached(),
+                circuit,
+                &[data.as_ref(), server_msg.as_ref()],
+            ),
+        ))
+    }
+
+    pub fn derive_server_cached<
+        'a,
+        E: From<errors::CircuitHandshakeError>,
+        C: CellCache + Clone,
+        O: 'a + AsRef<[u8]> + AsMut<[u8]>,
+    >(
+        id: &'a RelayId,
+        sk: &'a [NtorOnionKey],
+        cell: &'a mut Cached<Create2, C>,
+        server_fn: impl FnOnce(&'a mut [u8]) -> Result<O, E>,
+    ) -> Result<(OnionLayerData, Cached<Created2, C>), E> {
+        let (cell, cache) = Cached::split_mut(cell);
+        let (derived, cell) = Self::derive_server(id, sk, cell, cache, server_fn)?;
+        Ok((derived, cache.cache(cell)))
+    }
+
+    pub fn derive_client(
+        self,
+        cell: &mut Created2,
+    ) -> Result<(OnionLayerData, &mut [u8]), errors::CircuitHandshakeError> {
+        let Ok((header, server_msg)) = NtorCreatedData::mut_from_prefix(cell.data_mut()) else {
+            return Err(errors::CircuitHandshakeErrorInner::CellFormatError.into());
+        };
+
+        let xy = self.sk_x.diffie_hellman(&header.pk_y.into());
+        if !xy.was_contributory() {
+            return Err(errors::CircuitHandshakeError::crypto());
+        }
+
+        let (keys, verify) = ntor3_derive_keystream(
+            &xy,
+            &self.xb,
+            &self.id,
+            self.pk_b.as_bytes(),
+            self.pk_x.as_bytes(),
+            &header.pk_y,
+            NTOR3_CIRC_VERIFY,
+        );
+        let auth = ntor3_derive_server_mac(
+            &self.id,
+            self.pk_b.as_bytes(),
+            self.pk_x.as_bytes(),
+            &header.pk_y,
+            &verify,
+            &self.mac,
+            server_msg,
+        );
+        errors::CircuitHandshakeError::from_ct(auth.ct_eq(&header.auth))?;
+
+        Cipher256::new(&keys.enc.into(), &Default::default()).try_apply_keystream(server_msg)?;
+
+        Ok((derive_keys(keys.keys), server_msg))
+    }
+}
+
+pub struct OnionLayerNtor3Server<'a> {
+    pk_y: PublicKey,
+    xb: SharedSecret,
+    xy: SharedSecret,
+
+    id: &'a RelayId,
+    b: &'a NtorOnionKey,
+    pk_x: &'a EdPublicKey,
+    verify: &'a [u8],
+    mac: &'a Sha256Output,
+}
+
+impl<'a> OnionLayerNtor3Server<'a> {
+    pub fn derive(
+        id: &'a RelayId,
+        sk: &'a [NtorOnionKey],
+        input: &'a mut [u8],
+        verify: &'a [u8],
+    ) -> Result<(Self, &'a mut [u8]), errors::CircuitHandshakeError> {
+        let Some((header, (client_msg, mac))) = Ntor3CreateHeader::mut_from_prefix(input)
+            .ok()
+            .and_then(|(header, rest)| Some((header, Sha256Output::mut_from_suffix(rest).ok()?)))
+        else {
+            return Err(errors::CircuitHandshakeErrorInner::CellFormatError.into());
+        };
+
+        if header.id != *id {
+            return Err(errors::CircuitHandshakeErrorInner::ServerRelayIdMismatch(*id).into());
+        }
+
+        let Some(sk) = sk.iter().find(|k| *k.pk.as_bytes() == header.pk_b) else {
+            return Err(errors::CircuitHandshakeErrorInner::ServerOnionKeyNotFound.into());
+        };
+
+        let pk_x = PublicKey::from(header.pk_x);
+        let xb = sk.sk.diffie_hellman(&pk_x);
+        ntor3_server_decrypt_client_msg(
+            &xb,
+            id,
+            &header.pk_x,
+            sk.pk.as_bytes(),
+            client_msg,
+            mac,
+            verify,
+        )?;
+
+        let sk_y = StaticSecret::random_from_rng(ThreadRng::default());
+        let pk_y = PublicKey::from(&sk_y);
+        let xy = sk_y.diffie_hellman(&pk_x);
+        if !xy.was_contributory() {
+            return Err(errors::CircuitHandshakeError::crypto());
+        }
+
+        Ok((
+            Self {
+                pk_y,
+                xb,
+                xy,
+                id,
+                b: sk,
+                pk_x: &header.pk_x,
+                verify,
+                mac,
+            },
+            client_msg,
+        ))
+    }
+
+    pub fn finalize(
+        self,
+        server_msg: &mut [u8],
+    ) -> Result<(OnionLayerData, impl use<'a> + AsRef<[u8]>), errors::CircuitHandshakeError> {
+        let (keys, verify) = ntor3_derive_keystream(
+            &self.xy,
+            &self.xb,
+            self.id,
+            self.b.pk.as_bytes(),
+            self.pk_x,
+            self.pk_y.as_bytes(),
+            self.verify,
+        );
+
+        Cipher256::new(&keys.enc.into(), &Default::default()).try_apply_keystream(server_msg)?;
+
+        let auth = ntor3_derive_server_mac(
+            self.id,
+            self.b.pk.as_bytes(),
+            self.pk_x,
+            self.pk_y.as_bytes(),
+            &verify,
+            self.mac,
+            server_msg,
+        );
+
+        Ok((
+            derive_keys(keys.keys),
+            NtorCreatedData {
+                pk_y: self.pk_y.to_bytes(),
+                auth,
+            },
+        ))
+    }
 }
 
 static PROTOID3: &[u8] = b"ntor3-curve25519-sha3_256-1";
+
+fn update_encap(out: &mut impl digest::Update, data: &[&[u8]]) {
+    out.update(
+        &data
+            .iter()
+            .map(|v| v.len() as u64)
+            .sum::<u64>()
+            .to_be_bytes(),
+    );
+    for v in data {
+        out.update(v);
+    }
+}
+
+fn ntor3_hash(key_suffix: &[u8]) -> Sha3_256 {
+    let mut hasher = Sha3_256::default();
+    update_encap(&mut hasher, &[PROTOID3, key_suffix]);
+    hasher
+}
+
+fn ntor3_kdf(key_suffix: &[u8]) -> Shake256 {
+    let mut hasher = Shake256::default();
+    update_encap(&mut hasher, &[PROTOID3, key_suffix]);
+    hasher
+}
+
+fn ntor3_mac(key_suffix: &[u8], key: &[u8]) -> Sha3_256 {
+    let mut hasher = Sha3_256::default();
+    update_encap(&mut hasher, &[PROTOID3, key_suffix]);
+    update_encap(&mut hasher, &[key]);
+    hasher
+}
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
@@ -761,27 +982,147 @@ struct Ntor3DerivedClientMsg {
     mac: Sha256Output,
 }
 
-fn ntor3_derive_client_mac(
+fn ntor3_derive_client_mac_phase1(
     xb: &SharedSecret,
     id: &RelayId,
-    pk_x: &PublicKey,
+    pk_x: &EdPublicKey,
     pk_b: &EdPublicKey,
     ver: &[u8],
 ) -> Ntor3DerivedClientMsg {
     use digest::Update;
 
-    let mut hasher = Shake256::default();
-    hasher.update(xb.as_bytes());
-    hasher.update(id);
-    hasher.update(pk_x.as_bytes());
-    hasher.update(pk_b);
-    hasher.update(PROTOID3);
-    hasher.update(&(ver.len() as u64).to_be_bytes());
-    hasher.update(ver);
+    let mut kdf = ntor3_kdf(b":kdf_phase1");
+    kdf.update(xb.as_bytes());
+    kdf.update(id);
+    kdf.update(pk_x);
+    kdf.update(pk_b);
+    kdf.update(PROTOID3);
+    update_encap(&mut kdf, &[ver]);
 
     let mut out = Ntor3DerivedClientMsg::new_zeroed();
-    hasher.finalize_xof_into(out.as_mut_bytes());
+    kdf.finalize_xof_into(out.as_mut_bytes());
     out
+}
+
+fn ntor3_derive_client_mac(
+    id: &RelayId,
+    pk_x: &EdPublicKey,
+    pk_b: &EdPublicKey,
+    mac: &Sha256Output,
+    client_msg: &[u8],
+) -> Sha256Output {
+    let mut mac = ntor3_mac(b":msg_mac", mac);
+    mac.update(id);
+    mac.update(pk_b);
+    mac.update(pk_x);
+    mac.update(client_msg);
+    mac.finalize().into()
+}
+
+fn ntor3_client_derive_client_mac(
+    xb: &SharedSecret,
+    id: &RelayId,
+    pk_x: &EdPublicKey,
+    pk_b: &EdPublicKey,
+    client_msg: &mut [u8],
+    ver: &[u8],
+) -> Result<Sha256Output, cipher::StreamCipherError> {
+    let Ntor3DerivedClientMsg { enc, mac } =
+        ntor3_derive_client_mac_phase1(xb, id, pk_x, pk_b, ver);
+
+    Cipher256::new(&enc.into(), &Default::default()).try_apply_keystream(client_msg)?;
+    Ok(ntor3_derive_client_mac(id, pk_x, pk_b, &mac, client_msg))
+}
+
+fn ntor3_server_decrypt_client_msg(
+    xb: &SharedSecret,
+    id: &RelayId,
+    pk_x: &EdPublicKey,
+    pk_b: &EdPublicKey,
+    client_msg: &mut [u8],
+    mac_value: &Sha256Output,
+    ver: &[u8],
+) -> Result<(), errors::CircuitHandshakeError> {
+    if !xb.was_contributory() {
+        return Err(errors::CircuitHandshakeError::crypto());
+    }
+
+    let Ntor3DerivedClientMsg { enc, mac } =
+        ntor3_derive_client_mac_phase1(xb, id, pk_x, pk_b, ver);
+
+    let mac = ntor3_derive_client_mac(id, pk_x, pk_b, &mac, client_msg);
+    errors::CircuitHandshakeError::from_ct(mac.ct_eq(mac_value))?;
+
+    Cipher256::new(&enc.into(), &Default::default()).try_apply_keystream(client_msg)?;
+    Ok(())
+}
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct Ntor3DerivedKeystream {
+    enc: CipherKey256,
+    keys: DerivedKeys,
+}
+
+fn ntor3_derive_keystream(
+    xy: &SharedSecret,
+    xb: &SharedSecret,
+    id: &RelayId,
+    pk_b: &EdPublicKey,
+    pk_x: &EdPublicKey,
+    pk_y: &EdPublicKey,
+    ver: &[u8],
+) -> (Ntor3DerivedKeystream, Sha256Output) {
+    let mut hasher = ntor3_hash(b":key_seed");
+    hasher.update(xy.as_bytes());
+    hasher.update(xb.as_bytes());
+    hasher.update(id);
+    hasher.update(pk_b);
+    hasher.update(pk_x);
+    hasher.update(pk_y);
+    hasher.update(PROTOID3);
+    update_encap(&mut hasher, &[ver]);
+    let key_seed = hasher.finalize();
+
+    let mut hasher = ntor3_hash(b":verify");
+    hasher.update(xy.as_bytes());
+    hasher.update(xb.as_bytes());
+    hasher.update(id);
+    hasher.update(pk_b);
+    hasher.update(pk_x);
+    hasher.update(pk_y);
+    hasher.update(PROTOID3);
+    update_encap(&mut hasher, &[ver]);
+    let verify = hasher.finalize();
+
+    let mut kdf = ntor3_kdf(b":kdf_final");
+    digest::Update::update(&mut kdf, &key_seed);
+    let mut out = Ntor3DerivedKeystream::new_zeroed();
+    kdf.finalize_xof_into(out.as_mut_bytes());
+
+    (out, verify.into())
+}
+
+fn ntor3_derive_server_mac(
+    id: &RelayId,
+    pk_b: &EdPublicKey,
+    pk_x: &EdPublicKey,
+    pk_y: &EdPublicKey,
+    verify: &Sha256Output,
+    mac: &Sha256Output,
+    msg: &[u8],
+) -> Sha256Output {
+    let mut hasher = ntor3_hash(b":auth_final");
+    hasher.update(verify);
+    hasher.update(id);
+    hasher.update(pk_b);
+    hasher.update(pk_y);
+    hasher.update(pk_x);
+    hasher.update(mac);
+    hasher.update(msg);
+    hasher.update(PROTOID3);
+    hasher.update(b"Server");
+    hasher.finalize().into()
 }
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -854,6 +1195,76 @@ mod tests {
             let cell = client.create_cell(id, &cache);
             let (server, cell) = OnionLayerFast::derive_server_cached(&cell).unwrap();
             let client = client.derive_client(&cell).unwrap();
+            (client, server)
+        };
+
+        // Validate by simulating a cell.
+        static DATA: &[u8] = b"test data";
+        let mut cell = Relay::new(cache.get_cached(), id, 0, 0xdead, DATA);
+        client.encrypt.encrypt_forward(cell.as_mut()).unwrap();
+        server.encrypt.decrypt_forward(cell.as_mut()).unwrap();
+
+        assert_eq!(cell.command(), 0);
+        assert_eq!(cell.stream(), 0xdead);
+        assert_eq!(cell.data(), DATA);
+    }
+
+    #[test]
+    fn test_handshake_ntor() {
+        let cache = NullCellCache;
+        let id = NonZeroU32::new(1).unwrap();
+
+        // Do handshake
+        let (mut client, mut server) = {
+            let mut rng = ThreadRng::default();
+            let server_id = rng.r#gen::<RelayId>();
+            let server_keys = [NtorOnionKey::from(StaticSecret::random_from_rng(&mut rng))];
+            let server_pk = server_keys[0].public_key();
+
+            let client = OnionLayerNtor::new(&server_id, server_pk);
+            let cell = client.create_cell(id, &cache);
+            let (server, cell) =
+                OnionLayerNtor::derive_server_cached(&server_id, &server_keys, &cell).unwrap();
+            let client = client.derive_client(&cell).unwrap();
+            (client, server)
+        };
+
+        // Validate by simulating a cell.
+        static DATA: &[u8] = b"test data";
+        let mut cell = Relay::new(cache.get_cached(), id, 0, 0xdead, DATA);
+        client.encrypt.encrypt_forward(cell.as_mut()).unwrap();
+        server.encrypt.decrypt_forward(cell.as_mut()).unwrap();
+
+        assert_eq!(cell.command(), 0);
+        assert_eq!(cell.stream(), 0xdead);
+        assert_eq!(cell.data(), DATA);
+    }
+
+    #[test]
+    fn test_handshake_ntor3() {
+        let cache = NullCellCache;
+        let id = NonZeroU32::new(1).unwrap();
+
+        // Do handshake
+        let (mut client, mut server) = {
+            let mut rng = ThreadRng::default();
+            let server_id = rng.r#gen::<RelayId>();
+            let server_keys = [NtorOnionKey::from(StaticSecret::random_from_rng(&mut rng))];
+            let server_pk = server_keys[0].public_key();
+
+            let mut client_msg = [1, 2, 3, 4];
+            let (client, mut cell) =
+                OnionLayerNtor3::new_create(&server_id, server_pk, &mut client_msg, id, &cache)
+                    .unwrap();
+            let (server, mut cell) =
+                OnionLayerNtor3::derive_server_cached(&server_id, &server_keys, &mut cell, |v| {
+                    assert_eq!(v, [1, 2, 3, 4]);
+                    v.reverse();
+                    Ok::<_, errors::CircuitHandshakeError>(v)
+                })
+                .unwrap();
+            let (client, server_msg) = client.derive_client(&mut cell).unwrap();
+            assert_eq!(server_msg, [4, 3, 2, 1]);
             (client, server)
         };
 
