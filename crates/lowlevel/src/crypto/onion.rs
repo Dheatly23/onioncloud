@@ -256,6 +256,30 @@ pub struct OnionLayerData {
 /// CREATE_FAST/CREATED_FAST handshake.
 ///
 /// Must only be used for one-hop directory circuit.
+///
+/// # Example
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use onioncloud_lowlevel::crypto::onion::OnionLayerFast;
+/// use onioncloud_lowlevel::cache::StandardCellCache;
+///
+/// let cache = Arc::<StandardCellCache>::default();
+/// let id = std::num::NonZeroU32::new(1).unwrap();
+///
+/// // Start client
+/// let client = OnionLayerFast::new();
+///
+/// // Send CREATE2 cell to server
+/// let cell = client.create_cell(id, &cache);
+///
+/// // Start server and send CREATED2 cell to client
+/// let (server, cell) = OnionLayerFast::derive_server_cached(&cell).unwrap();
+///
+/// // Finish client
+/// let client = client.derive_client(&cell).unwrap();
+/// ```
 pub struct OnionLayerFast {
     key: Sha1Output,
 }
@@ -387,6 +411,40 @@ impl NtorOnionKey {
     }
 }
 
+/// Ntor handshake.
+///
+/// # Example
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use rand::prelude::*;
+/// use x25519_dalek::StaticSecret;
+/// use onioncloud_lowlevel::crypto::onion::{OnionLayerNtor, NtorOnionKey};
+/// use onioncloud_lowlevel::crypto::relay::RelayId;
+/// use onioncloud_lowlevel::cache::StandardCellCache;
+///
+/// let cache = Arc::<StandardCellCache>::default();
+/// let id = std::num::NonZeroU32::new(1).unwrap();
+///
+/// // Server identity and keys
+/// let mut rng = ThreadRng::default();
+/// let server_id = rng.r#gen::<RelayId>();
+/// let server_keys = [NtorOnionKey::from(StaticSecret::random_from_rng(&mut rng))];
+/// let server_pk = server_keys[0].public_key();
+///
+/// // Start client
+/// let client = OnionLayerNtor::new(&server_id, server_pk);
+///
+/// // Send CREATE2 cell to server
+/// let cell = client.create_cell(id, &cache);
+///
+/// // Start server and send CREATED2 cell to client
+/// let (server, cell) = OnionLayerNtor::derive_server_cached(&server_id, &server_keys, &cell).unwrap();
+///
+/// // Finish client
+/// let client = client.derive_client(&cell).unwrap();
+/// ```
 pub struct OnionLayerNtor {
     sk_x: StaticSecret,
     pk_x: PublicKey,
@@ -631,6 +689,41 @@ impl AsRef<[u8]> for Ntor3CreateHeader {
     }
 }
 
+/// Ntor V3 handshake.
+///
+/// # Example
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use rand::prelude::*;
+/// use x25519_dalek::StaticSecret;
+/// use onioncloud_lowlevel::crypto::onion::{OnionLayerNtor3, NtorOnionKey};
+/// use onioncloud_lowlevel::crypto::relay::RelayId;
+/// use onioncloud_lowlevel::cache::StandardCellCache;
+///
+/// let cache = Arc::<StandardCellCache>::default();
+/// let id = std::num::NonZeroU32::new(1).unwrap();
+///
+/// // Server identity and keys
+/// let mut rng = ThreadRng::default();
+/// let server_id = rng.r#gen::<RelayId>();
+/// let server_keys = [NtorOnionKey::from(StaticSecret::random_from_rng(&mut rng))];
+/// let server_pk = server_keys[0].public_key();
+///
+/// // Start client and send CREATE2 cell to server
+/// let mut client_msg = Vec::from(b"test_client");
+/// let (client, mut cell) = OnionLayerNtor3::new_create(&server_id, server_pk, &mut client_msg, id, &cache).unwrap();
+///
+/// // Start server and send CREATED2 cell to client
+/// let (server, mut cell) = OnionLayerNtor3::derive_server_cached(&server_id, &server_keys, &mut cell, |v| {
+///     // Process client message
+///     Ok::<_, onioncloud_lowlevel::errors::CircuitHandshakeError>(Vec::from(b"test_server"))
+/// }).unwrap();
+///
+/// // Finish client
+/// let (client, server_msg) = client.derive_client(&mut cell).unwrap();
+/// ```
 pub struct OnionLayerNtor3 {
     sk_x: StaticSecret,
     pk_x: PublicKey,
@@ -705,7 +798,7 @@ impl OnionLayerNtor3 {
         }
     }
 
-    pub fn new_circuit_inner(
+    fn new_circuit_inner(
         id: &RelayId,
         pk: &EdPublicKey,
         client_msg: &mut [u8],
@@ -748,6 +841,9 @@ impl OnionLayerNtor3 {
         Ok((ret, cache.cache(cell)))
     }
 
+    /// Process and decrypt client message.
+    ///
+    /// See [`OnionLayerNtor3Server::derive`] for more details.
     pub fn derive_server_inner<'a>(
         id: &'a RelayId,
         sk: &'a [NtorOnionKey],
@@ -756,6 +852,18 @@ impl OnionLayerNtor3 {
         OnionLayerNtor3Server::derive(id, sk, input, NTOR3_CIRC_VERIFY)
     }
 
+    /// Starts handshake as server.
+    ///
+    /// The resulting [`Created2`] cell should be send to client to finish handshake.
+    ///
+    /// # Parameters
+    ///
+    /// - `id` : Relay ID.
+    /// - `sk` : Relay onion keys.
+    /// - `cell` : [`Create2`] cell sent from client.
+    /// - `cache` : Cell cache.
+    /// - `server_fn` : Closure that process client message and returns server message.
+    ///   It may reuse client message slice to reduce allocation.
     pub fn derive_server<
         'a,
         E: From<errors::CircuitHandshakeError>,
@@ -782,6 +890,7 @@ impl OnionLayerNtor3 {
         ))
     }
 
+    /// Same as [`derive_server`], but with [`Cached`].
     pub fn derive_server_cached<
         'a,
         E: From<errors::CircuitHandshakeError>,
@@ -798,18 +907,20 @@ impl OnionLayerNtor3 {
         Ok((derived, cache.cache(cell)))
     }
 
-    pub fn derive_client(
+    /// Raw method to derive client keys.
+    ///
+    /// This is only used if you want to roll out your own handshake.
+    /// Use [`derive_client`] instead.
+    pub fn derive_client_inner<'a>(
         self,
-        cell: &mut Created2,
-    ) -> Result<(OnionLayerData, &mut [u8]), errors::CircuitHandshakeError> {
-        let Ok((header, server_msg)) = NtorCreatedData::mut_from_prefix(cell.data_mut()) else {
+        data: &'a mut [u8],
+        verify: &[u8],
+    ) -> Result<(OnionLayerData, &'a mut [u8]), errors::CircuitHandshakeError> {
+        let Ok((header, server_msg)) = NtorCreatedData::mut_from_prefix(data) else {
             return Err(errors::CircuitHandshakeErrorInner::CellFormatError.into());
         };
 
         let xy = self.sk_x.diffie_hellman(&header.pk_y.into());
-        if !xy.was_contributory() {
-            return Err(errors::CircuitHandshakeError::crypto());
-        }
 
         let (keys, verify) = ntor3_derive_keystream(
             &xy,
@@ -818,8 +929,8 @@ impl OnionLayerNtor3 {
             self.pk_b.as_bytes(),
             self.pk_x.as_bytes(),
             &header.pk_y,
-            NTOR3_CIRC_VERIFY,
-        );
+            verify,
+        )?;
         let auth = ntor3_derive_server_mac(
             &self.id,
             self.pk_b.as_bytes(),
@@ -835,8 +946,21 @@ impl OnionLayerNtor3 {
 
         Ok((derive_keys(keys.keys), server_msg))
     }
+
+    /// Finish handshake as client.
+    ///
+    /// Also returns decrypted server message.
+    pub fn derive_client(
+        self,
+        cell: &mut Created2,
+    ) -> Result<(OnionLayerData, &mut [u8]), errors::CircuitHandshakeError> {
+        self.derive_client_inner(cell.data_mut(), NTOR3_CIRC_VERIFY)
+    }
 }
 
+/// Ntor3 handshake (server side).
+///
+/// You might not want to use this. Instead use convenience functions like [`OnionLayerNtor3::derive_server`].
 pub struct OnionLayerNtor3Server<'a> {
     pk_y: PublicKey,
     xb: SharedSecret,
@@ -850,6 +974,14 @@ pub struct OnionLayerNtor3Server<'a> {
 }
 
 impl<'a> OnionLayerNtor3Server<'a> {
+    /// Process and decrypt client message.
+    ///
+    /// # Parameters
+    ///
+    /// - `id` : Relay ID.
+    /// - `sk` : Relay onion keys.
+    /// - `input` : CREATE2 cell message.
+    /// - `verify` : Shared verification string.
     pub fn derive(
         id: &'a RelayId,
         sk: &'a [NtorOnionKey],
@@ -886,9 +1018,6 @@ impl<'a> OnionLayerNtor3Server<'a> {
         let sk_y = StaticSecret::random_from_rng(ThreadRng::default());
         let pk_y = PublicKey::from(&sk_y);
         let xy = sk_y.diffie_hellman(&pk_x);
-        if !xy.was_contributory() {
-            return Err(errors::CircuitHandshakeError::crypto());
-        }
 
         Ok((
             Self {
@@ -905,6 +1034,15 @@ impl<'a> OnionLayerNtor3Server<'a> {
         ))
     }
 
+    /// Finish handshake as server.
+    ///
+    /// Returns [`OnionLayerData`] and CREATED2 cell data header.
+    /// Server message will be encrypted afterwards.
+    /// The full format of cell content is:
+    ///
+    /// ```text
+    /// header | server_msg
+    /// ```
     pub fn finalize(
         self,
         server_msg: &mut [u8],
@@ -917,7 +1055,7 @@ impl<'a> OnionLayerNtor3Server<'a> {
             self.pk_x,
             self.pk_y.as_bytes(),
             self.verify,
-        );
+        )?;
 
         Cipher256::new(&keys.enc.into(), &Default::default()).try_apply_keystream(server_msg)?;
 
@@ -1072,7 +1210,11 @@ fn ntor3_derive_keystream(
     pk_x: &EdPublicKey,
     pk_y: &EdPublicKey,
     ver: &[u8],
-) -> (Ntor3DerivedKeystream, Sha256Output) {
+) -> Result<(Ntor3DerivedKeystream, Sha256Output), errors::CircuitHandshakeError> {
+    if !xy.was_contributory() {
+        return Err(errors::CircuitHandshakeError::crypto());
+    }
+
     let mut hasher = ntor3_hash(b":key_seed");
     hasher.update(xy.as_bytes());
     hasher.update(xb.as_bytes());
@@ -1100,7 +1242,7 @@ fn ntor3_derive_keystream(
     let mut out = Ntor3DerivedKeystream::new_zeroed();
     kdf.finalize_xof_into(out.as_mut_bytes());
 
-    (out, verify.into())
+    Ok((out, verify.into()))
 }
 
 fn ntor3_derive_server_mac(
