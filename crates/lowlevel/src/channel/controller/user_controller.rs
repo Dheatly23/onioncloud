@@ -221,6 +221,8 @@ impl<'a, Cfg: 'static + UserConfig + Send + Sync>
                     Break(()) => break,
                     Continue(false) => (),
                     Continue(true) => {
+                        debug!("channel initialization successful");
+
                         self.state = State::Steady(SteadyState {
                             cell_read: Reader::new(self.link_cfg.clone()),
                             cell_write: CellWriter::new_finished(),
@@ -255,6 +257,7 @@ impl<'a, Cfg: 'static + UserConfig + Send + Sync>
 }
 
 impl InitState {
+    #[instrument(level = "debug", name = "handle_init", skip_all)]
     fn handle<Cfg: 'static + UserConfig + Send + Sync>(
         &mut self,
         link_cfg: &LinkCfg,
@@ -380,6 +383,8 @@ impl InitState {
                                 return Err(errors::CertVerifyError.into());
                             }
 
+                            debug!("link certificate authenticated");
+
                             *state = ConfigReadState::AuthChallenge;
                         }
                     }
@@ -413,6 +418,8 @@ impl InitState {
                                 }
                             }
 
+                            debug!("peer NETINFO check successful");
+
                             *self = Self::NetinfoWrite(CellWriter::with_cell_config(
                                 link_cfg.cache.cache(Netinfo::new(
                                     link_cfg.get_cached(),
@@ -434,10 +441,12 @@ impl InitState {
                     .into());
                 }
             }
-            Self::NetinfoWrite(w) => match write_cell(w, input)? {
-                false => return Ok(Break(())),
-                true => todo!(),
-            },
+            Self::NetinfoWrite(w) => {
+                return Ok(match write_cell(w, input)? {
+                    false => Break(()),
+                    true => Continue(true),
+                });
+            }
         }
 
         Ok(Continue(false))

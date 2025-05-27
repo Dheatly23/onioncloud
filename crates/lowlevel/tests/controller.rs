@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::convert::Infallible;
-use std::env::{VarError, var};
+use std::env::var;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Error as AnyError, Result as AnyResult};
 use test_log::test;
+use tokio::time::sleep;
 use tracing::{debug, info, instrument, warn};
 
 use onioncloud_lowlevel::cache::{CellCache, StandardCellCache};
@@ -16,6 +17,9 @@ use onioncloud_lowlevel::cell::versions::Versions;
 use onioncloud_lowlevel::cell::writer::CellWriter;
 use onioncloud_lowlevel::cell::{Cell, CellHeader, FixedCell, cast};
 use onioncloud_lowlevel::channel::circ_map::CircuitMap;
+use onioncloud_lowlevel::channel::controller::user_controller::{
+    UserConfig, UserControlMsg, UserController,
+};
 use onioncloud_lowlevel::channel::controller::{CellMsg, ChannelController, ControlMsg, Timeout};
 use onioncloud_lowlevel::channel::manager::ChannelManager;
 use onioncloud_lowlevel::channel::{CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput};
@@ -264,28 +268,21 @@ fn test_versions_controller_timeout() {
     assert_eq!(v.controller().link_cfg.linkver.as_ref().version(), 5);
 }
 
-#[test(tokio::test)]
-#[ignore = "requires network access"]
-async fn test_versions_controller_async() {
-    let id = match var("RELAY_ID") {
-        Ok(v) => relay_from_str(&v).unwrap(),
-        Err(VarError::NotPresent) => {
-            warn!("skipping test: environment variable RELAY_ID not set");
-            return;
-        }
-        Err(e) => panic!("{e}"),
-    };
-    let addrs = match var("RELAY_ADDRS") {
-        Ok(v) => v
+fn get_relay_data() -> (RelayId, Vec<SocketAddr>) {
+    (
+        relay_from_str(&var("RELAY_ID").unwrap()).unwrap(),
+        var("RELAY_ADDRS")
+            .unwrap()
             .split(',')
             .map(|s| s.parse::<SocketAddr>().unwrap())
             .collect::<Vec<_>>(),
-        Err(VarError::NotPresent) => {
-            warn!("skipping test: environment variable RELAY_ADDRS not set");
-            return;
-        }
-        Err(e) => panic!("{e}"),
-    };
+    )
+}
+
+#[test(tokio::test)]
+#[ignore = "requires network access"]
+async fn test_versions_controller_async() {
+    let (id, addrs) = get_relay_data();
 
     let mut v = ChannelManager::<_, VersionOnlyController>::new(TokioRuntime);
 
@@ -297,4 +294,57 @@ async fn test_versions_controller_async() {
         delay: true,
     };
     v.create(cfg, ()).completion().await.unwrap();
+}
+
+#[test(tokio::test)]
+#[ignore = "requires network access"]
+async fn test_user_controller_async() {
+    let (id, addrs) = get_relay_data();
+
+    struct Config {
+        cfg: SimpleConfig,
+        cache: Arc<StandardCellCache>,
+    }
+
+    impl ChannelConfig for Config {
+        fn peer_id(&self) -> &RelayId {
+            self.cfg.peer_id()
+        }
+
+        fn peer_addrs(&self) -> Cow<'_, [SocketAddr]> {
+            self.cfg.peer_addrs()
+        }
+    }
+
+    impl UserConfig for Config {
+        fn get_cache(&self) -> Arc<dyn Send + Sync + CellCache> {
+            self.cache.clone()
+        }
+    }
+
+    let cache = Arc::<StandardCellCache>::default();
+
+    let mut v = ChannelManager::<_, UserController<Config>>::new(TokioRuntime);
+
+    let cfg = Config {
+        cfg: SimpleConfig {
+            id,
+            addrs: addrs.into(),
+        },
+        cache: cache.clone(),
+    };
+    let mut channel = v.create(cfg, ());
+
+    info!("sleeping for 5 second");
+
+    sleep(Duration::from_secs(5).into()).await;
+
+    info!("done sleeping, starting graceful shutdown");
+
+    channel
+        .send_and_completion(UserControlMsg::Shutdown)
+        .await
+        .unwrap();
+
+    info!("shutdown successful");
 }
