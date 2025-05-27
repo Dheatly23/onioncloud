@@ -76,6 +76,18 @@ impl From<Create2> for FixedCell {
     }
 }
 
+impl AsRef<[u8]> for Create2 {
+    fn as_ref(&self) -> &[u8] {
+        self.data()
+    }
+}
+
+impl AsMut<[u8]> for Create2 {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.data_mut()
+    }
+}
+
 impl TryFromCell for Create2 {
     fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, errors::CellFormatError> {
         let Some(Cell {
@@ -186,6 +198,11 @@ impl Create2 {
         self.cast().header.ty.get()
     }
 
+    /// Sets handshake type.
+    pub fn set_handshake_type(&mut self, ty: u16) {
+        self.cast_mut().header.ty.set(ty)
+    }
+
     /// Gets handshake length.
     pub fn len(&self) -> u16 {
         self.cast().header.len.get()
@@ -204,8 +221,41 @@ impl Create2 {
 
     /// Gets handshake data mutably.
     pub fn data_mut(&mut self) -> &mut [u8] {
-        let Create2Cell { header, data } = transmute_mut!(self.cell.data_mut());
+        let Create2Cell { header, data } = self.cast_mut();
         &mut data[..header.len.get().into()]
+    }
+
+    /// Set handshake data.
+    ///
+    /// # Panics
+    ///
+    /// Panics if data does not fit the cell.
+    pub fn set_data(&mut self, data: &[u8]) {
+        let Create2Cell { header, data: out } = self.cast_mut();
+        out[..data.len()].copy_from_slice(data);
+        header
+            .len
+            .set(data.len().try_into().expect("data must fit cell"));
+    }
+
+    /// Set handshake data in multipart.
+    ///
+    /// # Panics
+    ///
+    /// Panics if data does not fit the cell.
+    pub fn set_data_multipart(&mut self, data: &[&[u8]]) {
+        let Create2Cell { header, data: out } = self.cast_mut();
+
+        let mut len = 0;
+        let mut out = &mut out[..];
+        for v in data {
+            let (a, b) = out.split_at_mut(v.len());
+            a.copy_from_slice(v);
+            out = b;
+            len += v.len();
+        }
+
+        header.len.set(len.try_into().expect("data must fit cell"));
     }
 
     /// Unwraps into inner [`FixedCell`].
@@ -220,6 +270,10 @@ impl Create2 {
 
     fn cast(&self) -> &Create2Cell {
         transmute_ref!(self.cell.data())
+    }
+
+    fn cast_mut(&mut self) -> &mut Create2Cell {
+        transmute_mut!(self.cell.data_mut())
     }
 }
 
@@ -358,8 +412,41 @@ impl Created2 {
 
     /// Gets handshake data mutably.
     pub fn data_mut(&mut self) -> &mut [u8] {
-        let Created2Cell { header, data } = transmute_mut!(self.cell.data_mut());
+        let Created2Cell { header, data } = self.cast_mut();
         &mut data[..header.len.get().into()]
+    }
+
+    /// Set handshake data.
+    ///
+    /// # Panics
+    ///
+    /// Panics if data does not fit the cell.
+    pub fn set_data(&mut self, data: &[u8]) {
+        let Created2Cell { header, data: out } = self.cast_mut();
+        out[..data.len()].copy_from_slice(data);
+        header
+            .len
+            .set(data.len().try_into().expect("data must fit cell"));
+    }
+
+    /// Set handshake data in multipart.
+    ///
+    /// # Panics
+    ///
+    /// Panics if data does not fit the cell.
+    pub fn set_data_multipart(&mut self, data: &[&[u8]]) {
+        let Created2Cell { header, data: out } = self.cast_mut();
+
+        let mut len = 0;
+        let mut out = &mut out[..];
+        for v in data {
+            let (a, b) = out.split_at_mut(v.len());
+            a.copy_from_slice(v);
+            out = b;
+            len += v.len();
+        }
+
+        header.len.set(len.try_into().expect("data must fit cell"));
     }
 
     /// Unwraps into inner [`FixedCell`].
@@ -374,6 +461,10 @@ impl Created2 {
 
     fn cast(&self) -> &Created2Cell {
         transmute_ref!(self.cell.data())
+    }
+
+    fn cast_mut(&mut self) -> &mut Created2Cell {
+        transmute_mut!(self.cell.data_mut())
     }
 }
 

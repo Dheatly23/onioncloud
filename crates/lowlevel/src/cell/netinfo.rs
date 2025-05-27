@@ -312,16 +312,14 @@ impl Netinfo {
 
     /// Gets timestamp.
     pub fn time(&self) -> u32 {
-        let header: &NetinfoHeader = transmute_ref!(self.0.data());
-        header.header.timestamp.get()
+        self.cast().header.timestamp.get()
     }
 
     /// Gets peer IP address.
     ///
     /// Returns [`None`] if address is invalid.
     pub fn peer_addr(&self) -> Option<IpAddr> {
-        let header: &NetinfoHeader = transmute_ref!(self.0.data());
-        match *header {
+        match *self.cast() {
             NetinfoHeader {
                 header: NetinfoHeader1 {
                     peer_addr_ty: 4, ..
@@ -356,13 +354,10 @@ impl Netinfo {
     /// }
     /// ```
     pub fn this_addrs(&self) -> NetinfoThisAddrIterator<'_> {
-        let NetinfoHeader {
-            peer_addr_data: a, ..
-        } = transmute_ref!(self.0.data());
         let &NetinfoHeader2 {
             n_addrs: n,
             ref data,
-        } = a.part2();
+        } = self.cast().peer_addr_data.part2();
 
         NetinfoThisAddrIterator { data, n, i: 0 }
     }
@@ -387,6 +382,10 @@ impl Netinfo {
         }
 
         true
+    }
+
+    fn cast(&self) -> &NetinfoHeader {
+        transmute_ref!(self.0.data())
     }
 }
 

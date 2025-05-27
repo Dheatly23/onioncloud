@@ -112,6 +112,16 @@ pub trait RelayLike: Sealed + AsRef<[u8; FIXED_CELL_SIZE]> + AsMut<[u8; FIXED_CE
         &cell.data[..usize::from(cell.header.len.get())]
     }
 
+    /// Get payload mutably.
+    ///
+    /// # Panics
+    ///
+    /// Panics if length field is invalid. This can happen if the cell content is encrypted.
+    fn data_mut(&mut self) -> &mut [u8] {
+        let cell = cast_mut(self);
+        &mut cell.data[..usize::from(cell.header.len.get())]
+    }
+
     /// Set payload.
     ///
     /// # Panics
@@ -150,6 +160,18 @@ pub struct Relay {
 impl Sealed for Relay {}
 impl RelayLike for Relay {}
 
+impl AsRef<FixedCell> for Relay {
+    fn as_ref(&self) -> &FixedCell {
+        &self.cell
+    }
+}
+
+impl AsMut<FixedCell> for Relay {
+    fn as_mut(&mut self) -> &mut FixedCell {
+        &mut self.cell
+    }
+}
+
 impl AsRef<[u8; FIXED_CELL_SIZE]> for Relay {
     fn as_ref(&self) -> &[u8; FIXED_CELL_SIZE] {
         self.cell.data()
@@ -158,6 +180,18 @@ impl AsRef<[u8; FIXED_CELL_SIZE]> for Relay {
 
 impl AsMut<[u8; FIXED_CELL_SIZE]> for Relay {
     fn as_mut(&mut self) -> &mut [u8; FIXED_CELL_SIZE] {
+        self.cell.data_mut()
+    }
+}
+
+impl AsRef<[u8]> for Relay {
+    fn as_ref(&self) -> &[u8] {
+        self.cell.data()
+    }
+}
+
+impl AsMut<[u8]> for Relay {
+    fn as_mut(&mut self) -> &mut [u8] {
         self.cell.data_mut()
     }
 }
@@ -272,6 +306,18 @@ pub struct RelayEarly {
 impl Sealed for RelayEarly {}
 impl RelayLike for RelayEarly {}
 
+impl AsRef<FixedCell> for RelayEarly {
+    fn as_ref(&self) -> &FixedCell {
+        &self.cell
+    }
+}
+
+impl AsMut<FixedCell> for RelayEarly {
+    fn as_mut(&mut self) -> &mut FixedCell {
+        &mut self.cell
+    }
+}
+
 impl AsRef<[u8; FIXED_CELL_SIZE]> for RelayEarly {
     fn as_ref(&self) -> &[u8; FIXED_CELL_SIZE] {
         self.cell.data()
@@ -280,6 +326,18 @@ impl AsRef<[u8; FIXED_CELL_SIZE]> for RelayEarly {
 
 impl AsMut<[u8; FIXED_CELL_SIZE]> for RelayEarly {
     fn as_mut(&mut self) -> &mut [u8; FIXED_CELL_SIZE] {
+        self.cell.data_mut()
+    }
+}
+
+impl AsRef<[u8]> for RelayEarly {
+    fn as_ref(&self) -> &[u8] {
+        self.cell.data()
+    }
+}
+
+impl AsMut<[u8]> for RelayEarly {
+    fn as_mut(&mut self) -> &mut [u8] {
         self.cell.data_mut()
     }
 }

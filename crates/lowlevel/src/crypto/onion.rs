@@ -631,7 +631,8 @@ fn ntor_auth(
         return Err(errors::CircuitHandshakeError::crypto());
     }
 
-    let mut hmac = Hmac::<Sha256>::new_from_slice(b"ntor-curve25519-sha256-1:verify")?;
+    let mut hmac = Hmac::<Sha256>::new_from_slice(PROTOID)?;
+    hmac.update(b":verify");
     hmac.update(xy.as_bytes());
     hmac.update(xb.as_bytes());
     hmac.update(id);
@@ -641,7 +642,8 @@ fn ntor_auth(
     hmac.update(PROTOID);
     let verify: Sha256Output = hmac.finalize().into_bytes().into();
 
-    let mut hmac = Hmac::<Sha256>::new_from_slice(b"ntor-curve25519-sha256-1:mac")?;
+    let mut hmac = Hmac::<Sha256>::new_from_slice(PROTOID)?;
+    hmac.update(b":mac");
     hmac.update(&verify);
     hmac.update(id);
     hmac.update(pk_b);
