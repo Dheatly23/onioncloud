@@ -318,6 +318,19 @@ impl<T: Cachable, C: CellCache> Cached<T, C> {
     }
 
     /// Maps from one type to another.
+    ///
+    /// This is only used because a blanket [`From`] impl conflicts with identity impl.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::cell::{Cell, FixedCell};
+    /// use onioncloud_lowlevel::cell::padding::Padding;
+    /// use onioncloud_lowlevel::cache::{Cached, StandardCellCache};
+    ///
+    /// let cell = Cached::new(StandardCellCache::default(), Padding::new(FixedCell::default()));
+    /// let cell = Cached::map_into::<Cell>(cell);
+    /// ```
     pub fn map_into<U: Cachable + From<T>>(this: Self) -> Cached<U, C> {
         Cached::map(this, U::from)
     }
@@ -356,6 +369,32 @@ impl<T: Cachable, C: CellCache> Cached<T, C> {
         let (cell, cache) = Self::decompose(this);
         let cell = f(cell, &cache)?;
         Ok(Cached::new(cache, cell))
+    }
+}
+
+impl<T, C> Cached<Option<T>, C>
+where
+    T: Cachable,
+    Option<T>: Cachable,
+    C: CellCache,
+{
+    /// Transpose a [`Cached`] of [`Option`] to [`Option`] of [`Cached`].
+    ///
+    /// NOTE: This is an associated function instead of method.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::cell::{Cell, FixedCell};
+    /// use onioncloud_lowlevel::cell::padding::Padding;
+    /// use onioncloud_lowlevel::cache::{Cached, StandardCellCache};
+    ///
+    /// let cell = Cached::new(StandardCellCache::default(), Some(Cell::from(Padding::new(FixedCell::default()))));
+    /// let cell = Cached::transpose(cell).unwrap();
+    /// ```
+    pub fn transpose(this: Self) -> Option<Cached<T, C>> {
+        let (cell, cache) = Self::decompose(this);
+        Some(Cached::new(cache, cell?))
     }
 }
 

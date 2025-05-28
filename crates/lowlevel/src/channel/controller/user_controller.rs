@@ -878,28 +878,33 @@ impl SteadyState {
                             Err(TrySendError::Disconnected(_)) => (),
                         }
                         circ_map.remove(id);
-                    } else if let Ok(cell) = Cached::try_map(cell, |v, _| v.ok_or(())) {
-                        if circ.meta.last_full > input.time() {
-                            // Sender recently full, return cell
+                        return Ok(());
+                    }
+
+                    let Some(cell) = Cached::transpose(cell) else {
+                        return Ok(());
+                    };
+                    if circ.meta.last_full > input.time() {
+                        // Sender recently full, return cell
+                        *p = Some(cell);
+                        return Ok(());
+                    }
+
+                    match circ.send(cell) {
+                        Ok(()) => (),
+                        // Full, return cell and set last full
+                        Err(TrySendError::Full(cell)) => {
                             *p = Some(cell);
-                        } else {
-                            match circ.send(cell) {
-                                Ok(()) => (),
-                                // Full, return cell and set last full
-                                Err(TrySendError::Full(cell)) => {
-                                    *p = Some(cell);
-                                    circ.meta.last_full = input.time() + FULL_TIMEOUT;
-                                    flags |= FLAG_FULL_TIMEOUT;
-                                }
-                                // Circuit is closing, drop cell and close it for real
-                                Err(TrySendError::Disconnected(_)) => {
-                                    debug!(id, "cannot send cell, circuit is closing");
-                                    circ.meta.closing = true;
-                                    self.pending_close.push_back((id, DestroyReason::Internal));
-                                    // Pending DESTROY cell, clear flag
-                                    flags &= !FLAG_WRITE_EMPTY;
-                                }
-                            }
+                            circ.meta.last_full = input.time() + FULL_TIMEOUT;
+                            flags |= FLAG_FULL_TIMEOUT;
+                        }
+                        // Circuit is closing, drop cell and close it for real
+                        Err(TrySendError::Disconnected(_)) => {
+                            debug!(id, "cannot send cell, circuit is closing");
+                            circ.meta.closing = true;
+                            self.pending_close.push_back((id, DestroyReason::Internal));
+                            // Pending DESTROY cell, clear flag
+                            flags &= !FLAG_WRITE_EMPTY;
                         }
                     }
 
@@ -925,38 +930,35 @@ impl SteadyState {
                         update_last_packet(last_packet, &input);
                     }
 
-                    let cell = if let Some((id, reason)) = self.pending_close.pop_front() {
+                    let mut found = self.pending_close.pop_front().map(|(id, reason)| {
                         let meta = circ_map.remove(id);
                         debug_assert!(meta.expect("circuit must exist").closing);
                         // Prepend DESTROY cell
                         cfg.cache
                             .cache(Destroy::new(cfg.cache.get_cached(), id, reason).into())
-                    } else {
-                        let mut found = None;
-                        while let Some(cell) = self.out_buffer.pop() {
-                            if NonZeroU32::new(cell.circuit).is_none_or(|id| !circ_map.has(id)) {
-                                // Unmapped circuit ID. Probably non-graceful shutdown.
-                                continue;
-                            }
-                            let mut cell = Cached::map(cell, Some);
-
-                            found = Some(if let Some(cell) = cast::<Destroy>(&mut cell)? {
-                                circ_map.remove(cell.circuit);
-                                cfg.cache.cache(cell.into())
-                            } else if let Ok(cell) = Cached::try_map(cell, |c, _| c.ok_or(())) {
-                                cell
-                            } else {
-                                // Should not happen
-                                continue;
-                            });
-                            break;
-                        }
-
-                        let Some(cell) = found else {
-                            flags |= FLAG_WRITE_EMPTY;
+                    });
+                    while found.is_none() {
+                        let Some(cell) = self.out_buffer.pop() else {
                             break;
                         };
-                        cell
+
+                        if NonZeroU32::new(cell.circuit).is_none_or(|id| !circ_map.has(id)) {
+                            // Unmapped circuit ID. Probably non-graceful shutdown.
+                            continue;
+                        }
+                        let mut cell = Cached::map(cell, Some);
+
+                        found = if let Some(cell) = cast::<Destroy>(&mut cell)? {
+                            circ_map.remove(cell.circuit);
+                            Some(cfg.cache.cache(cell.into()))
+                        } else {
+                            Cached::transpose(cell)
+                        };
+                    }
+
+                    let Some(cell) = found else {
+                        flags |= FLAG_WRITE_EMPTY;
+                        break;
                     };
                     self.cell_write = CellWriter::with_cell_config(cell, &cfg)?;
                 }
