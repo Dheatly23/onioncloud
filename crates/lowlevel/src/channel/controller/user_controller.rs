@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use digest::Digest;
 use flume::TrySendError;
-use futures_channel::oneshot::Sender;
+use futures_channel::oneshot::{Receiver, Sender, channel};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tracing::{debug, error, info, instrument, trace, warn};
@@ -107,6 +107,16 @@ pub enum UserControlMsg {
     Shutdown,
     /// Create new circuit.
     NewCircuit(Sender<Result<NewCircuit<CachedCell>, errors::NoFreeCircIDError>>),
+}
+
+impl UserControlMsg {
+    pub fn new_circuit() -> (
+        Receiver<Result<NewCircuit<CachedCell>, errors::NoFreeCircIDError>>,
+        Self,
+    ) {
+        let (send, recv) = channel();
+        (recv, Self::NewCircuit(send))
+    }
 }
 
 type Reader = CellReader<LinkCfg>;
@@ -238,6 +248,7 @@ impl<'a, Cfg: 'static + UserConfig + Send + Sync>
                     }
                 },
                 State::Steady(ref mut state) => {
+                    self.is_timeout = false;
                     return state.handle(&self.link_cfg, last_packet, input, circ_map);
                 }
                 State::Shutdown => {
@@ -247,6 +258,8 @@ impl<'a, Cfg: 'static + UserConfig + Send + Sync>
                 }
             }
         }
+
+        self.is_timeout = false;
 
         let mut ret = ChannelOutput::new();
         ret.timeout(*last_packet);

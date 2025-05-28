@@ -1,6 +1,7 @@
+mod common;
+
 use std::borrow::Cow;
 use std::convert::Infallible;
-use std::env::var;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -23,12 +24,14 @@ use onioncloud_lowlevel::channel::controller::user_controller::{
 use onioncloud_lowlevel::channel::controller::{CellMsg, ChannelController, ControlMsg, Timeout};
 use onioncloud_lowlevel::channel::manager::ChannelManager;
 use onioncloud_lowlevel::channel::{CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput};
-use onioncloud_lowlevel::crypto::relay::{RelayId, from_str as relay_from_str};
+use onioncloud_lowlevel::crypto::relay::RelayId;
 use onioncloud_lowlevel::errors;
 use onioncloud_lowlevel::linkver::StandardLinkver;
 use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
 use onioncloud_lowlevel::util::TestController;
 use onioncloud_lowlevel::util::sans_io::Handle;
+
+use crate::common::get_relay_data;
 
 #[derive(Default)]
 struct LinkCfg {
@@ -266,17 +269,6 @@ fn test_versions_controller_timeout() {
     info!("time: {:?} timeout: {:?}", v.cur_time(), v.timeout());
 
     assert_eq!(v.controller().link_cfg.linkver.as_ref().version(), 5);
-}
-
-fn get_relay_data() -> (RelayId, Vec<SocketAddr>) {
-    (
-        relay_from_str(&var("RELAY_ID").unwrap()).unwrap(),
-        var("RELAY_ADDRS")
-            .unwrap()
-            .split(',')
-            .map(|s| s.parse::<SocketAddr>().unwrap())
-            .collect::<Vec<_>>(),
-    )
 }
 
 #[test(tokio::test)]

@@ -640,7 +640,7 @@ impl CellLike for CreatedFast {
 
 impl CreatedFast {
     /// CREATED_FAST command ID.
-    pub const ID: u8 = 5;
+    pub const ID: u8 = 6;
 
     /// Creates new CREATED_FAST cell from existing [`FixedCell`].
     ///

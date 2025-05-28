@@ -348,6 +348,50 @@ impl OnionLayerFast {
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
+struct DerivedFast {
+    kh: Sha1Output,
+    keys: DerivedKeys,
+}
+
+fn derive_fast(key_x: &Sha1Output, key_y: &Sha1Output) -> DerivedFast {
+    let mut out = DerivedFast::new_zeroed();
+
+    let mut hasher = Sha1::new();
+    hasher.update(key_x);
+    hasher.update(key_y);
+
+    let mut n = 255u8;
+    for o in out.as_mut_bytes().chunks_mut(size_of::<Sha1Output>()) {
+        n = n.wrapping_add(1);
+
+        let mut hasher = hasher.clone();
+        hasher.update(from_ref(&n));
+        let hash = Sha1Output::from(hasher.finalize());
+        o.copy_from_slice(&hash[..o.len()]);
+    }
+
+    out
+}
+
+fn kdf_tor(key: &[&[u8]], out: &mut [u8]) {
+    let mut hasher = Sha1::new();
+    for k in key {
+        hasher.update(k);
+    }
+
+    let mut n = 255u8;
+    for o in out.chunks_mut(size_of::<Sha1Output>()) {
+        n = n.wrapping_add(1);
+
+        let mut hasher = hasher.clone();
+        hasher.update(from_ref(&n));
+        let hash = Sha1Output::from(hasher.finalize());
+        o.copy_from_slice(&hash[..o.len()]);
+    }
+}
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
 struct NtorCreateData {
     id: RelayId,
     pk_b: EdPublicKey,
@@ -1278,40 +1322,10 @@ struct DerivedKeys {
     kb: CipherKey128,
 }
 
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
-#[repr(C)]
-struct DerivedFast {
-    kh: Sha1Output,
-    keys: DerivedKeys,
-}
-
 fn derive_keys(keys: DerivedKeys) -> OnionLayerData {
     OnionLayerData {
         encrypt: OnionLayer128::new(keys.kf, keys.kb),
         digest: CircuitDigest::new(keys.df, keys.db),
-    }
-}
-
-fn derive_fast(key_x: &Sha1Output, key_y: &Sha1Output) -> DerivedFast {
-    let mut out = DerivedFast::new_zeroed();
-    kdf_tor(&[&key_x[..], &key_y[..]], out.as_mut_bytes());
-    out
-}
-
-fn kdf_tor(key: &[&[u8]], out: &mut [u8]) {
-    let mut hasher = Sha256::new();
-    for k in key {
-        hasher.update(k);
-    }
-
-    let mut n = 255u8;
-    for o in out.chunks_mut(size_of::<Sha256Output>()) {
-        n = n.wrapping_add(1);
-
-        let mut hasher = hasher.clone();
-        hasher.update(from_ref(&n));
-        let hash = Sha256Output::from(hasher.finalize());
-        o.copy_from_slice(&hash[..o.len()]);
     }
 }
 
