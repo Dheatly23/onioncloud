@@ -931,21 +931,32 @@ impl SteadyState {
                         // Prepend DESTROY cell
                         cfg.cache
                             .cache(Destroy::new(cfg.cache.get_cached(), id, reason).into())
-                    } else if let Some(cell) = self.out_buffer.pop() {
-                        let mut cell = Cached::map(cell, Some);
-
-                        if let Some(cell) = cast::<Destroy>(&mut cell)? {
-                            circ_map.remove(cell.circuit);
-                            cfg.cache.cache(cell.into())
-                        } else if let Ok(cell) = Cached::try_map(cell, |c, _| c.ok_or(())) {
-                            cell
-                        } else {
-                            // Should not happen
-                            continue;
-                        }
                     } else {
-                        flags |= FLAG_WRITE_EMPTY;
-                        break;
+                        let mut found = None;
+                        while let Some(cell) = self.out_buffer.pop() {
+                            if NonZeroU32::new(cell.circuit).is_none_or(|id| !circ_map.has(id)) {
+                                // Unmapped circuit ID. Probably non-graceful shutdown.
+                                continue;
+                            }
+                            let mut cell = Cached::map(cell, Some);
+
+                            found = Some(if let Some(cell) = cast::<Destroy>(&mut cell)? {
+                                circ_map.remove(cell.circuit);
+                                cfg.cache.cache(cell.into())
+                            } else if let Ok(cell) = Cached::try_map(cell, |c, _| c.ok_or(())) {
+                                cell
+                            } else {
+                                // Should not happen
+                                continue;
+                            });
+                            break;
+                        }
+
+                        let Some(cell) = found else {
+                            flags |= FLAG_WRITE_EMPTY;
+                            break;
+                        };
+                        cell
                     };
                     self.cell_write = CellWriter::with_cell_config(cell, &cfg)?;
                 }
