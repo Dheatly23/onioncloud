@@ -174,11 +174,12 @@ mod tests {
 
     use crate::cell::padding::{Padding, VPadding};
     use crate::cell::{Cell, FIXED_CELL_SIZE, FixedCell, VariableCell};
-    use crate::util::{TestConfig, circ_id_strat, var_cell_strat};
+    use crate::util::{TestConfig, circ_id_strat, steps, test_write_helper, var_cell_strat};
 
     proptest! {
         #[test]
         fn test_writer_cached_fixed(
+            steps in steps(),
             is_4bytes: bool,
             data: [u8; FIXED_CELL_SIZE],
         ) {
@@ -196,20 +197,23 @@ mod tests {
             v.push(Padding::ID);
             v.extend_from_slice(&data);
 
-            let mut r = Vec::new();
-            CellWriter::try_from(Cached::new(
-                cfg.clone(),
-                Padding::new(FixedCell::new(Box::new(data))),
-            ))
-                .unwrap()
-                .handle(&mut r)
-                .unwrap();
+            let mut r = Vec::with_capacity(v.len());
+            test_write_helper(
+                &mut r,
+                v.len(),
+                steps,
+                CellWriter::try_from(Cached::new(
+                    cfg.clone(),
+                    Padding::new(FixedCell::new(Box::new(data))),
+                )).unwrap()
+            );
             assert_eq!(r, v);
             assert_eq!(cfg.cache.as_inner(), (0, 1));
         }
 
         #[test]
         fn test_writer_variable(
+            steps in steps(),
             is_4bytes: bool,
             data in var_cell_strat(),
         ) {
@@ -226,15 +230,19 @@ mod tests {
             v.extend_from_slice(&(data.len() as u16).to_be_bytes());
             v.extend_from_slice(&data);
 
-            let mut r = Vec::new();
-            CellWriter::new(VPadding::new(VariableCell::from(data)), is_4bytes)
-                .handle(&mut r)
-                .unwrap();
+            let mut r = Vec::with_capacity(v.len());
+            test_write_helper(
+                &mut r,
+                v.len(),
+                steps,
+                CellWriter::new(VPadding::new(VariableCell::from(data)), is_4bytes),
+            );
             assert_eq!(r, v);
         }
 
         #[test]
         fn test_writer_cell_fixed(
+            steps in steps(),
             (is_4bytes, circ_id) in circ_id_strat(),
             command: u8,
             data: [u8; FIXED_CELL_SIZE],
@@ -248,16 +256,22 @@ mod tests {
             v.push(command);
             v.extend_from_slice(&data);
 
-            let mut r = Vec::new();
-            CellWriter::new(
-                Cell::from_fixed(CellHeader::new(circ_id, command), FixedCell::new(Box::new(data))),
-                is_4bytes,
-            ).handle(&mut r).unwrap();
+            let mut r = Vec::with_capacity(v.len());
+            test_write_helper(
+                &mut r,
+                v.len(),
+                steps,
+                CellWriter::new(
+                    Cell::from_fixed(CellHeader::new(circ_id, command), FixedCell::new(Box::new(data))),
+                    is_4bytes,
+                ),
+            );
             assert_eq!(r, v);
         }
 
         #[test]
         fn test_writer_cell_variable(
+            steps in steps(),
             (is_4bytes, circ_id) in circ_id_strat(),
             command: u8,
             data in var_cell_strat(),
@@ -272,11 +286,16 @@ mod tests {
             v.extend_from_slice(&(data.len() as u16).to_be_bytes());
             v.extend_from_slice(&data);
 
-            let mut r = Vec::new();
-            CellWriter::new(
-                Cell::from_variable(CellHeader::new(circ_id, command), VariableCell::from(data)),
-                is_4bytes,
-            ).handle(&mut r).unwrap();
+            let mut r = Vec::with_capacity(v.len());
+            test_write_helper(
+                &mut r,
+                v.len(),
+                steps,
+                CellWriter::new(
+                    Cell::from_variable(CellHeader::new(circ_id, command), VariableCell::from(data)),
+                    is_4bytes,
+                ),
+            );
             assert_eq!(r, v);
         }
     }

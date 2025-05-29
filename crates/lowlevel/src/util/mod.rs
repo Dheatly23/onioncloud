@@ -363,6 +363,31 @@ mod tests {
         panic!("buffer finished but value isn't yet produced");
     }
 
+    pub(crate) fn test_write_helper<T, E, H>(
+        data: &mut Vec<u8>,
+        n: usize,
+        steps: Vec<usize>,
+        mut h: H,
+    ) -> T
+    where
+        for<'a> H: sans_io::Handle<&'a mut dyn Write, Return = Result<T, E>>,
+        E: Error + 'static,
+    {
+        for i in steps {
+            match h.handle(&mut BufferWrite::new(
+                data,
+                n.saturating_sub(data.len()).min(i),
+            )) {
+                Ok(v) => return v,
+                Err(e) if err_is_would_block(&e) => (),
+                Err(e) => panic!("IO error: {e}"),
+            }
+        }
+
+        h.handle(&mut BufferWrite::new(data, n.saturating_sub(data.len())).set_eof())
+            .unwrap()
+    }
+
     pub(crate) struct TestConfig {
         circ_4bytes: bool,
         pub(crate) cache: TestCache,
