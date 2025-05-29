@@ -373,23 +373,6 @@ fn derive_fast(key_x: &Sha1Output, key_y: &Sha1Output) -> DerivedFast {
     out
 }
 
-fn kdf_tor(key: &[&[u8]], out: &mut [u8]) {
-    let mut hasher = Sha1::new();
-    for k in key {
-        hasher.update(k);
-    }
-
-    let mut n = 255u8;
-    for o in out.chunks_mut(size_of::<Sha1Output>()) {
-        n = n.wrapping_add(1);
-
-        let mut hasher = hasher.clone();
-        hasher.update(from_ref(&n));
-        let hash = Sha1Output::from(hasher.finalize());
-        o.copy_from_slice(&hash[..o.len()]);
-    }
-}
-
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct NtorCreateData {
@@ -1335,12 +1318,6 @@ mod tests {
 
     use crate::cache::NullCellCache;
     use crate::cell::relay::Relay;
-
-    #[test]
-    fn test_kdf_tor() {
-        let mut out = [0; 255 * 32];
-        kdf_tor(&[b"test123", b"test234"], &mut out);
-    }
 
     #[test]
     fn test_handshake_fast() {
