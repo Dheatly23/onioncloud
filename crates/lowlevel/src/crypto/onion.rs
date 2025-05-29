@@ -12,6 +12,8 @@ use sha1::Sha1;
 use sha2::Sha256;
 use sha3::{Sha3_256, Shake256};
 use subtle::ConstantTimeEq;
+use tracing::field::display;
+use tracing::{instrument, trace};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout, Unaligned};
 
@@ -24,7 +26,7 @@ use crate::cell::relay::RelayLike;
 use crate::cell::{FIXED_CELL_SIZE, FixedCell};
 use crate::crypto::relay::RelayId;
 use crate::errors;
-use crate::util::print_ed;
+use crate::util::{print_ed, print_hex};
 
 /// Trait for relay rolling digest.
 ///
@@ -309,6 +311,7 @@ impl OnionLayerFast {
         let key = ThreadRng::default().r#gen::<Sha1Output>();
         let DerivedFast { kh, keys } = derive_fast(input.key(), &key);
 
+        trace!("server handshake successful");
         Ok((
             derive_keys(keys),
             CreatedFast::new(cell, input.circuit, key, kh),
@@ -318,6 +321,7 @@ impl OnionLayerFast {
     /// Starts handshake as server.
     ///
     /// The resulting [`CreatedFast`] cell should be send to client to finish handshake.
+    #[instrument(level = "debug", skip_all)]
     pub fn derive_server<C: CellCache>(
         cell: &CreateFast,
         cache: &C,
@@ -326,6 +330,7 @@ impl OnionLayerFast {
     }
 
     /// Same as [`derive_server`], but with [`Cached`] cell instead.
+    #[instrument(level = "debug", skip_all)]
     pub fn derive_server_cached<C: CellCache + Clone>(
         cell: &Cached<CreateFast, C>,
     ) -> Result<(OnionLayerData, Cached<CreatedFast, C>), errors::CircuitHandshakeError> {
@@ -335,6 +340,7 @@ impl OnionLayerFast {
     }
 
     /// Finish handshake as client.
+    #[instrument(level = "debug", skip_all)]
     pub fn derive_client(
         self,
         cell: &CreatedFast,
@@ -342,6 +348,7 @@ impl OnionLayerFast {
         let DerivedFast { kh, keys } = derive_fast(&self.key, cell.key());
         errors::CircuitHandshakeError::from_ct(kh.ct_eq(cell.derived()))?;
 
+        trace!("client handshake successful");
         Ok(derive_keys(keys))
     }
 }
@@ -529,6 +536,7 @@ impl OnionLayerNtor {
     /// - `id` : This relay ID.
     /// - `sk` : List of [`NtorOnionKey`] to be used.
     /// - `input` : Handshake payload from client.
+    #[instrument(level = "debug", skip_all, fields(id = %print_hex(id), onion_key))]
     pub fn derive_server_inner(
         id: &RelayId,
         sk: &[NtorOnionKey],
@@ -539,6 +547,7 @@ impl OnionLayerNtor {
         };
 
         let (derived, pk_y, auth) = ntor_derive_server(data, id, sk)?;
+        trace!("server handshake successful");
         Ok((derived, NtorCreatedData { pk_y, auth }))
     }
 
@@ -566,6 +575,7 @@ impl OnionLayerNtor {
     /// - `sk` : List of [`NtorOnionKey`] to be used.
     /// - `cell` : CREATE2 cell sent from client.
     /// - `cache` : Cell cache.
+    #[instrument(level = "debug", skip_all, fields(id = %print_hex(id)))]
     pub fn derive_server<C: CellCache>(
         id: &RelayId,
         sk: &[NtorOnionKey],
@@ -576,6 +586,7 @@ impl OnionLayerNtor {
     }
 
     /// Same as [`derive_server`], but with [`Cached`] cell instead.
+    #[instrument(level = "debug", skip_all, fields(id = %print_hex(id)))]
     pub fn derive_server_cached<C: CellCache + Clone>(
         id: &RelayId,
         sk: &[NtorOnionKey],
@@ -587,6 +598,7 @@ impl OnionLayerNtor {
     }
 
     /// Finish handshake as client.
+    #[instrument(level = "debug", skip_all, fields(id = %print_hex(&self.id), onion_key = %print_ed(self.pk_b.as_bytes())))]
     pub fn derive_client(
         self,
         cell: &Created2,
@@ -608,14 +620,16 @@ impl OnionLayerNtor {
         )?;
         errors::CircuitHandshakeError::from_ct(auth.ct_eq(&data.auth))?;
 
-        ntor_derive(
+        let ret = ntor_derive(
             xy,
             xb,
             &self.id,
             self.pk_b.as_bytes(),
             self.pk_x.as_bytes(),
             &data.pk_y,
-        )
+        )?;
+        trace!("client handshake successful");
+        Ok(ret)
     }
 }
 
@@ -631,6 +645,7 @@ fn ntor_derive_server(
     let Some(sk) = sk.iter().find(|k| *k.pk.as_bytes() == data.pk_b) else {
         return Err(errors::CircuitHandshakeErrorInner::ServerOnionKeyNotFound.into());
     };
+    tracing::Span::current().record("onion_key", display(sk));
 
     let sk_y = StaticSecret::random_from_rng(ThreadRng::default());
     let pk_y = PublicKey::from(&sk_y).to_bytes();
@@ -873,6 +888,7 @@ impl OnionLayerNtor3 {
     /// Process and decrypt client message.
     ///
     /// See [`OnionLayerNtor3Server::derive`] for more details.
+    #[instrument(level = "debug", skip_all, fields(id = %print_hex(id)))]
     pub fn derive_server_inner<'a>(
         id: &'a RelayId,
         sk: &'a [NtorOnionKey],
@@ -893,6 +909,7 @@ impl OnionLayerNtor3 {
     /// - `cache` : Cell cache.
     /// - `server_fn` : Closure that process client message and returns server message.
     ///   It may reuse client message slice to reduce allocation.
+    #[instrument(level = "debug", skip_all, fields(id = %print_hex(id)))]
     pub fn derive_server<
         'a,
         E: From<errors::CircuitHandshakeError>,
@@ -920,6 +937,7 @@ impl OnionLayerNtor3 {
     }
 
     /// Same as [`derive_server`], but with [`Cached`].
+    #[instrument(level = "debug", skip_all, fields(id = %print_hex(id)))]
     pub fn derive_server_cached<
         'a,
         E: From<errors::CircuitHandshakeError>,
@@ -940,6 +958,7 @@ impl OnionLayerNtor3 {
     ///
     /// This is only used if you want to roll out your own handshake.
     /// Use [`derive_client`] instead.
+    #[instrument(level = "debug", skip_all, fields(id = %print_hex(&self.id), onion_key = %print_ed(self.pk_b.as_bytes())))]
     pub fn derive_client_inner<'a>(
         self,
         data: &'a mut [u8],
@@ -973,12 +992,14 @@ impl OnionLayerNtor3 {
 
         Cipher256::new(&keys.enc.into(), &Default::default()).try_apply_keystream(server_msg)?;
 
+        trace!("client handshake successful");
         Ok((derive_keys(keys.keys), server_msg))
     }
 
     /// Finish handshake as client.
     ///
     /// Also returns decrypted server message.
+    #[instrument(level = "debug", skip_all, fields(id = %print_hex(&self.id), onion_key = %print_ed(self.pk_b.as_bytes())))]
     pub fn derive_client(
         self,
         cell: &mut Created2,
@@ -1011,6 +1032,7 @@ impl<'a> OnionLayerNtor3Server<'a> {
     /// - `sk` : Relay onion keys.
     /// - `input` : CREATE2 cell message.
     /// - `verify` : Shared verification string.
+    #[instrument(level = "debug", skip_all, fields(id = %print_hex(id), onion_key))]
     pub fn derive(
         id: &'a RelayId,
         sk: &'a [NtorOnionKey],
@@ -1031,6 +1053,7 @@ impl<'a> OnionLayerNtor3Server<'a> {
         let Some(sk) = sk.iter().find(|k| *k.pk.as_bytes() == header.pk_b) else {
             return Err(errors::CircuitHandshakeErrorInner::ServerOnionKeyNotFound.into());
         };
+        tracing::Span::current().record("onion_key", display(sk));
 
         let pk_x = PublicKey::from(header.pk_x);
         let xb = sk.sk.diffie_hellman(&pk_x);
@@ -1072,6 +1095,7 @@ impl<'a> OnionLayerNtor3Server<'a> {
     /// ```text
     /// header | server_msg
     /// ```
+    #[instrument(level = "debug", skip_all, fields(id = %print_hex(self.id), onion_key = %self.b))]
     pub fn finalize(
         self,
         server_msg: &mut [u8],
@@ -1098,6 +1122,7 @@ impl<'a> OnionLayerNtor3Server<'a> {
             server_msg,
         );
 
+        trace!("server handshake successful");
         Ok((
             derive_keys(keys.keys),
             NtorCreatedData {
