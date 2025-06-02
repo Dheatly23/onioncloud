@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod cell;
 pub mod channel;
+pub mod circuit;
 pub mod crypto;
 pub mod errors;
 pub mod linkver;
