@@ -9,6 +9,8 @@ use std::time::Instant;
 
 use crate::crypto::relay::{RelayId, RelayIdEd};
 
+pub use circ_map::*;
+
 /// Trait for channel configuration.
 pub trait ChannelConfig {
     /// Get peer relay ID.
@@ -99,6 +101,32 @@ impl ChannelOutput {
     pub fn cell_msg_pause(&mut self, value: CellMsgPause) -> &mut Self {
         self.cell_msg_pause = value.0;
         self
+    }
+}
+
+/// Marker type for channel timeout.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Timeout;
+
+/// Wrapper type for signalling a control message.
+#[derive(Debug)]
+pub struct ControlMsg<M>(pub M);
+
+impl<M> ControlMsg<M> {
+    /// Unwraps into inner value.
+    pub fn into_inner(self) -> M {
+        self.0
+    }
+}
+
+/// Wrapper type for signalling a cell message.
+#[derive(Debug)]
+pub struct CellMsg<M>(pub M);
+
+impl<M> CellMsg<M> {
+    /// Unwraps into inner value.
+    pub fn into_inner(self) -> M {
+        self.0
     }
 }
 

@@ -19,10 +19,12 @@ use onioncloud_lowlevel::cell::netinfo::Netinfo;
 use onioncloud_lowlevel::cell::versions::Versions;
 use onioncloud_lowlevel::cell::writer::CellWriter;
 use onioncloud_lowlevel::cell::{Cell, CellHeader, CellLike, FixedCell};
-use onioncloud_lowlevel::channel::circ_map::CircuitMap;
-use onioncloud_lowlevel::channel::controller::{CellMsg, ChannelController, ControlMsg, Timeout};
+use onioncloud_lowlevel::channel::controller::ChannelController;
 use onioncloud_lowlevel::channel::manager::ChannelManager;
-use onioncloud_lowlevel::channel::{CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput};
+use onioncloud_lowlevel::channel::{
+    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, CircuitMap, ControlMsg,
+    Timeout,
+};
 use onioncloud_lowlevel::crypto::cert::{
     UnverifiedEdCert, UnverifiedRsaCert, extract_rsa_from_x509,
 };

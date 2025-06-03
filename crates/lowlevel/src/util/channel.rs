@@ -5,9 +5,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::channel::circ_map::CircuitMap;
-use crate::channel::controller::{CellMsg, ChannelController, ControlMsg, Timeout};
-use crate::channel::{ChannelInput, Stream};
+use crate::channel::controller::ChannelController;
+use crate::channel::{CellMsg, ChannelInput, CircuitMap, ControlMsg, Stream, Timeout};
 
 /// Test controller.
 ///

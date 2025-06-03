@@ -10,12 +10,9 @@ use tracing::{info, instrument};
 use onioncloud_lowlevel::cache::{Cached, CellCache, StandardCellCache, cast};
 use onioncloud_lowlevel::cell::destroy::{Destroy, DestroyReason};
 use onioncloud_lowlevel::cell::relay::Relay;
-use onioncloud_lowlevel::channel::ChannelConfig;
-use onioncloud_lowlevel::channel::circ_map::NewCircuit;
-use onioncloud_lowlevel::channel::controller::user_controller::{
-    UserConfig, UserControlMsg, UserController,
-};
+use onioncloud_lowlevel::channel::controller::{UserConfig, UserControlMsg, UserController};
 use onioncloud_lowlevel::channel::manager::ChannelManager;
+use onioncloud_lowlevel::channel::{ChannelConfig, NewCircuit};
 use onioncloud_lowlevel::crypto::onion::{
     OnionLayer as _, OnionLayerData, OnionLayerFast, RelayDigest as _,
 };

@@ -17,13 +17,14 @@ use onioncloud_lowlevel::cell::dispatch::{CellReader, CellType, WithCellConfig};
 use onioncloud_lowlevel::cell::versions::Versions;
 use onioncloud_lowlevel::cell::writer::CellWriter;
 use onioncloud_lowlevel::cell::{Cell, CellHeader, FixedCell, cast};
-use onioncloud_lowlevel::channel::circ_map::CircuitMap;
-use onioncloud_lowlevel::channel::controller::user_controller::{
-    UserConfig, UserControlMsg, UserController,
+use onioncloud_lowlevel::channel::controller::{
+    ChannelController, UserConfig, UserControlMsg, UserController,
 };
-use onioncloud_lowlevel::channel::controller::{CellMsg, ChannelController, ControlMsg, Timeout};
 use onioncloud_lowlevel::channel::manager::ChannelManager;
-use onioncloud_lowlevel::channel::{CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput};
+use onioncloud_lowlevel::channel::{
+    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, CircuitMap, ControlMsg,
+    Timeout,
+};
 use onioncloud_lowlevel::crypto::relay::RelayId;
 use onioncloud_lowlevel::errors;
 use onioncloud_lowlevel::linkver::StandardLinkver;

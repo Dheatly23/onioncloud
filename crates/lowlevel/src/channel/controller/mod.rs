@@ -1,4 +1,4 @@
-pub mod user_controller;
+pub mod user;
 
 use std::fmt::{Debug, Display};
 use std::io::Error as IoError;
@@ -7,36 +7,12 @@ use std::sync::Arc;
 use rustls::Error as RustlsError;
 
 use super::circ_map::CircuitMap;
-use super::{CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput};
+use super::{
+    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, ControlMsg, Timeout,
+};
 use crate::util::sans_io::Handle;
 
-pub use user_controller::UserController;
-
-/// Marker type for channel timeout.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Timeout;
-
-/// Wrapper type for signalling a control message.
-#[derive(Debug)]
-pub struct ControlMsg<M>(pub M);
-
-impl<M> ControlMsg<M> {
-    /// Unwraps into inner value.
-    pub fn into_inner(self) -> M {
-        self.0
-    }
-}
-
-/// Wrapper type for signalling a cell message.
-#[derive(Debug)]
-pub struct CellMsg<M>(pub M);
-
-impl<M> CellMsg<M> {
-    /// Unwraps into inner value.
-    pub fn into_inner(self) -> M {
-        self.0
-    }
-}
+pub use user::{UserConfig, UserControlMsg, UserController};
 
 /// Trait for a channel controller.
 ///
