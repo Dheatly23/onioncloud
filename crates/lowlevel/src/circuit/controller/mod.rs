@@ -16,7 +16,7 @@ pub trait CircuitController:
     + Handle<ControlMsg<Self::ControlMsg>, Return = Result<(), Self::Error>>
     + Handle<CellMsg<Self::Cell>, Return = Result<CellMsgPause, Self::Error>>
 {
-    type Config: 'static + Send + Sync;
+    type Config: 'static + Send + Sync + Display;
     type Error: 'static + Debug + Display + Send + Sync;
     type ControlMsg: 'static + Send;
     type Cell: 'static + Send;

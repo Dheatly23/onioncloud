@@ -1,7 +1,6 @@
 pub mod controller;
 pub mod manager;
 
-use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::ops::{Deref, DerefMut};
 use std::time::Instant;
@@ -15,17 +14,15 @@ use crate::cell::destroy::{Destroy, DestroyReason};
 pub struct CircuitInput<'a, Cell> {
     id: NonZeroU32,
     time: Instant,
-    chan_closed: bool,
+    chan_closed: &'a mut bool,
     agg_send: &'a Sender<Cell>,
-
-    _phantom: PhantomData<&'a mut ()>,
 }
 
 impl<'a, Cell> CircuitInput<'a, Cell> {
     pub(crate) fn new(
         id: NonZeroU32,
         time: Instant,
-        chan_closed: bool,
+        chan_closed: &'a mut bool,
         agg_send: &'a Sender<Cell>,
     ) -> Self {
         Self {
@@ -33,7 +30,6 @@ impl<'a, Cell> CircuitInput<'a, Cell> {
             time,
             chan_closed,
             agg_send,
-            _phantom: PhantomData,
         }
     }
 
@@ -47,19 +43,32 @@ impl<'a, Cell> CircuitInput<'a, Cell> {
         self.id
     }
 
+    /// Returns [`true`] if channel is closed.
+    pub fn is_closed(&self) -> bool {
+        *self.chan_closed
+    }
+
     /// Try to send cell unsafely.
     ///
     /// # Safety
     ///
     /// Cell circuit ID must match [`id`].
-    pub unsafe fn try_send_unchecked(&self, cell: Cell) -> Result<(), TrySendError<Cell>> {
-        self.agg_send.try_send(cell)
+    pub unsafe fn try_send_unchecked(&mut self, cell: Cell) -> Result<(), TrySendError<Cell>> {
+        if self.is_closed() {
+            return Err(TrySendError::Disconnected(cell));
+        }
+
+        let r = self.agg_send.try_send(cell);
+        if matches!(r, Err(TrySendError::Disconnected(_))) {
+            *self.chan_closed = true;
+        }
+        r
     }
 
     /// Try to send cell.
     ///
     /// Panics if cell circuit ID does not match [`id`].
-    pub fn try_send(&self, cell: Cell) -> Result<(), TrySendError<Cell>>
+    pub fn try_send(&mut self, cell: Cell) -> Result<(), TrySendError<Cell>>
     where
         Cell: CellLike,
     {
