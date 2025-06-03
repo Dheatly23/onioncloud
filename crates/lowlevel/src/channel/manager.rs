@@ -257,7 +257,7 @@ impl<R: Runtime, C: ChannelController, M> Channel<R, C, M> {
     {
         let mut this = self.project();
 
-        if this.handle.is_finished() {
+        if !this.handle.is_finished() {
             return false;
         }
 
@@ -276,7 +276,7 @@ impl<R: Runtime, C: ChannelController, M> Channel<R, C, M> {
     {
         let mut this = self.project();
 
-        if this.handle.is_finished() {
+        if !this.handle.is_finished() {
             return false;
         }
 
@@ -343,6 +343,7 @@ impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
     /// Restarts controller if stopped.
     ///
     /// Sometimes it's useful to reuse state.
+    #[inline(always)]
     pub fn restart(&mut self) -> bool
     where
         R: 'static + Clone,
@@ -352,6 +353,7 @@ impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
     }
 
     /// Restarts controller if stopped (with attached stream).
+    #[inline(always)]
     pub fn restart_with(&mut self, stream: R::Stream) -> bool
     where
         R: 'static + Clone,
