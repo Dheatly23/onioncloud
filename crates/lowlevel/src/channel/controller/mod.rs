@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use rustls::Error as RustlsError;
 
-use super::circ_map::CircuitMap;
 use super::{
-    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, ControlMsg, Timeout,
+    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, CircuitMap, ControlMsg,
+    Timeout,
 };
 use crate::util::sans_io::Handle;
 

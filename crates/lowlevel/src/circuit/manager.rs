@@ -18,7 +18,7 @@ use tracing::{Span, debug, debug_span, error, info, instrument, trace, warn};
 
 use super::controller::CircuitController;
 use super::{CellMsg, CircuitInput, CircuitOutput, ControlMsg, Timeout};
-use crate::channel::circ_map::NewCircuit;
+use crate::channel::NewCircuit;
 use crate::errors;
 use crate::runtime::{Runtime, Timer};
 use crate::util::FutureRepollable;

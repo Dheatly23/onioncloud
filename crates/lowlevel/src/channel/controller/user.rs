@@ -25,9 +25,11 @@ use crate::cell::padding::{Padding, VPadding};
 use crate::cell::versions::Versions;
 use crate::cell::writer::CellWriter;
 use crate::cell::{Cell, CellHeader, CellLike, FixedCell};
-use crate::channel::circ_map::{CircuitMap, NewCircuit};
-use crate::channel::controller::{CellMsg, ChannelController, ControlMsg, Timeout};
-use crate::channel::{CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput};
+use crate::channel::controller::ChannelController;
+use crate::channel::{
+    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, CircuitMap, ControlMsg,
+    NewCircuit, Timeout,
+};
 use crate::crypto::cert::{UnverifiedEdCert, UnverifiedRsaCert, extract_rsa_from_x509};
 use crate::crypto::{EdPublicKey, Sha256Output};
 use crate::errors;

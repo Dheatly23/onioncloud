@@ -18,9 +18,8 @@ use rustls::client::ClientConnection;
 use scopeguard::guard;
 use tracing::{Span, debug, debug_span, error, info, instrument, trace, warn};
 
-use super::circ_map::CircuitMap;
 use super::controller::ChannelController;
-use super::{CellMsg, ChannelConfig, ChannelInput, ControlMsg, Stream, Timeout};
+use super::{CellMsg, ChannelConfig, ChannelInput, CircuitMap, ControlMsg, Stream, Timeout};
 use crate::crypto::relay::RelayId;
 use crate::crypto::tls::setup_client;
 use crate::errors;
