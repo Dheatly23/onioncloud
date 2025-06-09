@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use digest::Digest;
 use flume::TrySendError;
 use futures_channel::oneshot::{Receiver, Sender, channel};
+use scopeguard::guard;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tracing::{debug, error, info, instrument, trace, warn};
@@ -155,7 +156,7 @@ struct SteadyState {
     cell_read: Reader,
     cell_write: CellWriter<CachedCell>,
 
-    in_buffer: InBuffer<CachedCell>,
+    in_buffer: InBuffer<CachedCell<Option<Cell>>>,
     out_buffer: OutBuffer<CachedCell>,
 
     pending_open: VecDeque<Sender<Result<NewCircuit<CachedCell>, errors::NoFreeCircIDError>>>,
@@ -169,8 +170,17 @@ struct SteadyState {
 /// It is marked public only for [`ChannelController`] purposes.
 /// It cannot be created.
 pub struct CircuitMeta {
-    last_full: Instant,
     closing: bool,
+
+    /// Time until circuit is allowed to receive cell again.
+    last_full: Instant,
+    /// Backoff multiplier.
+    ///
+    /// Using AIMD algorithm for backoff.
+    /// Every time it fails to send cell, multiply backoff by 2.
+    /// Every time it succeed, reduce backoff by 1.
+    /// Backoff is clamped to MAX_BACKOFF.
+    backoff_mult: u8,
 }
 
 impl<Cfg: 'static + UserConfig + Send + Sync> ChannelController for UserController<Cfg> {
@@ -250,8 +260,13 @@ impl<'a, Cfg: 'static + UserConfig + Send + Sync>
                     }
                 },
                 State::Steady(ref mut state) => {
-                    self.is_timeout = false;
-                    return state.handle(&self.link_cfg, last_packet, input, circ_map);
+                    return state.handle(
+                        take(&mut self.is_timeout),
+                        &self.link_cfg,
+                        last_packet,
+                        input,
+                        circ_map,
+                    );
                 }
                 State::Shutdown => {
                     let mut ret = ChannelOutput::new();
@@ -587,18 +602,31 @@ fn check_cert(
     Ok(())
 }
 
+fn option_ord_min<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
+    match (a, b) {
+        (v, None) | (None, v) => v,
+        (Some(a), Some(b)) => Some(a.min(b)),
+    }
+}
+
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 const FULL_TIMEOUT: Duration = Duration::from_millis(100);
 const CLOSE_SCAN_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_BACKOFF: u8 = 20;
 
 fn update_last_packet(ptr: &mut Instant, input: &ChannelInput<'_>) {
     *ptr = input.time() + IDLE_TIMEOUT;
 }
 
+const FLAG_READ: u8 = 1 << 0;
+const FLAG_WRITE: u8 = 1 << 1;
+const FLAG_WRITE_EMPTY: u8 = 1 << 2;
+
 impl SteadyState {
     #[instrument(level = "debug", skip_all)]
     fn handle(
         &mut self,
+        mut is_timeout: bool,
         cfg: &LinkCfg,
         last_packet: &mut Instant,
         mut input: ChannelInput<'_>,
@@ -622,8 +650,10 @@ impl SteadyState {
             if let Err(Ok(NewCircuit { id, .. })) = send.send(
                 circ_map
                     .open_with(true, cfg.is_circ_id_4bytes(), 64, |_| CircuitMeta {
-                        last_full: input.time(),
                         closing: false,
+
+                        last_full: input.time(),
+                        backoff_mult: 0,
                     })
                     .map(|v| v.0),
             ) {
@@ -631,160 +661,30 @@ impl SteadyState {
             }
         }
 
-        const FLAG_READ: u8 = 1 << 0;
-        const FLAG_WRITE: u8 = 1 << 1;
-        const FLAG_WRITE_EMPTY: u8 = 1 << 2;
-        const FLAG_FULL_TIMEOUT: u8 = 1 << 7;
-
         let mut flags = 0;
+        let mut full_timeout = None;
         loop {
+            // Read data from stream
             if flags & FLAG_READ == 0 {
-                // Read data from stream
-                while !self.in_buffer.is_full() {
-                    let Some(cell) = read_cell(&mut self.cell_read, &mut input)? else {
-                        flags |= FLAG_READ;
-                        break;
-                    };
-                    if cell.circuit != 0 {
-                        update_last_packet(last_packet, &input);
-                        self.in_buffer.push(cfg.cache.cache(cell));
-                        continue;
-                    }
-
-                    let mut cell = cfg.cache.cache(Some(cell));
-                    // TODO: Handle padding
-                    cast::<Padding>(&mut cell)?;
-                    cast::<VPadding>(&mut cell)?;
-                    cast::<Versions>(&mut cell)?;
-
-                    if let Some(cell) = &*cell {
-                        // NOTE: Potential protocol violation
-                        trace!("unhandled cell with command {} received", cell.command);
-                    }
-                }
-
-                // Process in buffer
-                self.in_buffer.scan_pop(|p| {
-                    let Some(cell) = p.take() else { return Ok(()) };
-                    let id = NonZeroU32::new(cell.circuit).unwrap();
-                    let mut cell = Cached::map(cell, Some);
-
-                    if let Some(cell) = cast::<Create2>(&mut cell)? {
-                        cfg.cache.cache_cell(cell.into());
-                        // User controller cannot create circuit by peer
-                        self.pending_close.push_back((id, DestroyReason::Protocol));
-                        // Pending DESTROY cell, clear flag
-                        flags &= !FLAG_WRITE_EMPTY;
-                        return Ok(());
-                    }
-
-                    let Some(circ) = circ_map.get(id) else {
-                        // Ignore all unmapped circuit ID.
-                        return Ok(());
-                    };
-                    if circ.meta.closing {
-                        // Circuit closing, discard cell
-                        return Ok(());
-                    }
-
-                    if let Some(cell) = cast::<Destroy>(&mut cell)? {
-                        debug!(id, "peer is closing circuit");
-                        match circ.send(cfg.cache.cache(cell.into())) {
-                            Ok(()) => (),
-                            Err(TrySendError::Full(_)) => warn!(
-                                id,
-                                "cannot send DESTROY cell to handler because channel is full"
-                            ),
-                            // Circuit is closing while peer is closing.
-                            Err(TrySendError::Disconnected(_)) => (),
-                        }
-                        circ_map.remove(id);
-                        return Ok(());
-                    }
-
-                    let Some(cell) = Cached::transpose(cell) else {
-                        return Ok(());
-                    };
-                    if circ.meta.last_full > input.time() {
-                        // Sender recently full, return cell
-                        *p = Some(cell);
-                        return Ok(());
-                    }
-
-                    match circ.send(cell) {
-                        Ok(()) => (),
-                        // Full, return cell and set last full
-                        Err(TrySendError::Full(cell)) => {
-                            *p = Some(cell);
-                            circ.meta.last_full = input.time() + FULL_TIMEOUT;
-                            flags |= FLAG_FULL_TIMEOUT;
-                        }
-                        // Circuit is closing, drop cell and close it for real
-                        Err(TrySendError::Disconnected(_)) => {
-                            debug!(id, "cannot send cell, circuit is closing");
-                            circ.meta.closing = true;
-                            self.pending_close.push_back((id, DestroyReason::Internal));
-                            // Pending DESTROY cell, clear flag
-                            flags &= !FLAG_WRITE_EMPTY;
-                        }
-                    }
-
-                    Ok::<(), errors::UserControllerError>(())
-                })?;
-
-                // Cannot receive anymore
-                if self.in_buffer.is_full() {
-                    flags |= FLAG_READ;
-                }
+                let t;
+                (flags, t) = read_handler(
+                    self,
+                    take(&mut is_timeout),
+                    cfg,
+                    last_packet,
+                    &mut input,
+                    circ_map,
+                    flags,
+                )?;
+                full_timeout = option_ord_min(full_timeout, t);
             }
 
             // Write data into stream
             if flags & (FLAG_WRITE | FLAG_WRITE_EMPTY) == 0 {
-                loop {
-                    let finished = self.cell_write.is_finished();
-                    if !write_cell(&mut self.cell_write, &mut input)? {
-                        flags |= FLAG_WRITE;
-                        break;
-                    }
-                    if !finished {
-                        // Writer just finished writing
-                        update_last_packet(last_packet, &input);
-                    }
-
-                    let mut found = self.pending_close.pop_front().map(|(id, reason)| {
-                        let meta = circ_map.remove(id);
-                        debug_assert!(meta.expect("circuit must exist").closing);
-                        // Prepend DESTROY cell
-                        cfg.cache
-                            .cache(Destroy::new(cfg.cache.get_cached(), id, reason).into())
-                    });
-                    while found.is_none() {
-                        let Some(cell) = self.out_buffer.pop_front() else {
-                            break;
-                        };
-
-                        if NonZeroU32::new(cell.circuit).is_none_or(|id| !circ_map.has(id)) {
-                            // Unmapped circuit ID. Probably non-graceful shutdown.
-                            continue;
-                        }
-                        let mut cell = Cached::map(cell, Some);
-
-                        found = if let Some(cell) = cast::<Destroy>(&mut cell)? {
-                            circ_map.remove(cell.circuit);
-                            Some(cfg.cache.cache(cell.into()))
-                        } else {
-                            Cached::transpose(cell)
-                        };
-                    }
-
-                    let Some(cell) = found else {
-                        flags |= FLAG_WRITE_EMPTY;
-                        break;
-                    };
-                    self.cell_write = CellWriter::with_cell_config(cell, &cfg)?;
-                }
+                flags = write_handler(self, cfg, last_packet, &mut input, circ_map, flags)?;
             }
 
+            trace!(flags, "processing");
             if flags & FLAG_READ != 0 && flags & (FLAG_WRITE | FLAG_WRITE_EMPTY) != 0 {
                 break;
             }
@@ -792,9 +692,9 @@ impl SteadyState {
 
         let mut timeout = *last_packet;
         timeout = timeout.min(self.close_scan);
-        if flags & FLAG_FULL_TIMEOUT != 0 {
+        if let Some(t) = full_timeout {
             // Full timeout
-            timeout = timeout.min(input.time() + FULL_TIMEOUT);
+            timeout = timeout.min(t);
         }
 
         let mut ret = ChannelOutput::new();
@@ -812,4 +712,212 @@ impl SteadyState {
         self.out_buffer.push_back(cell);
         Ok(self.out_buffer.is_full().into())
     }
+}
+
+#[inline(always)]
+fn read_handler(
+    this: &mut SteadyState,
+    is_timeout: bool,
+    cfg: &LinkCfg,
+    last_packet: &mut Instant,
+    input: &mut ChannelInput<'_>,
+    circ_map: &mut CircuitMap<CachedCell, CircuitMeta>,
+    mut flags: u8,
+) -> Result<(u8, Option<Instant>), errors::UserControllerError> {
+    let mut process_in = is_timeout;
+
+    // Read data from stream
+    while !this.in_buffer.is_full() {
+        let Some(cell) = read_cell(&mut this.cell_read, input)? else {
+            flags |= FLAG_READ;
+            break;
+        };
+        if cell.circuit != 0 {
+            update_last_packet(last_packet, input);
+            this.in_buffer.push(cfg.cache.cache(Some(cell)));
+            process_in = true;
+            continue;
+        }
+
+        let mut cell = cfg.cache.cache(Some(cell));
+        // TODO: Handle padding
+        cast::<Padding>(&mut cell)?;
+        cast::<VPadding>(&mut cell)?;
+        cast::<Versions>(&mut cell)?;
+
+        if let Some(cell) = &*cell {
+            // NOTE: Potential protocol violation
+            trace!("unhandled cell with command {} received", cell.command);
+        }
+    }
+
+    let mut full_timeout = None;
+
+    // Process in buffer.
+    // Should only be done if timeout or in buffer has new data.
+    if process_in {
+        this.in_buffer.scan_pop(|p| {
+            let mut p = guard(p, |p| match p {
+                Some(v) if v.is_none() => *p = None,
+                _ => (),
+            });
+            let Some(cell) = p.as_mut() else {
+                return Ok(());
+            };
+
+            if let Some(cell) = cast::<Create2>(cell)? {
+                let id = cell.circuit;
+                cfg.cache.cache_cell(cell.into());
+                // User controller cannot create circuit by peer
+                this.pending_close.push_back((id, DestroyReason::Protocol));
+                // Pending DESTROY cell, clear flag
+                flags &= !FLAG_WRITE_EMPTY;
+                return Ok(());
+            }
+
+            let Some(c) = cell.as_ref() else {
+                return Ok(());
+            };
+            let id = NonZeroU32::new(c.circuit).expect("circuit ID should not be zero");
+            let Some(circ) = circ_map.get(id) else {
+                // Discard all unmapped circuit ID.
+                debug!(id, command = c.command, "discard unmapped circuit ID cell");
+                **p = None;
+                return Ok(());
+            };
+            if circ.meta.closing {
+                // Circuit closing, discard cell
+                debug!(id, command = c.command, "discard closing circuit cell");
+                **p = None;
+                return Ok(());
+            }
+
+            if let Some(cell) = cast::<Destroy>(cell)? {
+                let reason = cell.display_reason();
+                debug!(id, reason = display(reason), "peer is closing circuit");
+                match circ.send(cfg.cache.cache(cell.into())) {
+                    Ok(()) => (),
+                    Err(TrySendError::Full(_)) => warn!(
+                        id,
+                        reason = display(reason),
+                        "cannot send DESTROY cell to handler because channel is full"
+                    ),
+                    // Circuit is closing while peer is closing.
+                    Err(TrySendError::Disconnected(_)) => (),
+                }
+                circ_map.remove(id);
+                return Ok(());
+            }
+
+            if circ.meta.last_full > input.time() {
+                // Sender recently full
+                return Ok(());
+            }
+
+            let Some(Some(cell)) = p.take().map(Cached::transpose) else {
+                return Ok(());
+            };
+
+            match circ.send(cell) {
+                // Success, decrease backoff
+                Ok(()) => circ.meta.backoff_mult = circ.meta.backoff_mult.saturating_sub(1),
+                // Full, return cell and set last full
+                Err(TrySendError::Full(cell)) => {
+                    **p = Some(Cached::map(cell, Some));
+
+                    let mut mult = circ.meta.backoff_mult;
+                    // Multiply backoff
+                    mult = mult
+                        .checked_mul(2)
+                        .map_or(MAX_BACKOFF, |v| v.clamp(1, MAX_BACKOFF));
+
+                    let t = input.time() + FULL_TIMEOUT * u32::from(mult);
+                    circ.meta.backoff_mult = mult;
+                    circ.meta.last_full = t;
+                    full_timeout = option_ord_min(full_timeout, Some(t));
+
+                    debug!(
+                        id,
+                        mult,
+                        time = debug(t),
+                        "cannot send cell, circuit is full"
+                    );
+                }
+                // Circuit is closing, drop cell and close it for real
+                Err(TrySendError::Disconnected(_)) => {
+                    debug!(id, "cannot send cell, circuit is closing");
+                    circ.meta.closing = true;
+
+                    this.pending_close.push_back((id, DestroyReason::Internal));
+                    // Pending DESTROY cell, clear flag
+                    flags &= !FLAG_WRITE_EMPTY;
+                }
+            }
+
+            Ok::<(), errors::UserControllerError>(())
+        })?;
+    }
+
+    // Cannot receive anymore
+    if this.in_buffer.is_full() {
+        flags |= FLAG_READ;
+    }
+
+    Ok((flags, full_timeout))
+}
+
+#[inline(always)]
+fn write_handler(
+    this: &mut SteadyState,
+    cfg: &LinkCfg,
+    last_packet: &mut Instant,
+    input: &mut ChannelInput<'_>,
+    circ_map: &mut CircuitMap<CachedCell, CircuitMeta>,
+    mut flags: u8,
+) -> Result<u8, errors::UserControllerError> {
+    loop {
+        let finished = this.cell_write.is_finished();
+        if !write_cell(&mut this.cell_write, input)? {
+            flags |= FLAG_WRITE;
+            break;
+        }
+        if !finished {
+            // Writer just finished writing
+            update_last_packet(last_packet, input);
+        }
+
+        let mut found = this.pending_close.pop_front().map(|(id, reason)| {
+            let meta = circ_map.remove(id);
+            debug_assert!(meta.expect("circuit must exist").closing);
+            // Prepend DESTROY cell
+            cfg.cache
+                .cache(Destroy::new(cfg.cache.get_cached(), id, reason).into())
+        });
+        while found.is_none() {
+            let Some(cell) = this.out_buffer.pop_front() else {
+                break;
+            };
+
+            if NonZeroU32::new(cell.circuit).is_none_or(|id| !circ_map.has(id)) {
+                // Unmapped circuit ID. Probably non-graceful shutdown.
+                continue;
+            }
+            let mut cell = Cached::map(cell, Some);
+
+            found = if let Some(cell) = cast::<Destroy>(&mut cell)? {
+                circ_map.remove(cell.circuit);
+                Some(cfg.cache.cache(cell.into()))
+            } else {
+                Cached::transpose(cell)
+            };
+        }
+
+        let Some(cell) = found else {
+            flags |= FLAG_WRITE_EMPTY;
+            break;
+        };
+        this.cell_write = CellWriter::with_cell_config(cell, &cfg)?;
+    }
+
+    Ok(flags)
 }

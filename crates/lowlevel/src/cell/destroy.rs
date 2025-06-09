@@ -1,7 +1,7 @@
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::num::NonZeroU32;
-use std::slice::from_ref;
 
-use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes, Unaligned};
+use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes, Unaligned, try_transmute};
 
 use super::{Cell, CellHeader, CellLike, CellRef, FixedCell, TryFromCell, to_fixed};
 use crate::errors;
@@ -89,14 +89,43 @@ impl Destroy {
 
     /// Gets destroy reason.
     pub fn reason(&self) -> Result<DestroyReason, u8> {
-        let b = &self.cell.data()[0];
-        DestroyReason::try_read_from_bytes(from_ref(b)).map_err(|_| *b)
+        try_cast(self.cell.data()[0])
+    }
+
+    /// Display destroy reason.
+    pub fn display_reason(&self) -> impl 'static + Debug + Display + Copy {
+        #[derive(Clone, Copy)]
+        struct S(u8);
+
+        impl Debug for S {
+            fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+                match try_cast(self.0) {
+                    Ok(v) => Debug::fmt(&v, f),
+                    Err(v) => write!(f, "unknown({v})"),
+                }
+            }
+        }
+
+        impl Display for S {
+            fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+                match try_cast(self.0) {
+                    Ok(v) => Display::fmt(&v, f),
+                    Err(v) => write!(f, "unknown({v})"),
+                }
+            }
+        }
+
+        S(self.cell.data()[0])
     }
 
     /// Unwraps into inner [`FixedCell`].
     pub fn into_inner(self) -> FixedCell {
         self.cell
     }
+}
+
+fn try_cast(v: u8) -> Result<DestroyReason, u8> {
+    try_transmute!(v).map_err(|_| v)
 }
 
 /// Destroy reason code.
@@ -160,6 +189,28 @@ pub enum DestroyReason {
 
     /// Hidden service not found.
     NoSuchService = 12,
+}
+
+impl Display for DestroyReason {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        // NOTE: Better reason message?
+        let s = match self {
+            Self::None => "no reason",
+            Self::Protocol => "protocol error",
+            Self::Internal => "internal error",
+            Self::Requested => "truncated",
+            Self::Hibernating => "hibernating",
+            Self::ResourceLimit => "resource limit",
+            Self::ConnectFailed => "failed to extend circuit",
+            Self::OrIdentity => "relay identity mismatch",
+            Self::ChannelClosed => "peer is closing channel",
+            Self::Finished => "circuit finished",
+            Self::Timeout => "circuit timeout",
+            Self::Destroyed => "circuit destroyed",
+            Self::NoSuchService => "hidden service not found",
+        };
+        Display::fmt(s, f)
+    }
 }
 
 impl From<DestroyReason> for u8 {

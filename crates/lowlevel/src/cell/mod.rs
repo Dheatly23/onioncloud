@@ -351,23 +351,6 @@ impl Cell {
     ) -> IoResult<Self> {
         util::async_reader(reader, reader::VariableCellReader::new(header)).await
     }
-
-    fn into_fixed_with(
-        self,
-        f: impl FnOnce(&[u8; FIXED_CELL_SIZE]) -> bool,
-    ) -> Result<FixedCell, Self> {
-        match self.data {
-            CellData::Fixed(v) if f(v.data()) => Ok(v),
-            _ => Err(self),
-        }
-    }
-
-    fn into_variable_with(self, f: impl FnOnce(&[u8]) -> bool) -> Result<VariableCell, Self> {
-        match self.data {
-            CellData::Variable(v) if f(v.data()) => Ok(v),
-            _ => Err(self),
-        }
-    }
 }
 
 /// Trait to cast from a cell.
@@ -472,26 +455,34 @@ impl CellLike for Cell {
 pub(crate) fn to_fixed(
     cell: &mut Option<Cell>,
 ) -> Result<Option<FixedCell>, errors::CellFormatError> {
-    cell.take()
-        .map(|v| v.into_fixed())
-        .transpose()
-        .map_err(|v| {
-            *cell = Some(v);
-            errors::CellFormatError
-        })
+    match cell.take() {
+        Some(Cell {
+            data: CellData::Fixed(v),
+            ..
+        }) => Ok(Some(v)),
+        None => Ok(None),
+        v => {
+            *cell = v;
+            Err(errors::CellFormatError)
+        }
+    }
 }
 
 /// Helper to take a [`VariableCell`].
 pub(crate) fn to_variable(
     cell: &mut Option<Cell>,
 ) -> Result<Option<VariableCell>, errors::CellFormatError> {
-    cell.take()
-        .map(|v| v.into_variable())
-        .transpose()
-        .map_err(|v| {
-            *cell = Some(v);
-            errors::CellFormatError
-        })
+    match cell.take() {
+        Some(Cell {
+            data: CellData::Variable(v),
+            ..
+        }) => Ok(Some(v)),
+        None => Ok(None),
+        v => {
+            *cell = v;
+            Err(errors::CellFormatError)
+        }
+    }
 }
 
 /// Helper to take a [`FixedCell`] with check function.
@@ -499,13 +490,17 @@ pub(crate) fn to_fixed_with(
     cell: &mut Option<Cell>,
     check: impl FnOnce(&[u8; FIXED_CELL_SIZE]) -> bool,
 ) -> Result<Option<FixedCell>, errors::CellFormatError> {
-    cell.take()
-        .map(|v| v.into_fixed_with(check))
-        .transpose()
-        .map_err(|v| {
-            *cell = Some(v);
-            errors::CellFormatError
-        })
+    match cell.take() {
+        Some(Cell {
+            data: CellData::Fixed(v),
+            ..
+        }) if check(v.data()) => Ok(Some(v)),
+        None => Ok(None),
+        v => {
+            *cell = v;
+            Err(errors::CellFormatError)
+        }
+    }
 }
 
 /// Helper to take a [`VariableCell`] with check function.
@@ -513,13 +508,17 @@ pub(crate) fn to_variable_with(
     cell: &mut Option<Cell>,
     check: impl FnOnce(&[u8]) -> bool,
 ) -> Result<Option<VariableCell>, errors::CellFormatError> {
-    cell.take()
-        .map(|v| v.into_variable_with(check))
-        .transpose()
-        .map_err(|v| {
-            *cell = Some(v);
-            errors::CellFormatError
-        })
+    match cell.take() {
+        Some(Cell {
+            data: CellData::Variable(v),
+            ..
+        }) if check(v.data()) => Ok(Some(v)),
+        None => Ok(None),
+        v => {
+            *cell = v;
+            Err(errors::CellFormatError)
+        }
+    }
 }
 
 /// Cell header.

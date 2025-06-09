@@ -330,7 +330,7 @@ async fn test_user_controller_async() {
 
     info!("sleeping for 5 second");
 
-    sleep(Duration::from_secs(5).into()).await;
+    sleep(Duration::from_secs(5)).await;
 
     info!("done sleeping, starting graceful shutdown");
 
