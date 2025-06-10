@@ -1,6 +1,5 @@
 use std::fmt::{Debug, Display};
 use std::future::Future;
-use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll::*;
@@ -17,7 +16,7 @@ use pin_project::pin_project;
 use tracing::{Span, debug, debug_span, error, info, instrument, trace, warn};
 
 use super::controller::CircuitController;
-use super::{CellMsg, CircuitInput, CircuitOutput, ControlMsg, Timeout};
+use super::{CellMsg, CheckedSender, CircuitInput, CircuitOutput, ControlMsg, Timeout};
 use crate::channel::NewCircuit;
 use crate::errors;
 use crate::runtime::{Runtime, Timer};
@@ -262,8 +261,7 @@ async fn handle_circuit<
     };
 
     let fut = CircuitFut {
-        id,
-        send: sender,
+        send: CheckedSender::new(id, sender),
         recv: receiver.into_stream(),
         runtime: rt,
         ctrl_recv: cfg.receiver.clone().into_stream(),
@@ -285,13 +283,12 @@ async fn handle_circuit<
 
 #[pin_project]
 struct CircuitFut<R: Runtime, C: CircuitController> {
-    id: NonZeroU32,
     runtime: R,
     #[pin]
     state: State<C>,
     #[pin]
     ctrl_recv: RecvStream<'static, C::ControlMsg>,
-    send: Sender<C::Cell>,
+    send: CheckedSender<C::Cell>,
     #[pin]
     recv: RecvStream<'static, C::Cell>,
     #[pin]
@@ -431,19 +428,13 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFut<R, C> {
             }
 
             if has_event || pending & FLAG_EMPTY_HANDLE == 0 {
-                let mut is_closed = false;
                 // Handle channel
                 let CircuitOutput {
                     shutdown,
                     timeout,
                     cell_msg_pause,
                     ..
-                } = match c.handle(CircuitInput::new(
-                    *this.id,
-                    Instant::now(),
-                    &mut is_closed,
-                    this.send,
-                )) {
+                } = match c.handle(CircuitInput::new(Instant::now(), this.send)) {
                     Ok(v) => v,
                     Err(e) => {
                         this.state.set(State::ErrShutdown);
@@ -453,12 +444,8 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFut<R, C> {
 
                 if let Some(cell) = shutdown {
                     info!("controller requesting graceful shutdown");
-                    this.state
-                        .set(State::DestroySend(this.send.clone().into_send_async(cell)));
-                    continue;
-                } else if is_closed {
-                    warn!("channel is disconnected, possibly closed");
-                    this.state.set(State::ErrShutdown);
+                    let fut = unsafe { this.send.inner_sender().clone().into_send_async(cell) };
+                    this.state.set(State::DestroySend(fut));
                     continue;
                 }
 

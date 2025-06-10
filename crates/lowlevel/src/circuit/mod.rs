@@ -11,31 +11,17 @@ use crate::cache::{Cachable, Cached, CellCache};
 use crate::cell::CellLike;
 use crate::cell::destroy::{Destroy, DestroyReason};
 
-pub struct CircuitInput<'a, Cell> {
+/// A [`Sender`] wrapper with circuit ID checking.
+#[derive(Debug, Clone)]
+pub struct CheckedSender<Cell> {
     id: NonZeroU32,
-    time: Instant,
-    chan_closed: &'a mut bool,
-    agg_send: &'a Sender<Cell>,
+    send: Sender<Cell>,
 }
 
-impl<'a, Cell> CircuitInput<'a, Cell> {
-    pub(crate) fn new(
-        id: NonZeroU32,
-        time: Instant,
-        chan_closed: &'a mut bool,
-        agg_send: &'a Sender<Cell>,
-    ) -> Self {
-        Self {
-            id,
-            time,
-            chan_closed,
-            agg_send,
-        }
-    }
-
-    /// Get current time.
-    pub fn time(&self) -> Instant {
-        self.time
+impl<Cell> CheckedSender<Cell> {
+    /// Create new [`CheckedSender`].
+    pub fn new(id: NonZeroU32, send: Sender<Cell>) -> Self {
+        Self { id, send }
     }
 
     /// Get circuit ID.
@@ -43,9 +29,13 @@ impl<'a, Cell> CircuitInput<'a, Cell> {
         self.id
     }
 
-    /// Returns [`true`] if channel is closed.
-    pub fn is_closed(&self) -> bool {
-        *self.chan_closed
+    /// Get inner sender.
+    ///
+    /// # Safety
+    ///
+    /// Sender should ony be used to send cells with circuit ID matching [`id`].
+    pub unsafe fn inner_sender(&self) -> &Sender<Cell> {
+        &self.send
     }
 
     /// Try to send cell unsafely.
@@ -54,15 +44,7 @@ impl<'a, Cell> CircuitInput<'a, Cell> {
     ///
     /// Cell circuit ID must match [`id`].
     pub unsafe fn try_send_unchecked(&mut self, cell: Cell) -> Result<(), TrySendError<Cell>> {
-        if self.is_closed() {
-            return Err(TrySendError::Disconnected(cell));
-        }
-
-        let r = self.agg_send.try_send(cell);
-        if matches!(r, Err(TrySendError::Disconnected(_))) {
-            *self.chan_closed = true;
-        }
-        r
+        self.send.try_send(cell)
     }
 
     /// Try to send cell.
@@ -76,6 +58,45 @@ impl<'a, Cell> CircuitInput<'a, Cell> {
         // SAFETY: Circuit ID has been checked
         unsafe { self.try_send_unchecked(cell) }
     }
+}
+
+/// Circuit controller input.
+///
+/// `Cell` is the type of cells that controller receives/sends.
+pub struct CircuitInput<'a, Cell> {
+    time: Instant,
+    agg_send: &'a mut CheckedSender<Cell>,
+}
+
+impl<'a, Cell> Deref for CircuitInput<'a, Cell> {
+    type Target = CheckedSender<Cell>;
+
+    fn deref(&self) -> &Self::Target {
+        self.agg_send
+    }
+}
+
+impl<'a, Cell> DerefMut for CircuitInput<'a, Cell> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.agg_send
+    }
+}
+
+impl<'a, Cell> CircuitInput<'a, Cell> {
+    /// Create new [`CircuitInput`].
+    ///
+    /// # Parameters
+    ///
+    /// - `time` : Current time.
+    /// - `agg_send` : Aggregate sender.
+    pub(crate) fn new(time: Instant, agg_send: &'a mut CheckedSender<Cell>) -> Self {
+        Self { time, agg_send }
+    }
+
+    /// Get current time.
+    pub fn time(&self) -> Instant {
+        self.time
+    }
 
     /// Create [`CircuitOutput`] from self.
     pub fn output(self) -> CircuitOutput<'a, Cell> {
@@ -83,8 +104,13 @@ impl<'a, Cell> CircuitInput<'a, Cell> {
     }
 }
 
+/// Circuit controller input.
+///
+/// Created only fron [`CircuitInput`] by using [`CircuitOutput::new`] or [`CircuitInput::output`].
+/// Implements [`Deref`] to [`CircuitInput`].
 pub struct CircuitOutput<'a, Cell> {
     input: CircuitInput<'a, Cell>,
+
     pub(crate) timeout: Option<Instant>,
     pub(crate) shutdown: Option<Cell>,
     pub(crate) cell_msg_pause: bool,
