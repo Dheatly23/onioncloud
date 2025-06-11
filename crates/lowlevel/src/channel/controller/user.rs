@@ -517,10 +517,7 @@ impl<Cfg: 'static + UserConfig + Send + Sync> Handle<CellMsg<CachedCell>> for Us
     #[instrument(level = "debug", name = "handle_cell", skip_all)]
     fn handle(&mut self, msg: CellMsg<CachedCell>) -> Self::Return {
         match self.state {
-            State::Steady(ref mut s) => {
-                s.out_buffer.push_back(msg.0);
-                Ok(s.out_buffer.is_full().into())
-            }
+            State::Steady(ref mut s) => s.handle_cell(msg.0),
             State::Shutdown => Ok(true.into()),
             State::Init { .. } => unreachable!("init state does not create circuits"),
         }

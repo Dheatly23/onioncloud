@@ -62,6 +62,7 @@ pub trait ChannelController:
     fn channel_cap(_config: &Self::Config) -> usize {
         256
     }
+
     /// Get circuit aggregation channel capacity.
     fn channel_aggregate_cap(_config: &Self::Config) -> usize {
         256
