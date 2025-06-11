@@ -17,13 +17,14 @@ use tracing::{Span, debug, debug_span, error, info, instrument, trace, warn};
 
 use super::controller::CircuitController;
 use super::{CellMsg, CheckedSender, CircuitInput, CircuitOutput, ControlMsg, Timeout};
+use crate::channel::NewCircuit;
 use crate::errors;
 use crate::runtime::{Runtime, Timer};
 use crate::util::FutureRepollable;
 use crate::util::cell_map::NewHandler;
 
-pub type NewHandlerSender<C, E> = OneshotSender<Result<NewHandler<C>, E>>;
-type NewHandlerReceiver<C, E> = OneshotReceiver<Result<NewHandler<C>, E>>;
+pub type NewCircuitSender<C, E> = OneshotSender<Result<NewCircuit<C>, E>>;
+type NewCircuitReceiver<C, E> = OneshotReceiver<Result<NewCircuit<C>, E>>;
 
 struct CircuitInner<C: CircuitController> {
     config: C::Config,
@@ -57,7 +58,7 @@ pub struct CircuitRef<'a, R: Runtime, C: CircuitController, M> {
 }
 
 impl<R: Runtime, C: CircuitController, M> SingleManager<R, C, M> {
-    pub fn new<E>(runtime: R, config: C::Config, meta: M) -> (NewHandlerSender<C::Cell, E>, Self)
+    pub fn new<E>(runtime: R, config: C::Config, meta: M) -> (NewCircuitSender<C::Cell, E>, Self)
     where
         E: 'static + Send + Debug + Display,
         R: 'static + Clone,
@@ -149,7 +150,7 @@ impl<R: Runtime, C: CircuitController, M> Circuit<R, C, M> {
     /// Restarts controller if stopped.
     ///
     /// Sometimes it's useful to reuse state.
-    pub fn restart<E>(self: Pin<&mut Self>, r: &R) -> Option<NewHandlerSender<C::Cell, E>>
+    pub fn restart<E>(self: Pin<&mut Self>, r: &R) -> Option<NewCircuitSender<C::Cell, E>>
     where
         E: 'static + Send + Debug + Display,
         R: 'static + Clone,
@@ -212,7 +213,7 @@ impl<R: Runtime, C: CircuitController, M> CircuitRef<'_, R, C, M> {
     ///
     /// Sometimes it's useful to reuse state.
     #[inline(always)]
-    pub fn restart<E>(&mut self) -> Option<NewHandlerSender<C::Cell, E>>
+    pub fn restart<E>(&mut self) -> Option<NewCircuitSender<C::Cell, E>>
     where
         E: 'static + Send + Debug + Display,
         R: 'static + Clone,
@@ -229,7 +230,7 @@ fn spawn<
 >(
     runtime: &R,
     config: Arc<CircuitInner<C>>,
-    recv: NewHandlerReceiver<C::Cell, E>,
+    recv: NewCircuitReceiver<C::Cell, E>,
 ) -> R::Task<bool> {
     runtime.spawn(handle_circuit(runtime.clone(), config, recv))
 }
@@ -242,12 +243,14 @@ async fn handle_circuit<
 >(
     rt: R,
     cfg: Arc<CircuitInner<C>>,
-    recv: NewHandlerReceiver<C::Cell, E>,
+    recv: NewCircuitReceiver<C::Cell, E>,
 ) -> bool {
-    let NewHandler {
-        id,
-        sender,
-        receiver,
+    let NewCircuit {
+        inner: NewHandler {
+            id,
+            sender,
+            receiver,
+        },
     } = match recv.await {
         Ok(Ok(v)) => v,
         Err(_) => {

@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use crate::crypto::relay::{RelayId, RelayIdEd};
+use crate::util::cell_map::NewHandler;
 
 /// Trait for channel configuration.
 pub trait ChannelConfig {
@@ -148,6 +149,23 @@ pub struct CellMsgPause(pub(crate) bool);
 impl From<bool> for CellMsgPause {
     fn from(v: bool) -> Self {
         Self(v)
+    }
+}
+
+/// Data for new circuit handler.
+///
+/// For channel controller, send it to circuit handler.
+/// Once received, use destructuring let to get all the values.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct NewCircuit<Cell> {
+    pub inner: NewHandler<Cell>,
+}
+
+impl<Cell> NewCircuit<Cell> {
+    /// Create `NewCircuit`.
+    pub fn new(handler: NewHandler<Cell>) -> Self {
+        Self { inner: handler }
     }
 }
 
