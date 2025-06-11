@@ -1,4 +1,3 @@
-pub mod circ_map;
 pub mod controller;
 pub mod manager;
 
@@ -8,8 +7,6 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use crate::crypto::relay::{RelayId, RelayIdEd};
-
-pub use circ_map::*;
 
 /// Trait for channel configuration.
 pub trait ChannelConfig {

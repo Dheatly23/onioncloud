@@ -1,4 +1,5 @@
 mod buffer;
+pub mod cell_map;
 mod channel;
 pub mod sans_io;
 

@@ -22,14 +22,14 @@ use onioncloud_lowlevel::channel::controller::{
 };
 use onioncloud_lowlevel::channel::manager::ChannelManager;
 use onioncloud_lowlevel::channel::{
-    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, CircuitMap, ControlMsg,
-    Timeout,
+    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, ControlMsg, Timeout,
 };
 use onioncloud_lowlevel::crypto::relay::RelayId;
 use onioncloud_lowlevel::errors;
 use onioncloud_lowlevel::linkver::StandardLinkver;
 use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
 use onioncloud_lowlevel::util::TestController;
+use onioncloud_lowlevel::util::cell_map::CellMap;
 use onioncloud_lowlevel::util::sans_io::Handle;
 
 use crate::common::get_relay_data;
@@ -131,13 +131,13 @@ impl ChannelController for VersionOnlyController {
 }
 
 // NOTE: Cannot use Self:: syntax here because of cycles.
-impl<'a> Handle<(ChannelInput<'a>, &'a mut CircuitMap<Cell, ()>)> for VersionOnlyController {
+impl<'a> Handle<(ChannelInput<'a>, &'a mut CellMap<Cell, ()>)> for VersionOnlyController {
     type Return = AnyResult<ChannelOutput>;
 
     #[instrument(name = "handle_normal", skip_all)]
     fn handle(
         &mut self,
-        (mut input, _): (ChannelInput<'a>, &'a mut CircuitMap<Cell, ()>),
+        (mut input, _): (ChannelInput<'a>, &'a mut CellMap<Cell, ()>),
     ) -> Self::Return {
         if let Some(h) = &mut self.cell_write {
             match h.handle(input.writer()) {

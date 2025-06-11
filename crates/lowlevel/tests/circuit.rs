@@ -10,14 +10,15 @@ use tracing::{info, instrument};
 use onioncloud_lowlevel::cache::{Cached, CellCache, StandardCellCache, cast};
 use onioncloud_lowlevel::cell::destroy::{Destroy, DestroyReason};
 use onioncloud_lowlevel::cell::relay::Relay;
+use onioncloud_lowlevel::channel::ChannelConfig;
 use onioncloud_lowlevel::channel::controller::{UserConfig, UserControlMsg, UserController};
 use onioncloud_lowlevel::channel::manager::ChannelManager;
-use onioncloud_lowlevel::channel::{ChannelConfig, NewCircuit};
 use onioncloud_lowlevel::crypto::onion::{
     OnionLayer as _, OnionLayerData, OnionLayerFast, RelayDigest as _,
 };
 use onioncloud_lowlevel::crypto::relay::RelayId;
 use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
+use onioncloud_lowlevel::util::cell_map::NewHandler;
 
 use crate::common::get_relay_data;
 
@@ -64,7 +65,7 @@ async fn test_circuit_create_fast() {
     channel.send_control(msg).await.unwrap();
 
     {
-        let NewCircuit {
+        let NewHandler {
             id,
             receiver: recv,
             sender: send,

@@ -28,13 +28,13 @@ use crate::cell::writer::CellWriter;
 use crate::cell::{Cell, CellHeader, CellLike, FixedCell};
 use crate::channel::controller::ChannelController;
 use crate::channel::{
-    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, CircuitMap, ControlMsg,
-    NewCircuit, Timeout,
+    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, ControlMsg, Timeout,
 };
 use crate::crypto::cert::{UnverifiedEdCert, UnverifiedRsaCert, extract_rsa_from_x509};
 use crate::crypto::{EdPublicKey, Sha256Output};
 use crate::errors;
 use crate::linkver::StandardLinkver;
+use crate::util::cell_map::{AnyIDGenerator, CellMap, NewHandler};
 use crate::util::sans_io::Handle;
 use crate::util::{InBuffer, OutBuffer, print_ed, print_hex};
 
@@ -109,16 +109,16 @@ pub enum UserControlMsg {
     /// Force shutdown of channel.
     Shutdown,
     /// Create new circuit.
-    NewCircuit(Sender<Result<NewCircuit<CachedCell>, errors::NoFreeCircIDError>>),
+    NewHandler(Sender<Result<NewHandler<CachedCell>, errors::NoFreeCircIDError>>),
 }
 
 impl UserControlMsg {
     pub fn new_circuit() -> (
-        Receiver<Result<NewCircuit<CachedCell>, errors::NoFreeCircIDError>>,
+        Receiver<Result<NewHandler<CachedCell>, errors::NoFreeCircIDError>>,
         Self,
     ) {
         let (send, recv) = channel();
-        (recv, Self::NewCircuit(send))
+        (recv, Self::NewHandler(send))
     }
 }
 
@@ -132,7 +132,7 @@ enum State<Cfg> {
     Init {
         state: InitState,
         cfg: Arc<dyn Send + Sync + AsRef<Cfg>>,
-        pending_open: VecDeque<Sender<Result<NewCircuit<CachedCell>, errors::NoFreeCircIDError>>>,
+        pending_open: VecDeque<Sender<Result<NewHandler<CachedCell>, errors::NoFreeCircIDError>>>,
     },
     Steady(SteadyState),
     Shutdown,
@@ -159,7 +159,7 @@ struct SteadyState {
     in_buffer: InBuffer<CachedCell<Option<Cell>>>,
     out_buffer: OutBuffer<CachedCell>,
 
-    pending_open: VecDeque<Sender<Result<NewCircuit<CachedCell>, errors::NoFreeCircIDError>>>,
+    pending_open: VecDeque<Sender<Result<NewHandler<CachedCell>, errors::NoFreeCircIDError>>>,
     pending_close: VecDeque<(NonZeroU32, DestroyReason)>,
 
     close_scan: Instant,
@@ -210,20 +210,14 @@ impl<Cfg: 'static + UserConfig + Send + Sync> ChannelController for UserControll
 }
 
 impl<'a, Cfg: 'static + UserConfig + Send + Sync>
-    Handle<(
-        ChannelInput<'a>,
-        &'a mut CircuitMap<CachedCell, CircuitMeta>,
-    )> for UserController<Cfg>
+    Handle<(ChannelInput<'a>, &'a mut CellMap<CachedCell, CircuitMeta>)> for UserController<Cfg>
 {
     type Return = Result<ChannelOutput, errors::UserControllerError>;
 
     #[instrument(level = "debug", skip_all)]
     fn handle(
         &mut self,
-        (mut input, circ_map): (
-            ChannelInput<'a>,
-            &'a mut CircuitMap<CachedCell, CircuitMeta>,
-        ),
+        (mut input, circ_map): (ChannelInput<'a>, &'a mut CellMap<CachedCell, CircuitMeta>),
     ) -> Self::Return {
         let last_packet = self
             .last_packet
@@ -502,7 +496,7 @@ impl<Cfg: 'static + UserConfig + Send + Sync> Handle<ControlMsg<UserControlMsg>>
     fn handle(&mut self, msg: ControlMsg<UserControlMsg>) -> Self::Return {
         match msg.0 {
             UserControlMsg::Shutdown => self.state = State::Shutdown,
-            UserControlMsg::NewCircuit(msg) => match self.state {
+            UserControlMsg::NewHandler(msg) => match self.state {
                 State::Init {
                     ref mut pending_open,
                     ..
@@ -630,7 +624,7 @@ impl SteadyState {
         cfg: &LinkCfg,
         last_packet: &mut Instant,
         mut input: ChannelInput<'_>,
-        circ_map: &mut CircuitMap<CachedCell, CircuitMeta>,
+        circ_map: &mut CellMap<CachedCell, CircuitMeta>,
     ) -> Result<ChannelOutput, errors::UserControllerError> {
         // Scan for close circuits
         if self.close_scan <= input.time() {
@@ -647,9 +641,9 @@ impl SteadyState {
 
         // Process pending open
         for send in self.pending_open.drain(..) {
-            if let Err(Ok(NewCircuit { id, .. })) = send.send(
+            if let Err(Ok(NewHandler { id, .. })) = send.send(
                 circ_map
-                    .open_with(true, cfg.is_circ_id_4bytes(), 64, |_| CircuitMeta {
+                    .open_with(&AnyIDGenerator::from_config(cfg), 64, |_| CircuitMeta {
                         closing: false,
 
                         last_full: input.time(),
@@ -721,7 +715,7 @@ fn read_handler(
     cfg: &LinkCfg,
     last_packet: &mut Instant,
     input: &mut ChannelInput<'_>,
-    circ_map: &mut CircuitMap<CachedCell, CircuitMeta>,
+    circ_map: &mut CellMap<CachedCell, CircuitMeta>,
     mut flags: u8,
 ) -> Result<(u8, Option<Instant>), errors::UserControllerError> {
     let mut process_in = is_timeout;
@@ -872,7 +866,7 @@ fn write_handler(
     cfg: &LinkCfg,
     last_packet: &mut Instant,
     input: &mut ChannelInput<'_>,
-    circ_map: &mut CircuitMap<CachedCell, CircuitMeta>,
+    circ_map: &mut CellMap<CachedCell, CircuitMeta>,
     mut flags: u8,
 ) -> Result<u8, errors::UserControllerError> {
     loop {

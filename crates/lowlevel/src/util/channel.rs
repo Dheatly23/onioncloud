@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::channel::controller::ChannelController;
-use crate::channel::{CellMsg, ChannelInput, CircuitMap, ControlMsg, Stream, Timeout};
+use crate::channel::{CellMsg, ChannelInput, ControlMsg, Stream, Timeout};
+use crate::util::cell_map::CellMap;
 
 /// Test controller.
 ///
@@ -16,7 +17,7 @@ pub struct TestController<C: ChannelController> {
     time: Instant,
     timeout: Option<Instant>,
     controller: C,
-    circ_map: CircuitMap<C::Cell, C::CircMeta>,
+    circ_map: CellMap<C::Cell, C::CircMeta>,
     cell_msg_pause: bool,
     ctrl_msgs: Vec<C::ControlMsg>,
 }
@@ -33,7 +34,7 @@ impl<C: ChannelController> TestController<C> {
         link_cert: impl Into<Cow<'static, [u8]>>,
     ) -> Self {
         let cfg = (*config).as_ref();
-        let circ_map = CircuitMap::new(C::channel_cap(cfg), C::channel_aggregate_cap(cfg));
+        let circ_map = CellMap::new(C::channel_cap(cfg), C::channel_aggregate_cap(cfg));
 
         Self {
             stream: TestStream {
@@ -58,8 +59,8 @@ impl<C: ChannelController> TestController<C> {
         &mut self.controller
     }
 
-    /// Get reference to [`CircuitMap`].
-    pub fn circ_map(&mut self) -> &mut CircuitMap<C::Cell, C::CircMeta> {
+    /// Get reference to [`CellMap`].
+    pub fn circ_map(&mut self) -> &mut CellMap<C::Cell, C::CircMeta> {
         &mut self.circ_map
     }
 

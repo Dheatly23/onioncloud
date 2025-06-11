@@ -7,9 +7,9 @@ use std::sync::Arc;
 use rustls::Error as RustlsError;
 
 use super::{
-    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, CircuitMap, ControlMsg,
-    Timeout,
+    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, ControlMsg, Timeout,
 };
+use crate::util::cell_map::CellMap;
 use crate::util::sans_io::Handle;
 
 pub use user::{UserConfig, UserControlMsg, UserController};
@@ -19,7 +19,7 @@ pub use user::{UserConfig, UserControlMsg, UserController};
 /// # Implementers Note
 ///
 /// Implementers _must_ implement [`Handle`]rs to handle incoming events. Values to be handled are:
-/// - [`(ChannelInput<'a>, &'a mut CircuitMap<Self::Cell, Self::CircMeta>)`]
+/// - [`(ChannelInput<'a>, &'a mut CellMap<Self::Cell, Self::CircMeta>)`]
 ///
 ///   Universal handler for channel inputs and circuit map. Will be called after all the other events.
 ///   Returns [`ChannelOutput`] to control things like shutdown, timer, and cell message handling.
@@ -40,7 +40,7 @@ pub trait ChannelController:
     + for<'a> Handle<
         (
             ChannelInput<'a>,
-            &'a mut CircuitMap<Self::Cell, Self::CircMeta>,
+            &'a mut CellMap<Self::Cell, Self::CircMeta>,
         ),
         Return = Result<ChannelOutput, Self::Error>,
     > + Handle<ControlMsg<Self::ControlMsg>, Return = Result<(), Self::Error>>

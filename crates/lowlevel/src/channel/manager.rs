@@ -19,11 +19,12 @@ use scopeguard::guard;
 use tracing::{Span, debug, debug_span, error, info, instrument, trace, warn};
 
 use super::controller::ChannelController;
-use super::{CellMsg, ChannelConfig, ChannelInput, CircuitMap, ControlMsg, Stream, Timeout};
+use super::{CellMsg, ChannelConfig, ChannelInput, ControlMsg, Stream, Timeout};
 use crate::crypto::relay::RelayId;
 use crate::crypto::tls::setup_client;
 use crate::errors;
 use crate::runtime::{Runtime, Stream as RTStream, Timer};
+use crate::util::cell_map::CellMap;
 use crate::util::{AsyncReadWrapper, AsyncWriteWrapper, FutureRepollable, print_hex, print_list};
 
 struct ChannelInner<C: ChannelController> {
@@ -636,7 +637,7 @@ async fn handle_stream<R: Runtime, C: ChannelController + 'static>(
         timer: None,
         timer_finished: true,
         ctrl_recv: Some(cfg.receiver.clone().into_stream()),
-        circ_map: Some(CircuitMap::new(
+        circ_map: Some(CellMap::new(
             C::channel_cap(&cfg.config),
             C::channel_aggregate_cap(&cfg.config),
         )),
@@ -673,7 +674,7 @@ struct ChannelFut<R: Runtime, C: ChannelController> {
     timer_finished: bool,
     #[pin]
     ctrl_recv: Option<RecvStream<'static, C::ControlMsg>>,
-    circ_map: Option<CircuitMap<C::Cell, C::CircMeta>>,
+    circ_map: Option<CellMap<C::Cell, C::CircMeta>>,
     cell_msg_pause: bool,
     cont: C,
     state: State,

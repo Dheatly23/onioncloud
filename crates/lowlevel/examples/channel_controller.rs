@@ -22,8 +22,7 @@ use onioncloud_lowlevel::cell::{Cell, CellHeader, CellLike, FixedCell};
 use onioncloud_lowlevel::channel::controller::ChannelController;
 use onioncloud_lowlevel::channel::manager::ChannelManager;
 use onioncloud_lowlevel::channel::{
-    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, CircuitMap, ControlMsg,
-    Timeout,
+    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, ControlMsg, Timeout,
 };
 use onioncloud_lowlevel::crypto::cert::{
     UnverifiedEdCert, UnverifiedRsaCert, extract_rsa_from_x509,
@@ -34,6 +33,7 @@ use onioncloud_lowlevel::errors;
 use onioncloud_lowlevel::errors::CellError;
 use onioncloud_lowlevel::linkver::StandardLinkver;
 use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
+use onioncloud_lowlevel::util::cell_map::CellMap;
 use onioncloud_lowlevel::util::sans_io::Handle;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -198,7 +198,7 @@ fn check_cert(
 impl<'a>
     Handle<(
         ChannelInput<'a>,
-        &'a mut CircuitMap<Cached<Cell, Arc<LinkCfg>>, ()>,
+        &'a mut CellMap<Cached<Cell, Arc<LinkCfg>>, ()>,
     )> for Controller
 {
     type Return = AnyResult<ChannelOutput>;
@@ -208,7 +208,7 @@ impl<'a>
         &mut self,
         (mut input, _): (
             ChannelInput<'a>,
-            &'a mut CircuitMap<Cached<Cell, Arc<LinkCfg>>, ()>,
+            &'a mut CellMap<Cached<Cell, Arc<LinkCfg>>, ()>,
         ),
     ) -> Self::Return {
         loop {
