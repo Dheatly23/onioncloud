@@ -10,6 +10,7 @@ use flume::{Sender, TrySendError};
 use crate::cache::{Cachable, Cached, CellCache};
 use crate::cell::CellLike;
 use crate::cell::destroy::{Destroy, DestroyReason};
+use crate::util::cell_map::NewHandler;
 
 /// A [`Sender`] wrapper with circuit ID checking.
 #[derive(Debug, Clone)]
@@ -114,6 +115,7 @@ pub struct CircuitOutput<'a, Cell> {
     pub(crate) timeout: Option<Instant>,
     pub(crate) shutdown: Option<Cell>,
     pub(crate) cell_msg_pause: bool,
+    pub(crate) stream_cell_msg_pause: bool,
 }
 
 impl<'a, Cell> Deref for CircuitOutput<'a, Cell> {
@@ -138,6 +140,7 @@ impl<'a, Cell> CircuitOutput<'a, Cell> {
             timeout: None,
             shutdown: None,
             cell_msg_pause: false,
+            stream_cell_msg_pause: false,
         }
     }
 
@@ -182,6 +185,12 @@ impl<'a, Cell> CircuitOutput<'a, Cell> {
     /// Pause cell message receiving. By default it's set to [`false`].
     pub fn cell_msg_pause(&mut self, value: CellMsgPause) -> &mut Self {
         self.cell_msg_pause = value.0;
+        self
+    }
+
+    /// Pause stream cell message receiving. By default it's set to [`false`].
+    pub fn stream_cell_msg_pause(&mut self, value: CellMsgPause) -> &mut Self {
+        self.stream_cell_msg_pause = value.0;
         self
     }
 }
@@ -233,6 +242,17 @@ impl<M> CellMsg<M> {
     }
 }
 
+/// Wrapper struct for stream cell message.
+#[derive(Debug)]
+pub struct StreamCellMsg<Msg>(pub Msg);
+
+impl<M> StreamCellMsg<M> {
+    /// Unwraps into inner value.
+    pub fn into_inner(self) -> M {
+        self.0
+    }
+}
+
 /// Wrapper type for pausing cell messages.
 ///
 /// Useful to stop controller from receiving excessive cell message before it's all transmitted.
@@ -254,5 +274,26 @@ pub struct CellMsgPause(pub(crate) bool);
 impl From<bool> for CellMsgPause {
     fn from(v: bool) -> Self {
         Self(v)
+    }
+}
+
+/// Data for new stream handler.
+///
+/// For circuit controller, send it to stream handler.
+/// Once received, use destructuring let to get all the values.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct NewStream<Cell> {
+    pub inner: NewHandler<Cell>,
+    pub circ_id: NonZeroU32,
+}
+
+impl<Cell> NewStream<Cell> {
+    /// Create `NewStream`.
+    pub fn new(handle: NewHandler<Cell>, input: &CircuitInput<'_, Cell>) -> Self {
+        Self {
+            inner: handle,
+            circ_id: input.id(),
+        }
     }
 }

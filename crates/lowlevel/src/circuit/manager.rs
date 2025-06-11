@@ -13,15 +13,17 @@ use futures_core::ready;
 use futures_core::stream::Stream;
 use futures_util::select_biased;
 use pin_project::pin_project;
-use tracing::{Span, debug, debug_span, error, info, instrument, trace, warn};
+use tracing::{Instrument, Span, debug, debug_span, error, info, instrument, trace, warn};
 
 use super::controller::CircuitController;
-use super::{CellMsg, CheckedSender, CircuitInput, CircuitOutput, ControlMsg, Timeout};
+use super::{
+    CellMsg, CheckedSender, CircuitInput, CircuitOutput, ControlMsg, StreamCellMsg, Timeout,
+};
 use crate::channel::NewCircuit;
 use crate::errors;
 use crate::runtime::{Runtime, Timer};
 use crate::util::FutureRepollable;
-use crate::util::cell_map::NewHandler;
+use crate::util::cell_map::{CellMap, NewHandler};
 
 pub type NewCircuitSender<C, E> = OneshotSender<Result<NewCircuit<C>, E>>;
 type NewCircuitReceiver<C, E> = OneshotReceiver<Result<NewCircuit<C>, E>>;
@@ -263,93 +265,74 @@ async fn handle_circuit<
         }
     };
 
-    let fut = CircuitFut {
-        send: CheckedSender::new(id, sender),
-        recv: receiver.into_stream(),
+    let fut = CircuitFutSteady {
+        send: CheckedSender::new(id, sender.clone()),
+        recv: receiver.stream(),
         runtime: rt,
         ctrl_recv: cfg.receiver.clone().into_stream(),
-        state: State::Steady(C::new(cfg, id)),
+        stream_map: CellMap::new(
+            C::channel_cap(&cfg.config),
+            C::channel_aggregate_cap(&cfg.config),
+        ),
+        controller: C::new(cfg, id),
         timer: None,
         timer_finished: false,
         cell_msg_pause: false,
-        span: debug_span!("CircuitFut"),
+        stream_cell_msg_pause: false,
+        span: debug_span!("CircuitFutSteady", circ_id = id),
     };
 
     match fut.await {
-        Ok(()) => true,
+        Ok(Some(cell)) => {
+            CircuitFutDestroy {
+                recv: receiver.stream(),
+                fut: Some(sender.send_async(cell)),
+            }
+            .instrument(debug_span!("CircuitFutDestroy", circ_id = id))
+            .await;
+            true
+        }
+        Ok(None) => false,
         Err(e) => {
-            error!(error = display(e), "circuit error");
+            error!(circ_id = id, error = display(e), "circuit error");
             false
         }
     }
 }
 
 #[pin_project]
-struct CircuitFut<R: Runtime, C: CircuitController> {
+struct CircuitFutSteady<'a, R: Runtime, C: CircuitController> {
     runtime: R,
-    #[pin]
-    state: State<C>,
+    controller: C,
     #[pin]
     ctrl_recv: RecvStream<'static, C::ControlMsg>,
+    stream_map: CellMap<C::Cell, C::StreamMeta>,
     send: CheckedSender<C::Cell>,
-    #[pin]
-    recv: RecvStream<'static, C::Cell>,
+    recv: RecvStream<'a, C::Cell>,
     #[pin]
     timer: Option<R::Timer>,
     timer_finished: bool,
     cell_msg_pause: bool,
+    stream_cell_msg_pause: bool,
     span: Span,
 }
 
-#[pin_project(project = StateProj)]
-enum State<C: CircuitController> {
-    Steady(C),
-    DestroySend(#[pin] SendFut<'static, C::Cell>),
-    DestroyWait,
-    ErrShutdown,
-}
+const FLAG_CTRLMSG: u8 = 1 << 0;
+const FLAG_CELLMSG: u8 = 1 << 1;
+const FLAG_STREAMCELLMSG: u8 = 1 << 2;
+const FLAG_TIMEOUT: u8 = 1 << 3;
+const FLAG_EMPTY_HANDLE: u8 = 1 << 7;
 
-impl<R: Runtime, C: CircuitController> Future for CircuitFut<R, C> {
-    type Output = Result<(), C::Error>;
+impl<R: Runtime, C: CircuitController> Future for CircuitFutSteady<'_, R, C> {
+    type Output = Result<Option<C::Cell>, C::Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
 
-        const FLAG_CTRLMSG: u8 = 1 << 0;
-        const FLAG_CELLMSG: u8 = 1 << 1;
-        const FLAG_TIMEOUT: u8 = 1 << 2;
-        const FLAG_EMPTY_HANDLE: u8 = 1 << 7;
-
         let mut pending = 0;
 
-        'main: loop {
+        loop {
             let _guard = this.span.enter();
-
-            let c = match this.state.as_mut().project() {
-                StateProj::Steady(c) => c,
-                StateProj::DestroySend(fut) => {
-                    this.timer.set(None);
-
-                    let p1 = fut.poll(cx);
-                    // Poll result does not matter
-                    let _ = poll_until_closed(this.recv.as_mut(), cx);
-
-                    match ready!(p1) {
-                        Ok(()) => (),
-                        Err(SendError(_)) => {
-                            debug!("cannot send destroy cell, channel is closed")
-                        }
-                    }
-
-                    this.state.set(State::DestroyWait);
-                    continue;
-                }
-                StateProj::DestroyWait => {
-                    ready!(poll_until_closed(this.recv, cx));
-                    return Ready(Ok(()));
-                }
-                StateProj::ErrShutdown => return Ready(Ok(())),
-            };
 
             // Process controller
             let mut has_event = false;
@@ -365,13 +348,7 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFut<R, C> {
                 {
                     *this.timer_finished = true;
                     // Event: timeout
-                    match c.handle(Timeout) {
-                        Ok(()) => (),
-                        Err(e) => {
-                            this.state.set(State::ErrShutdown);
-                            return Ready(Err(e));
-                        }
-                    }
+                    this.controller.handle(Timeout)?;
                     has_event = true;
                 }
             }
@@ -382,18 +359,11 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFut<R, C> {
                         error!(
                             "shutting down: control channel disconnected (this might be a bug in circuit manager)"
                         );
-                        this.state.set(State::ErrShutdown);
-                        continue 'main;
+                        return Ready(Ok(None));
                     };
 
                     // Event: control message
-                    match c.handle(ControlMsg(msg)) {
-                        Ok(()) => (),
-                        Err(e) => {
-                            this.state.set(State::ErrShutdown);
-                            return Ready(Err(e));
-                        }
-                    }
+                    this.controller.handle(ControlMsg(msg))?;
                     has_event = true;
                 }
 
@@ -402,30 +372,44 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFut<R, C> {
 
             if pending & FLAG_CELLMSG == 0 {
                 while !*this.cell_msg_pause {
-                    let msg = match this.recv.as_mut().poll_next(cx) {
+                    let msg = match Pin::new(&mut *this.recv).poll_next(cx) {
                         Pending => {
                             pending |= FLAG_CELLMSG;
                             break;
                         }
                         Ready(None) => {
-                            warn!("channel is disconnected, possibly closed");
-                            this.state.set(State::ErrShutdown);
-                            continue 'main;
+                            warn!("shutting down: channel is disconnected, possibly closed");
+                            return Ready(Ok(None));
                         }
                         Ready(Some(v)) => v,
                     };
 
                     // Event: cell message
-                    *this.cell_msg_pause = match c.handle(CellMsg(msg)) {
-                        Ok(v) => v.0,
-                        Err(e) => {
-                            this.state.set(State::ErrShutdown);
-                            return Ready(Err(e));
-                        }
-                    };
+                    *this.cell_msg_pause = this.controller.handle(CellMsg(msg))?.0;
                     has_event = true;
                     if *this.cell_msg_pause {
                         debug!("pausing cell message receiving");
+                    }
+                }
+            }
+
+            if pending & FLAG_STREAMCELLMSG == 0 {
+                while !*this.stream_cell_msg_pause {
+                    let Ready(msg) = this.stream_map.poll_recv(cx) else {
+                        pending |= FLAG_STREAMCELLMSG;
+                        break;
+                    };
+
+                    // Event: stream cell message
+                    *this.stream_cell_msg_pause = this
+                        .controller
+                        .handle(StreamCellMsg(
+                            msg.expect("stream map aggregate receiver should never close"),
+                        ))?
+                        .0;
+                    has_event = true;
+                    if *this.stream_cell_msg_pause {
+                        debug!("pausing stream cell message receiving");
                     }
                 }
             }
@@ -436,20 +420,16 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFut<R, C> {
                     shutdown,
                     timeout,
                     cell_msg_pause,
+                    stream_cell_msg_pause,
                     ..
-                } = match c.handle(CircuitInput::new(Instant::now(), this.send)) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        this.state.set(State::ErrShutdown);
-                        return Ready(Err(e));
-                    }
-                };
+                } = this.controller.handle((
+                    CircuitInput::new(Instant::now(), this.send),
+                    &mut *this.stream_map,
+                ))?;
 
                 if let Some(cell) = shutdown {
                     info!("controller requesting graceful shutdown");
-                    let fut = unsafe { this.send.inner_sender().clone().into_send_async(cell) };
-                    this.state.set(State::DestroySend(fut));
-                    continue;
+                    return Ready(Ok(Some(cell)));
                 }
 
                 if let Some(t) = timeout {
@@ -473,6 +453,13 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFut<R, C> {
                     _ => (),
                 }
                 *this.cell_msg_pause = cell_msg_pause;
+
+                match (*this.stream_cell_msg_pause, stream_cell_msg_pause) {
+                    (true, false) => debug!("resuming stream cell message receiving"),
+                    (false, true) => debug!("pausing stream cell message receiving"),
+                    _ => (),
+                }
+                *this.stream_cell_msg_pause = stream_cell_msg_pause;
             }
             // Mark empty handle as true, because either timeout already fires or it has been handled previously.
             pending |= FLAG_EMPTY_HANDLE;
@@ -486,6 +473,10 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFut<R, C> {
                 trace!("repolling: cell aggregate channel wants to be polled");
                 retry = true;
             }
+            if pending & FLAG_STREAMCELLMSG == 0 && !*this.stream_cell_msg_pause {
+                trace!("repolling: stream cell aggregate channel wants to be polled");
+                retry = true;
+            }
 
             if !retry {
                 trace!("all futures are pending");
@@ -496,7 +487,34 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFut<R, C> {
     }
 }
 
-fn poll_until_closed<T>(mut recv: Pin<&mut RecvStream<'_, T>>, cx: &mut Context<'_>) -> Poll<()> {
-    while ready!(recv.as_mut().poll_next(cx)).is_some() {}
+#[pin_project]
+struct CircuitFutDestroy<'a, Cell> {
+    #[pin]
+    fut: Option<SendFut<'a, Cell>>,
+    recv: RecvStream<'a, Cell>,
+}
+
+impl<Cell> Future for CircuitFutDestroy<'_, Cell> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+
+        let p1 = match this.fut.as_mut().as_pin_mut() {
+            Some(f) => f.poll(cx),
+            None => Ready(Ok(())),
+        };
+        let p2 = poll_until_closed(this.recv, cx);
+
+        match ready!(p1) {
+            Ok(()) => this.fut.set(None),
+            Err(SendError(_)) => debug!("cannot send destroy cell, channel is closed"),
+        }
+        p2
+    }
+}
+
+fn poll_until_closed<T>(recv: &mut RecvStream<'_, T>, cx: &mut Context<'_>) -> Poll<()> {
+    while ready!(Pin::new(&mut *recv).poll_next(cx)).is_some() {}
     Ready(())
 }
