@@ -332,8 +332,8 @@ async fn handle_circuit<R: Runtime, C: 'static + CircuitController>(
         recv: recv.stream(),
         timer: None,
         timer_finished: false,
-        cell_msg_pause: false,
-        stream_cell_msg_pause: false,
+        cell_msg_pause: true,
+        stream_cell_msg_pause: true,
         span: debug_span!("CircuitFutSteady"),
     };
 

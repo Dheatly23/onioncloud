@@ -641,7 +641,7 @@ async fn handle_stream<R: Runtime, C: ChannelController + 'static>(
             C::channel_cap(&cfg.config),
             C::channel_aggregate_cap(&cfg.config),
         )),
-        cell_msg_pause: false,
+        cell_msg_pause: true,
         state: State::Normal,
         cont: C::new(cfg),
         span: debug_span!("ChannelFut"),
