@@ -170,6 +170,29 @@ impl<R: Runtime, C: CircuitController, M> Circuit<R, C, M> {
             .set(spawn(r, this.inner.clone(), recv).into());
         Some(send)
     }
+
+    /// Restarts controller if stopped (with attached cell sender/receiver).
+    pub fn restart_with(
+        self: Pin<&mut Self>,
+        r: &R,
+        send: CheckedSender<C::Cell>,
+        recv: Receiver<C::Cell>,
+    ) -> bool
+    where
+        R: 'static + Clone,
+        C: 'static,
+    {
+        let mut this = self.project();
+
+        if !this.handle.is_finished() {
+            return false;
+        }
+
+        this.handle
+            .as_mut()
+            .set(spawn_with(r, this.inner.clone(), send, recv).into());
+        true
+    }
 }
 
 impl<R: Runtime, C: CircuitController, M> CircuitRef<'_, R, C, M> {
@@ -223,6 +246,16 @@ impl<R: Runtime, C: CircuitController, M> CircuitRef<'_, R, C, M> {
     {
         self.inner.as_mut().restart(self.runtime)
     }
+
+    /// Restarts controller if stopped (with attached cell sender/receiver).
+    #[inline(always)]
+    pub fn restart_with(&mut self, send: CheckedSender<C::Cell>, recv: Receiver<C::Cell>) -> bool
+    where
+        R: 'static + Clone,
+        C: 'static,
+    {
+        self.inner.as_mut().restart_with(self.runtime, send, recv)
+    }
 }
 
 fn spawn<
@@ -234,11 +267,20 @@ fn spawn<
     config: Arc<CircuitInner<C>>,
     recv: NewCircuitReceiver<C::Cell, E>,
 ) -> R::Task<bool> {
-    runtime.spawn(handle_circuit(runtime.clone(), config, recv))
+    runtime.spawn(handle_create_circuit(runtime.clone(), config, recv))
+}
+
+fn spawn_with<R: 'static + Runtime + Clone, C: 'static + CircuitController>(
+    runtime: &R,
+    config: Arc<CircuitInner<C>>,
+    send: CheckedSender<C::Cell>,
+    recv: Receiver<C::Cell>,
+) -> R::Task<bool> {
+    runtime.spawn(handle_circuit(runtime.clone(), config, send, recv))
 }
 
 #[instrument(skip_all, fields(config = %cfg.config))]
-async fn handle_circuit<
+async fn handle_create_circuit<
     R: Runtime,
     C: 'static + CircuitController,
     E: 'static + Send + Debug + Display,
@@ -265,39 +307,53 @@ async fn handle_circuit<
         }
     };
 
+    handle_circuit(rt, cfg, CheckedSender::new(id, sender), receiver).await
+}
+
+#[instrument(skip_all, fields(circ_id = send.id()))]
+async fn handle_circuit<R: Runtime, C: 'static + CircuitController>(
+    rt: R,
+    cfg: Arc<CircuitInner<C>>,
+    send: CheckedSender<C::Cell>,
+    recv: Receiver<C::Cell>,
+) -> bool {
+    // SAFETY: Destroy cell has been checked
+    let sender = unsafe { send.inner_sender().clone() };
+
     let fut = CircuitFutSteady {
-        send: CheckedSender::new(id, sender.clone()),
-        recv: receiver.stream(),
         runtime: rt,
         ctrl_recv: cfg.receiver.clone().into_stream(),
         stream_map: CellMap::new(
             C::channel_cap(&cfg.config),
             C::channel_aggregate_cap(&cfg.config),
         ),
-        controller: C::new(cfg, id),
+        controller: C::new(cfg, send.id()),
+        send,
+        recv: recv.stream(),
         timer: None,
         timer_finished: false,
         cell_msg_pause: false,
         stream_cell_msg_pause: false,
-        span: debug_span!("CircuitFutSteady", circ_id = id),
+        span: debug_span!("CircuitFutSteady"),
     };
 
-    match fut.await {
-        Ok(Some(cell)) => {
-            CircuitFutDestroy {
-                recv: receiver.stream(),
-                fut: Some(sender.send_async(cell)),
-            }
-            .instrument(debug_span!("CircuitFutDestroy", circ_id = id))
-            .await;
-            true
-        }
-        Ok(None) => false,
+    let cell = match fut.await {
+        Ok(Some(cell)) => cell,
+        Ok(None) => return false,
         Err(e) => {
-            error!(circ_id = id, error = display(e), "circuit error");
-            false
+            error!(error = display(e), "circuit error");
+            return false;
         }
+    };
+    // Hopefully fut is dropped at this point
+
+    CircuitFutDestroy {
+        recv: recv.into_stream(),
+        fut: Some(sender.into_send_async(cell)),
     }
+    .instrument(debug_span!("CircuitFutDestroy"))
+    .await;
+    true
 }
 
 #[pin_project]
@@ -305,9 +361,10 @@ struct CircuitFutSteady<'a, R: Runtime, C: CircuitController> {
     runtime: R,
     controller: C,
     #[pin]
-    ctrl_recv: RecvStream<'static, C::ControlMsg>,
+    ctrl_recv: RecvStream<'a, C::ControlMsg>,
     stream_map: CellMap<C::Cell, C::StreamMeta>,
     send: CheckedSender<C::Cell>,
+    #[pin]
     recv: RecvStream<'a, C::Cell>,
     #[pin]
     timer: Option<R::Timer>,
@@ -372,7 +429,7 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFutSteady<'_, R, C> {
 
             if pending & FLAG_CELLMSG == 0 {
                 while !*this.cell_msg_pause {
-                    let msg = match Pin::new(&mut *this.recv).poll_next(cx) {
+                    let msg = match this.recv.as_mut().poll_next(cx) {
                         Pending => {
                             pending |= FLAG_CELLMSG;
                             break;
@@ -491,6 +548,7 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFutSteady<'_, R, C> {
 struct CircuitFutDestroy<'a, Cell> {
     #[pin]
     fut: Option<SendFut<'a, Cell>>,
+    #[pin]
     recv: RecvStream<'a, Cell>,
 }
 
@@ -504,7 +562,7 @@ impl<Cell> Future for CircuitFutDestroy<'_, Cell> {
             Some(f) => f.poll(cx),
             None => Ready(Ok(())),
         };
-        let p2 = poll_until_closed(this.recv, cx);
+        let p2 = poll_until_closed(this.recv.as_mut(), cx);
 
         match ready!(p1) {
             Ok(()) => this.fut.set(None),
@@ -514,7 +572,7 @@ impl<Cell> Future for CircuitFutDestroy<'_, Cell> {
     }
 }
 
-fn poll_until_closed<T>(recv: &mut RecvStream<'_, T>, cx: &mut Context<'_>) -> Poll<()> {
-    while ready!(Pin::new(&mut *recv).poll_next(cx)).is_some() {}
+fn poll_until_closed<T>(mut recv: Pin<&mut RecvStream<'_, T>>, cx: &mut Context<'_>) -> Poll<()> {
+    while ready!(recv.as_mut().poll_next(cx)).is_some() {}
     Ready(())
 }
