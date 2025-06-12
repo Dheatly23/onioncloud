@@ -318,3 +318,11 @@ impl CircuitHandshakeError {
         Self(CircuitHandshakeErrorInner::CryptoError)
     }
 }
+
+/// Channel is closed.
+#[derive(Error)]
+#[error("channel is closed")]
+#[non_exhaustive]
+pub struct ChannelClosedError;
+
+display2debug! {ChannelClosedError}

@@ -98,3 +98,17 @@ remap! {
         CellFormatError,
     }
 }
+
+/// Directory controller error.
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum DirControllerError {
+    #[error(transparent)]
+    InvalidCellHeader(#[from] super::InvalidCellHeader),
+    #[error(transparent)]
+    CellFormatError(#[from] super::CellFormatError),
+    #[error(transparent)]
+    CircuitHandshakeError(#[from] super::CircuitHandshakeError),
+    #[error(transparent)]
+    ChannelClosedError(#[from] super::ChannelClosedError),
+}
