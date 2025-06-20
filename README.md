@@ -48,6 +48,12 @@ EOTK is nice and all, but relying on C Tor limits it's scalability.
 
 It's parallelization, AKA horizontal scaling. Also it's client/user applications only.
 
+### How it (will) works?
+
+Basically, we aim to separate initiator circuit and rendezvous circuits to different machines.
+That way, we can implement things like: load balancing, auto scaling, multi tenancy, etc.
+Communication between initiator and workers are left to user (probably a form of pubsub/event bus).
+
 ### License?
 
 Since this project is _heavily_ inspired by Arti, we'll use the same license of Apache 2.0.
