@@ -145,7 +145,10 @@ impl RelayBegin {
             }
         }
 
-        debug_assert_eq!(Self::check(&data), Some((stream, p_addr_port, p_flags)));
+        if cfg!(debug_assertions) {
+            data.set_stream(stream.into());
+            debug_assert_eq!(Self::check(&data), Some((stream, p_addr_port, p_flags)));
+        }
 
         Self {
             stream,
@@ -206,4 +209,28 @@ impl RelayBegin {
 #[inline]
 fn chr_nul(s: &[u8]) -> Option<usize> {
     memchr(0, s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_begin_new(
+            addr in "[a-zA-Z]{0,128}",
+            port: u16,
+            flags: u32,
+            stream: NonZeroU16,
+        ) {
+            let addr_port = format!("{addr}:{port}");
+            let cell = RelayBegin::new(FixedCell::default(), stream, &addr_port, flags);
+
+            assert_eq!(cell.stream, stream);
+            assert_eq!(cell.addr_port(), addr_port);
+            assert_eq!(cell.flags(), flags);
+        }
+    }
 }
