@@ -755,6 +755,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "loom",
+ "memchr",
  "once_cell",
  "pin-project",
  "proptest",

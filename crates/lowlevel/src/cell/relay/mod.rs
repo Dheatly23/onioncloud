@@ -1,6 +1,9 @@
-use std::mem::size_of;
+pub mod begin;
+
+use std::mem::{size_of, transmute};
 use std::num::NonZeroU32;
 
+use rand::prelude::*;
 use zerocopy::byteorder::big_endian::U16;
 use zerocopy::{
     FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned, transmute_mut, transmute_ref,
@@ -33,7 +36,8 @@ pub(crate) struct RelayHeader {
     pub(crate) len: U16,
 }
 
-pub(crate) const RELAY_DATA_LENGTH: usize = FIXED_CELL_SIZE - size_of::<RelayHeader>();
+/// Maximum length of RELAY payload.
+pub const RELAY_DATA_LENGTH: usize = FIXED_CELL_SIZE - size_of::<RelayHeader>();
 
 /// RELAY and RELAY_EARLY cell content.
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -103,6 +107,16 @@ pub trait RelayLike: Sealed + AsRef<[u8; FIXED_CELL_SIZE]> + AsMut<[u8; FIXED_CE
         self.len() == 0
     }
 
+    /// Set length.
+    ///
+    /// # SAFETY
+    ///
+    /// Length must be shorter than [`RELAY_DATA_LENGTH`].
+    unsafe fn set_len(&mut self, len: u16) {
+        debug_assert!(len as usize <= RELAY_DATA_LENGTH);
+        cast_cell_mut(self).header.len.set(len)
+    }
+
     /// Get payload.
     ///
     /// # Panics
@@ -140,6 +154,25 @@ pub trait RelayLike: Sealed + AsRef<[u8; FIXED_CELL_SIZE]> + AsMut<[u8; FIXED_CE
         cell.header
             .len
             .set(data.len().try_into().expect("data must fit cell"));
+    }
+
+    /// Get data and padding.
+    fn data_padding(&self) -> &[u8; RELAY_DATA_LENGTH] {
+        &cast_cell(self).data
+    }
+
+    /// Get data and padding mutably.
+    fn data_padding_mut(&mut self) -> &mut [u8; RELAY_DATA_LENGTH] {
+        &mut cast_cell_mut(self).data
+    }
+
+    /// Fill padding bytes in accordance to spec.
+    fn fill_padding(&mut self) {
+        let cell = cast_cell_mut(self);
+        let padding = &mut cell.data[usize::from(cell.header.len.get())..];
+        if let [_, _, _, _, padding @ ..] = padding {
+            ThreadRng::default().fill_bytes(padding)
+        }
     }
 }
 
@@ -477,7 +510,8 @@ impl RelayEarly {
 }
 
 /// Helper for wrapping RELAY cell payload.
-#[derive(Debug, Clone, PartialEq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
 struct RelayWrapper(FixedCell);
 
 impl Sealed for RelayWrapper {}
@@ -519,6 +553,34 @@ impl From<RelayWrapper> for FixedCell {
     }
 }
 
+impl<'a> From<&'a FixedCell> for &'a RelayWrapper {
+    fn from(v: &'a FixedCell) -> Self {
+        // SAFETY: RelayWrapper can be transparently transmuted to FixedCell
+        unsafe { transmute(v) }
+    }
+}
+
+impl<'a> From<&'a mut FixedCell> for &'a mut RelayWrapper {
+    fn from(v: &'a mut FixedCell) -> Self {
+        // SAFETY: RelayWrapper can be transparently transmuted to FixedCell
+        unsafe { transmute(v) }
+    }
+}
+
+impl<'a> From<&'a RelayWrapper> for &'a FixedCell {
+    fn from(v: &'a RelayWrapper) -> Self {
+        // SAFETY: FixedCell can be transparently transmuted to RelayWrapper
+        unsafe { transmute(v) }
+    }
+}
+
+impl<'a> From<&'a mut RelayWrapper> for &'a mut FixedCell {
+    fn from(v: &'a mut RelayWrapper) -> Self {
+        // SAFETY: FixedCell can be transparently transmuted to RelayWrapper
+        unsafe { transmute(v) }
+    }
+}
+
 /// Trait to cast from [`Relay`] cell.
 pub trait TryFromRelay: Sized {
     /// Checks cell content, take it, then cast it into `Self`.
@@ -541,6 +603,20 @@ pub fn cast<T: TryFromRelay>(
     T::try_from_relay(relay)
 }
 
+fn take_if(
+    relay: &mut Option<Relay>,
+    check: impl FnOnce(&[u8]) -> bool,
+) -> Result<Option<RelayWrapper>, errors::CellFormatError> {
+    match relay.take() {
+        Some(r) if check(r.data()) => Ok(Some(r.cell.into())),
+        None => Ok(None),
+        v => {
+            *relay = v;
+            Err(errors::CellFormatError)
+        }
+    }
+}
+
 /// Convert cell into [`Relay`] cell.
 pub trait IntoRelay: Sized {
     /// Convert into [`Relay`] with given circuit ID.
@@ -559,4 +635,11 @@ impl IntoRelay for RelayWrapper {
             cell: self.0,
         }
     }
+}
+
+fn with_cmd_stream(mut data: RelayWrapper, cmd: u8, stream: u16, circuit: NonZeroU32) -> Relay {
+    data.set_command(cmd);
+    data.set_stream(stream);
+    data.fill_padding();
+    data.into_relay(circuit)
 }
