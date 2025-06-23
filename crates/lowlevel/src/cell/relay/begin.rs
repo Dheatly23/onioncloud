@@ -1,3 +1,4 @@
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::num::{NonZeroU16, NonZeroU32};
 use std::ptr::{NonNull, null};
 use std::str::{from_utf8, from_utf8_unchecked};
@@ -11,7 +12,6 @@ use crate::cell::FixedCell;
 use crate::errors;
 
 /// Represents a RELAY_BEGIN cell.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RelayBegin {
     pub stream: NonZeroU16,
     data: RelayWrapper,
@@ -19,6 +19,21 @@ pub struct RelayBegin {
     // Auxiliary pointers for speedup access.
     p_addr_port: NonNull<str>,
     p_flags: *const U32,
+}
+
+impl Debug for RelayBegin {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("RelayBegin")
+            .field("stream", &self.stream)
+            .field("data", &self.data)
+            .finish()
+    }
+}
+
+impl PartialEq for RelayBegin {
+    fn eq(&self, rhs: &Self) -> bool {
+        self.stream == rhs.stream && self.data == rhs.data
+    }
 }
 
 // SAFETY: Pointers target are stable.
