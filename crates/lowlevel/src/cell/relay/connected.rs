@@ -244,6 +244,21 @@ mod tests {
         )
     }
 
+    #[test]
+    fn test_connected_not_ip() {
+        let mut cell = Some(Relay::new(
+            FixedCell::default(),
+            NonZeroU32::new(1).unwrap(),
+            RelayConnected::ID,
+            1,
+            &[
+                0, 0, 0, 0, 123, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
+            ],
+        ));
+        RelayConnected::try_from_relay(&mut cell).unwrap_err();
+        cell.unwrap();
+    }
+
     proptest! {
         #[test]
         fn test_connected_new(
@@ -310,6 +325,19 @@ mod tests {
             let cell = cell.into_relay(NonZeroU32::new(1).unwrap());
 
             assert_relay_eq(&cell, &data);
+        }
+
+        #[test]
+        fn test_connected_truncated(n in 1usize..8) {
+            let mut cell = Some(Relay::new(
+                FixedCell::default(),
+                NonZeroU32::new(1).unwrap(),
+                RelayConnected::ID,
+                1,
+                &[127, 0, 0, 1, 0, 0, 0, 0][..n],
+            ));
+            RelayConnected::try_from_relay(&mut cell).unwrap_err();
+            cell.unwrap();
         }
     }
 }

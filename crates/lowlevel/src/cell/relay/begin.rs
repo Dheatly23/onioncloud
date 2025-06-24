@@ -328,6 +328,32 @@ mod tests {
         )
     }
 
+    #[test]
+    fn test_begin_no_nul() {
+        let mut cell = Some(Relay::new(
+            FixedCell::default(),
+            NonZeroU32::new(1).unwrap(),
+            RelayBegin::ID,
+            1,
+            b"example.com:80",
+        ));
+        RelayBegin::try_from_relay(&mut cell).unwrap_err();
+        cell.unwrap();
+    }
+
+    #[test]
+    fn test_begin_not_utf8() {
+        let mut cell = Some(Relay::new(
+            FixedCell::default(),
+            NonZeroU32::new(1).unwrap(),
+            RelayBegin::ID,
+            1,
+            b"example.\x80com:80\0\0\0\0\0",
+        ));
+        RelayBegin::try_from_relay(&mut cell).unwrap_err();
+        cell.unwrap();
+    }
+
     proptest! {
         #[test]
         fn test_begin_new(
@@ -376,6 +402,20 @@ mod tests {
             let cell = cell.into_relay(NonZeroU32::new(1).unwrap());
 
             assert_relay_eq(&cell, &data);
+        }
+
+        #[test]
+        fn test_begin_truncated(n in 1usize..4) {
+            static STR: &[u8] = b"example.com:80\0\0\0\0\x01";
+            let mut cell = Some(Relay::new(
+                FixedCell::default(),
+                NonZeroU32::new(1).unwrap(),
+                RelayBegin::ID,
+                1,
+                &STR[..STR.len() - n],
+            ));
+            RelayBegin::try_from_relay(&mut cell).unwrap_err();
+            cell.unwrap();
         }
     }
 }
