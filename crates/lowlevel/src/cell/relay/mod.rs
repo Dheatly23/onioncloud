@@ -649,6 +649,7 @@ fn with_cmd_stream(mut data: RelayWrapper, cmd: u8, stream: u16, circuit: NonZer
 mod tests {
     use super::*;
 
+    #[track_caller]
     pub(crate) fn assert_relay_eq(a: &impl RelayLike, b: &impl RelayLike) {
         let a = cast_cell(a);
         let b = cast_cell(b);
