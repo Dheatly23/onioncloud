@@ -1,6 +1,7 @@
 use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::hash::{Hash, Hasher};
 use std::num::{NonZeroU16, NonZeroU32};
-use std::ptr::{from_ref, null};
+use std::ptr::from_ref;
 use std::slice::from_raw_parts;
 use std::str::{from_utf8, from_utf8_unchecked};
 
@@ -13,14 +14,18 @@ use crate::cell::FixedCell;
 use crate::errors;
 
 /// Represents a RELAY_BEGIN cell.
+#[derive(Clone)]
 pub struct RelayBegin {
+    /// Stream ID.
     pub stream: NonZeroU16,
+    /// Cell payload.
     data: RelayWrapper,
 
-    // Auxiliary pointers for speedup access.
-    // Use usize because stacked borrows prevent us from using regular pointer.
-    p_addr_port_s: usize,
-    p_flags: usize,
+    // Auxiliary data to speedup access.
+    /// Size of address:port (not including trailing NUL).
+    addr_port_s: usize,
+    /// `true` if cell has nonzero flags field.
+    has_flags: bool,
 }
 
 impl Debug for RelayBegin {
@@ -38,23 +43,10 @@ impl PartialEq for RelayBegin {
     }
 }
 
-impl Clone for RelayBegin {
-    fn clone(&self) -> Self {
-        let data = self.data.clone();
-
-        // Get offset between two pointers
-        // Don't use byte_offset() because pointers are in different allocations
-        let p = from_ref(data.data_padding());
-        let off = p
-            .addr()
-            .wrapping_sub(self.data.data_padding().as_ptr().addr());
-
-        Self {
-            stream: self.stream,
-            data,
-            p_addr_port_s: self.p_addr_port_s,
-            p_flags: self.p_flags.wrapping_add(off),
-        }
+impl Hash for RelayBegin {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.stream.hash(state);
+        self.data.hash(state);
     }
 }
 
@@ -69,7 +61,7 @@ impl TryFromRelay for RelayBegin {
         let Some(r) = relay.take() else {
             return Ok(None);
         };
-        let Some((stream, p_addr_port_s, p_flags)) =
+        let Some((stream, addr_port_s, has_flags)) =
             Self::check(AsRef::<FixedCell>::as_ref(&r).into())
         else {
             *relay = Some(r);
@@ -78,8 +70,8 @@ impl TryFromRelay for RelayBegin {
         Ok(Some(Self {
             stream,
             data: FixedCell::from(r).into(),
-            p_addr_port_s,
-            p_flags,
+            addr_port_s,
+            has_flags,
         }))
     }
 }
@@ -101,13 +93,13 @@ impl RelayBegin {
     /// Cell must be a valid RELAY_BEGIN cell.
     pub unsafe fn from_cell(cell: FixedCell) -> Self {
         let data = RelayWrapper::from(cell);
-        let (stream, p_addr_port_s, p_flags) = Self::check(&data).expect("malformed cell format");
+        let (stream, addr_port_s, has_flags) = Self::check(&data).expect("malformed cell format");
 
         Self {
             stream,
             data,
-            p_addr_port_s,
-            p_flags,
+            addr_port_s,
+            has_flags,
         }
     }
 
@@ -139,14 +131,14 @@ impl RelayBegin {
         b[..l].copy_from_slice(addr_port.as_bytes());
         b[l] = 0;
 
-        let (p_flags, sz) = if flags != 0 {
+        let (has_flags, sz) = if flags != 0 {
             let p: &mut U32 =
                 transmute_mut!(<&mut [u8; 4]>::try_from(&mut b[l + 1..l + 5]).unwrap());
             p.set(flags);
 
-            (from_ref(p), l + 5)
+            (true, l + 5)
         } else {
-            (null(), l + 1)
+            (false, l + 1)
         };
 
         // SAFETY: Payload length is valid.
@@ -157,14 +149,14 @@ impl RelayBegin {
         if cfg!(debug_assertions) {
             data.set_stream(stream.into());
             data.set_command(Self::ID);
-            debug_assert_eq!(Self::check(&data), Some((stream, l, p_flags.addr())));
+            debug_assert_eq!(Self::check(&data), Some((stream, l, has_flags)));
         }
 
         Self {
             stream,
-            p_addr_port_s: l,
-            p_flags: p_flags.addr(),
             data,
+            addr_port_s: l,
+            has_flags,
         }
     }
 
@@ -177,10 +169,10 @@ impl RelayBegin {
 
     /// Get flags.
     pub fn flags(&self) -> u32 {
-        self.get_data().1.map(|v| v.get()).unwrap_or_default()
+        self.get_data().1.map_or(0, |v| v.get())
     }
 
-    fn check(cell: &RelayWrapper) -> Option<(NonZeroU16, usize, usize)> {
+    fn check(cell: &RelayWrapper) -> Option<(NonZeroU16, usize, bool)> {
         if cell.command() != Self::ID {
             return None;
         }
@@ -190,30 +182,28 @@ impl RelayBegin {
         let (s, [0, data @ ..]) = chr_nul(data).map(|i| data.split_at(i))? else {
             return None;
         };
-        let flags = if data.is_empty() {
-            None
-        } else {
-            let flags = U32::ref_from_bytes(data).ok()?;
+        let has_flags = !data.is_empty();
+        if has_flags {
+            let _flags = U32::ref_from_bytes(data).ok()?;
             // TODO: Check flags.
-            Some(flags)
-        };
+        }
 
         let s = from_utf8(s).ok()?;
         // TODO: Check if string content is valid.
 
-        Some((stream, s.len(), flags.map_or(0, |p| from_ref(p).addr())))
+        Some((stream, s.len(), has_flags))
     }
 
     fn get_data(&self) -> (&str, Option<&U32>) {
-        // SAFETY: Data validity has been checked.
+        // SAFETY: Data validity has been checked and auxilirary data is valid.
         unsafe {
-            let p = self.data.data_padding();
+            let p = from_ref(self.data.data_padding()).cast::<u8>();
             (
-                from_utf8_unchecked(p.get_unchecked(..self.p_addr_port_s)),
-                if self.p_flags == 0 {
-                    None
+                from_utf8_unchecked(from_raw_parts(p, self.addr_port_s)),
+                if self.has_flags {
+                    Some(&*p.add(self.addr_port_s + 1).cast())
                 } else {
-                    Some(&*from_ref(p).with_addr(self.p_flags).cast())
+                    None
                 },
             )
         }
@@ -233,6 +223,8 @@ mod tests {
 
     use proptest::prelude::*;
 
+    use crate::cell::relay::tests::assert_relay_eq;
+
     fn strat() -> impl Strategy<Value = (String, u32, NonZeroU16)> {
         (
             ("[a-zA-Z]{0,128}", any::<u16>()).prop_map(|(mut a, p)| {
@@ -245,8 +237,6 @@ mod tests {
     }
 
     proptest! {
-        //#![proptest_config(ProptestConfig::with_cases(10))]
-
         #[test]
         fn test_begin_new(
             (addr_port, flags, stream) in strat(),
@@ -272,7 +262,7 @@ mod tests {
         }
 
         #[test]
-        fn test_begin_from_relay(
+        fn test_begin_from_into_relay(
             (addr_port, flags, stream) in strat(),
         ) {
             let mut v = Vec::new();
@@ -282,13 +272,18 @@ mod tests {
                 v.extend_from_slice(&flags.to_be_bytes());
             }
 
-            let mut cell = Some(Relay::new(FixedCell::default(), NonZeroU32::new(1).unwrap(), RelayBegin::ID, stream.into(),&v));
+            let cell = Relay::new(FixedCell::default(), NonZeroU32::new(1).unwrap(), RelayBegin::ID, stream.into(),&v);
             drop(v);
-            let cell = RelayBegin::try_from_relay(&mut cell).unwrap().unwrap();
+            let data = RelayWrapper::from(AsRef::<FixedCell>::as_ref(&cell).clone());
+            let cell = RelayBegin::try_from_relay(&mut Some(cell)).unwrap().unwrap();
 
             assert_eq!(cell.stream, stream);
             assert_eq!(cell.addr_port(), addr_port);
             assert_eq!(cell.flags(), flags);
+
+            let cell = cell.into_relay(NonZeroU32::new(1).unwrap());
+
+            assert_relay_eq(&cell, &data);
         }
     }
 }

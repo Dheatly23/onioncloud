@@ -17,7 +17,7 @@ use crate::errors;
 use crate::private::Sealed;
 
 /// RELAY and RELAY_EARLY cell header.
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub(crate) struct RelayHeader {
     /// Relay command.
@@ -642,4 +642,20 @@ fn with_cmd_stream(mut data: RelayWrapper, cmd: u8, stream: u16, circuit: NonZer
     data.set_stream(stream);
     data.fill_padding();
     data.into_relay(circuit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    pub(crate) fn assert_relay_eq(a: &impl RelayLike, b: &impl RelayLike) {
+        let a = cast_cell(a);
+        let b = cast_cell(b);
+
+        assert_eq!(a.header, b.header);
+
+        let a_data = &a.data[..usize::from(a.header.len.get())];
+        let b_data = &b.data[..usize::from(b.header.len.get())];
+        assert_eq!(a_data, b_data);
+    }
 }
