@@ -312,9 +312,11 @@ mod tests {
     use super::*;
 
     use std::fmt::Write;
+    use std::iter::repeat_n;
 
     use proptest::prelude::*;
 
+    use crate::cell::relay::RELAY_DATA_LENGTH;
     use crate::cell::relay::tests::assert_relay_eq;
 
     fn strat() -> impl Strategy<Value = (String, u32, NonZeroU16)> {
@@ -352,6 +354,38 @@ mod tests {
         ));
         RelayBegin::try_from_relay(&mut cell).unwrap_err();
         cell.unwrap();
+    }
+
+    fn make_long_addr(n: usize) -> String {
+        static SUFFIX: &str = ".com:80";
+        let mut s = String::new();
+        s.extend(repeat_n('a', n - SUFFIX.len()));
+        s.push_str(SUFFIX);
+        s
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_begin_overflow() {
+        let cell = RelayBegin::new(
+            FixedCell::default(),
+            NonZeroU16::new(1).unwrap(),
+            &make_long_addr(RELAY_DATA_LENGTH),
+            Flags::new(),
+        );
+        println!("{:?}", cell.data.data());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_begin_overflow2() {
+        let cell = RelayBegin::new(
+            FixedCell::default(),
+            NonZeroU16::new(1).unwrap(),
+            &make_long_addr(RELAY_DATA_LENGTH - 4),
+            Flags(1),
+        );
+        println!("{:?}", cell.data.data());
     }
 
     proptest! {
