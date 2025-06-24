@@ -1,6 +1,7 @@
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::hash::{Hash, Hasher};
 use std::num::{NonZeroU16, NonZeroU32};
+use std::ops::BitOr;
 use std::ptr::from_ref;
 use std::slice::from_raw_parts;
 use std::str::{from_utf8, from_utf8_unchecked};
@@ -127,19 +128,19 @@ impl RelayBegin {
     /// ```
     /// use std::num::NonZeroU16;
     ///
-    /// use onioncloud_lowlevel::cell::relay::begin::RelayBegin;
+    /// use onioncloud_lowlevel::cell::relay::begin::{Flags, RelayBegin};
     ///
     /// let cell = RelayBegin::new(
     ///     Default::default(),
     ///     NonZeroU16::new(1).unwrap(),
     ///     "example.com:80",
-    ///     1,
+    ///     Flags::new(),
     /// );
     ///
     /// assert_eq!(cell.addr_port(), "example.com:80");
-    /// assert_eq!(cell.flags(), 1);
+    /// assert_eq!(cell.flags(), Flags::new());
     /// ```
-    pub fn new(cell: FixedCell, stream: NonZeroU16, addr_port: &str, flags: u32) -> Self {
+    pub fn new(cell: FixedCell, stream: NonZeroU16, addr_port: &str, flags: Flags) -> Self {
         assert_eq!(
             chr_nul(addr_port.as_bytes()),
             None,
@@ -155,7 +156,7 @@ impl RelayBegin {
         let (has_flags, sz) = if flags != 0 {
             let p: &mut U32 =
                 transmute_mut!(<&mut [u8; 4]>::try_from(&mut b[l + 1..l + 5]).unwrap());
-            p.set(flags);
+            p.set(flags.into());
 
             (true, l + 5)
         } else {
@@ -189,8 +190,8 @@ impl RelayBegin {
     }
 
     /// Get flags.
-    pub fn flags(&self) -> u32 {
-        self.get_data().1.map_or(0, |v| v.get())
+    pub fn flags(&self) -> Flags {
+        Flags(self.get_data().1.map_or(0, |v| v.get()))
     }
 
     fn check(cell: &RelayWrapper) -> Option<(NonZeroU16, usize, bool)> {
@@ -231,6 +232,80 @@ impl RelayBegin {
     }
 }
 
+/// RELAY_BEGIN flags.
+///
+/// Opaque abstraction of flags. Can be converted to [`u32`] for inspection.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Flags(u32);
+
+impl From<Flags> for u32 {
+    fn from(v: Flags) -> u32 {
+        v.0
+    }
+}
+
+impl PartialEq<u32> for Flags {
+    fn eq(&self, rhs: &u32) -> bool {
+        self.0 == *rhs
+    }
+}
+
+impl BitOr for Flags {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl Flags {
+    /// Enables using IPv6.
+    const IPV6_OK: u32 = 1 << 0;
+
+    /// Disables connecting to IPv4.
+    const IPV4_NOT_OK: u32 = 1 << 1;
+
+    /// Prefers IPv6 address.
+    const IPV6_PREFER: u32 = 1 << 2;
+
+    /// Create empty flags.
+    pub const fn new() -> Self {
+        Self(0)
+    }
+
+    /// Enable IPv6 support.
+    pub const fn with_ipv6(self) -> Self {
+        Self(self.0 | Self::IPV6_OK)
+    }
+
+    /// Enable _only_ IPv6 (and disable IPv4).
+    pub const fn without_ipv4(self) -> Self {
+        // Set IPV6_OK because if not we can't connect at all.
+        Self(self.0 | Self::IPV6_OK | Self::IPV4_NOT_OK)
+    }
+
+    /// Enable and prefer IPv6.
+    pub const fn prefer_ipv6(self) -> Self {
+        // Set IPV6_OK because if not it's useless.
+        Self(self.0 | Self::IPV6_OK | Self::IPV6_PREFER)
+    }
+
+    /// Check if IPv6 is enabled.
+    pub const fn is_ipv6_enabled(&self) -> bool {
+        self.0 & Self::IPV6_OK != 0
+    }
+
+    /// Check if IPv4 is disabled.
+    pub const fn is_ipv4_disabled(&self) -> bool {
+        self.0 & Self::IPV4_NOT_OK != 0
+    }
+
+    /// Check if IPv6 is preferred.
+    pub const fn is_ipv6_preferred(&self) -> bool {
+        self.0 & Self::IPV6_PREFER != 0
+    }
+}
+
 #[inline]
 fn chr_nul(s: &[u8]) -> Option<usize> {
     memchr(0, s)
@@ -262,7 +337,7 @@ mod tests {
         fn test_begin_new(
             (addr_port, flags, stream) in strat(),
         ) {
-            let cell = RelayBegin::new(FixedCell::default(), stream, &addr_port, flags);
+            let cell = RelayBegin::new(FixedCell::default(), stream, &addr_port, Flags(flags));
 
             assert_eq!(cell.stream, stream);
             assert_eq!(cell.addr_port(), addr_port);
@@ -273,7 +348,7 @@ mod tests {
         fn test_begin_clone(
             (addr_port, flags, stream) in strat(),
         ) {
-            let cell = RelayBegin::new(FixedCell::default(), stream, &addr_port, flags);
+            let cell = RelayBegin::new(FixedCell::default(), stream, &addr_port, Flags(flags));
             drop(addr_port);
             let target = cell.clone();
 
