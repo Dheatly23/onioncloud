@@ -220,9 +220,10 @@ impl RelayConnected {
                 _,
             )) => matches!(
                 ConnectedIpv6::ref_from_prefix(data),
-                Ok((ConnectedIpv6 { ip_ty: 6, .. }, _))
+                Ok((ConnectedIpv6 { ip_ty: 6, .. }, []))
             ),
-            v => v.is_ok(),
+            Ok((_, [])) => true,
+            _ => false,
         }
     }
 }
