@@ -134,6 +134,10 @@ impl RelayConnected {
     /// - `ip` : IP address.
     /// - `ttl` : Time to live.
     ///
+    /// # Panics
+    ///
+    /// Panics if IP is unspecified (see [`std::net::IpAddr::is_unspecified`]).
+    ///
     /// # Example
     ///
     /// ```
@@ -257,6 +261,30 @@ mod tests {
         ));
         RelayConnected::try_from_relay(&mut cell).unwrap_err();
         cell.unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_connected_ipv4_zero() {
+        let cell = RelayConnected::new(
+            FixedCell::default(),
+            NonZeroU16::new(1).unwrap(),
+            [0; 4].into(),
+            0,
+        );
+        println!("{:?}", cell.data.data());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_connected_ipv6_zero() {
+        let cell = RelayConnected::new(
+            FixedCell::default(),
+            NonZeroU16::new(1).unwrap(),
+            [0; 16].into(),
+            0,
+        );
+        println!("{:?}", cell.data.data());
     }
 
     proptest! {
