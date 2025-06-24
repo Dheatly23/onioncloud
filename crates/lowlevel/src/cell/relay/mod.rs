@@ -1,5 +1,6 @@
 pub mod begin;
 pub mod begin_dir;
+pub mod connected;
 
 use std::mem::{size_of, transmute};
 use std::num::NonZeroU32;
