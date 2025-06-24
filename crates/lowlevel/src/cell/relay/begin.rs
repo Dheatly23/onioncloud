@@ -117,7 +117,25 @@ impl RelayBegin {
     ///
     /// # Panics
     ///
-    /// Panics if `data` is longer than [`RELAY_DATA_LENGTH`].
+    /// Panics if data is longer than [`RELAY_DATA_LENGTH`](`super::RELAY_DATA_LENGTH`).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::num::NonZeroU16;
+    ///
+    /// use onioncloud_lowlevel::cell::relay::begin::RelayBegin;
+    ///
+    /// let cell = RelayBegin::new(
+    ///     Default::default(),
+    ///     NonZeroU16::new(1).unwrap(),
+    ///     "example.com:80",
+    ///     1,
+    /// );
+    ///
+    /// assert_eq!(cell.addr_port(), "example.com:80");
+    /// assert_eq!(cell.flags(), 1);
+    /// ```
     pub fn new(cell: FixedCell, stream: NonZeroU16, addr_port: &str, flags: u32) -> Self {
         assert_eq!(
             chr_nul(addr_port.as_bytes()),
