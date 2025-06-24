@@ -58,6 +58,9 @@ impl AsRef<FixedCell> for RelayBegin {
 
 impl TryFromRelay for RelayBegin {
     fn try_from_relay(relay: &mut Option<Relay>) -> Result<Option<Self>, errors::CellFormatError> {
+        if relay.as_mut().is_none_or(|r| r.command() != Self::ID) {
+            return Ok(None);
+        }
         let Some(r) = relay.take() else {
             return Ok(None);
         };
