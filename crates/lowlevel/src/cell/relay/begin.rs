@@ -170,7 +170,6 @@ impl RelayBegin {
 
         if cfg!(debug_assertions) {
             data.set_stream(stream.into());
-            data.set_command(Self::ID);
             debug_assert_eq!(Self::check(&data), Some((stream, l, has_flags)));
         }
 
@@ -195,9 +194,6 @@ impl RelayBegin {
     }
 
     fn check(cell: &RelayWrapper) -> Option<(NonZeroU16, usize, bool)> {
-        if cell.command() != Self::ID {
-            return None;
-        }
         let stream = NonZeroU16::new(cell.stream())?;
 
         let data = cell.data();
@@ -368,7 +364,7 @@ mod tests {
                 v.extend_from_slice(&flags.to_be_bytes());
             }
 
-            let cell = Relay::new(FixedCell::default(), NonZeroU32::new(1).unwrap(), RelayBegin::ID, stream.into(),&v);
+            let cell = Relay::new(FixedCell::default(), NonZeroU32::new(1).unwrap(), RelayBegin::ID, stream.into(), &v);
             drop(v);
             let data = RelayWrapper::from(AsRef::<FixedCell>::as_ref(&cell).clone());
             let cell = RelayBegin::try_from_relay(&mut Some(cell)).unwrap().unwrap();
