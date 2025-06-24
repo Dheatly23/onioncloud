@@ -88,6 +88,8 @@ impl RelayDrop {
     ///     NonZeroU16::new(1).unwrap(),
     ///     123,
     /// );
+    ///
+    /// assert_eq!(cell.len(), 123);
     /// ```
     pub fn new(cell: FixedCell, stream: NonZeroU16, len: usize) -> Self {
         assert!(len <= RELAY_DATA_LENGTH, "length is too long");
@@ -102,6 +104,11 @@ impl RelayDrop {
         ThreadRng::default().fill_bytes(data.data_mut());
 
         Self { stream, data }
+    }
+
+    /// Get cell length.
+    pub fn len(&self) -> usize {
+        self.data.len().into()
     }
 }
 
@@ -134,6 +141,7 @@ mod tests {
             let cell = RelayDrop::new(FixedCell::default(), stream, len);
 
             assert_eq!(cell.stream, stream);
+            assert_eq!(cell.len(), len);
         }
 
         #[test]
@@ -141,12 +149,14 @@ mod tests {
             stream: NonZeroU16,
             data in vec(any::<u8>(), 0..=RELAY_DATA_LENGTH),
         ) {
+            let len = data.len();
             let cell = Relay::new(FixedCell::default(), NonZeroU32::new(1).unwrap(), RelayDrop::ID, stream.into(), &data);
             drop(data);
             let data = RelayWrapper::from(AsRef::<FixedCell>::as_ref(&cell).clone());
             let cell = RelayDrop::try_from_relay(&mut Some(cell)).unwrap().unwrap();
 
             assert_eq!(cell.stream, stream);
+            assert_eq!(cell.len(), len);
 
             let cell = cell.into_relay(NonZeroU32::new(1).unwrap());
 
