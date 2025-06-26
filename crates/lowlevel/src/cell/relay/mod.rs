@@ -4,6 +4,7 @@ pub mod connected;
 pub mod data;
 pub mod drop;
 pub mod extend;
+pub mod sendme;
 
 use std::mem::{size_of, transmute};
 use std::num::NonZeroU32;
