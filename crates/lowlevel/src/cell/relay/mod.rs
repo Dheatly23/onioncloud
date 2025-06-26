@@ -3,6 +3,7 @@ pub mod begin_dir;
 pub mod connected;
 pub mod data;
 pub mod drop;
+pub mod extend;
 
 use std::mem::{size_of, transmute};
 use std::num::NonZeroU32;
