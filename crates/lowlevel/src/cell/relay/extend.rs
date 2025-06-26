@@ -269,7 +269,7 @@ impl RelayExtend2 {
     ///
     /// use onioncloud_lowlevel::cell::relay::extend::{Linkspec, Handshake, RelayExtend2};
     ///
-    /// let linkspec: [Linkspec<&[u8]>; _] = [
+    /// let linkspec: [Linkspec<&[u8]>; 2] = [
     ///     Linkspec {
     ///         ty: 0,
     ///         data: &[0],
