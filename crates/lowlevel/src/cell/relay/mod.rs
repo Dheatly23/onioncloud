@@ -3,6 +3,7 @@ pub mod begin_dir;
 pub mod connected;
 pub mod data;
 pub mod drop;
+pub mod end;
 pub mod extend;
 pub mod sendme;
 
