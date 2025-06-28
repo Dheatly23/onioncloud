@@ -11,6 +11,7 @@ use zerocopy::byteorder::big_endian::U32;
 use zerocopy::{FromBytes, transmute_mut};
 
 use super::{IntoRelay, Relay, RelayLike, RelayWrapper, TryFromRelay, with_cmd_stream};
+use crate::cache::Cachable;
 use crate::cell::FixedCell;
 use crate::errors;
 
@@ -54,6 +55,12 @@ impl Hash for RelayBegin {
 impl AsRef<FixedCell> for RelayBegin {
     fn as_ref(&self) -> &FixedCell {
         self.data.as_ref()
+    }
+}
+
+impl Cachable for RelayBegin {
+    fn maybe_into_fixed(self) -> Option<FixedCell> {
+        Some(self.data.into())
     }
 }
 

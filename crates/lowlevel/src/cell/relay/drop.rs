@@ -5,6 +5,7 @@ use rand::prelude::*;
 use super::{
     IntoRelay, RELAY_DATA_LENGTH, Relay, RelayLike, RelayWrapper, TryFromRelay, with_cmd_stream,
 };
+use crate::cache::Cachable;
 use crate::cell::FixedCell;
 use crate::errors;
 
@@ -20,6 +21,12 @@ pub struct RelayDrop {
 impl AsRef<FixedCell> for RelayDrop {
     fn as_ref(&self) -> &FixedCell {
         self.data.as_ref()
+    }
+}
+
+impl Cachable for RelayDrop {
+    fn maybe_into_fixed(self) -> Option<FixedCell> {
+        Some(self.data.into())
     }
 }
 

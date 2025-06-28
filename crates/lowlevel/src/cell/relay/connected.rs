@@ -9,6 +9,7 @@ use super::{
     IntoRelay, RELAY_DATA_LENGTH, Relay, RelayLike, RelayWrapper, TryFromRelay, take_if,
     with_cmd_stream,
 };
+use crate::cache::Cachable;
 use crate::cell::FixedCell;
 use crate::errors;
 
@@ -54,6 +55,12 @@ pub struct RelayConnected {
 impl AsRef<FixedCell> for RelayConnected {
     fn as_ref(&self) -> &FixedCell {
         self.data.as_ref()
+    }
+}
+
+impl Cachable for RelayConnected {
+    fn maybe_into_fixed(self) -> Option<FixedCell> {
+        Some(self.data.into())
     }
 }
 

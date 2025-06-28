@@ -1,6 +1,7 @@
 use std::num::{NonZeroU16, NonZeroU32};
 
 use super::{IntoRelay, Relay, RelayLike, RelayWrapper, TryFromRelay, with_cmd_stream};
+use crate::cache::Cachable;
 use crate::cell::FixedCell;
 use crate::errors;
 
@@ -16,6 +17,12 @@ pub struct RelayBeginDir {
 impl AsRef<FixedCell> for RelayBeginDir {
     fn as_ref(&self) -> &FixedCell {
         self.data.as_ref()
+    }
+}
+
+impl Cachable for RelayBeginDir {
+    fn maybe_into_fixed(self) -> Option<FixedCell> {
+        Some(self.data.into())
     }
 }
 
