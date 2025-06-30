@@ -173,9 +173,8 @@ fn check_cert(
     while let Some(v) = unverified.next_ext() {
         let (header, data) = v?;
 
-        match header.ty {
-            4 => signed_with = Some(data),
-            _ => (),
+        if header.ty == 4 {
+            signed_with = Some(data)
         }
     }
 
@@ -353,7 +352,7 @@ impl<'a>
                             }
                         }
                         ConfigReadState::NeedAuthChallenge => {
-                            if let Some(_) = cast::<AuthChallenge>(&mut cell)? {
+                            if cast::<AuthChallenge>(&mut cell)?.is_some() {
                                 info!("get AUTH_CHALLENGE cell");
                                 *state = ConfigReadState::NeedNetinfo;
                             }
@@ -494,7 +493,7 @@ fn print_hex_multiline(data: &[u8]) -> impl '_ + Display {
                 }
 
                 if !s.is_empty() {
-                    write!(f, "\n")?;
+                    writeln!(f)?;
                 }
             }
 

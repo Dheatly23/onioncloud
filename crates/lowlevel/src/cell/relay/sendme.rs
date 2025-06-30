@@ -185,11 +185,11 @@ impl RelaySendme {
     }
 
     fn check(data: &[u8]) -> bool {
-        match data.get(0) {
+        match data {
             // Unauthenticated SENDME, ignore the rest of the message.
-            Some(0) => true,
+            [0, ..] => true,
             // Authenticated SENDME, must contain at least 20 bytes.
-            Some(1) => AuthSendme::ref_from_prefix(data).is_ok(),
+            data @ [1, ..] => AuthSendme::ref_from_prefix(data).is_ok(),
             _ => false,
         }
     }

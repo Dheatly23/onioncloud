@@ -314,7 +314,7 @@ pub(crate) fn print_ed(key: &EdPublicKey) -> impl Debug + Display {
         fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
             // SAFETY: bytes are complete string
             let s = unsafe { str::from_utf8_unchecked(&self.0) };
-            write!(f, "{}", s)
+            write!(f, "{s}")
         }
     }
 
