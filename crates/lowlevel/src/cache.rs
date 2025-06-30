@@ -1,4 +1,7 @@
+use std::borrow::{Borrow, BorrowMut};
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use std::hash::{Hash, Hasher};
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 #[cfg(test)]
@@ -204,35 +207,77 @@ impl<T: Cachable, C: CellCache> DerefMut for Cached<T, C> {
     }
 }
 
-impl<T: Cachable + PartialEq, C: CellCache> PartialEq for Cached<T, C> {
-    fn eq(&self, rhs: &Self) -> bool {
-        self.cell.eq(&rhs.cell)
+impl<T: Cachable, C: CellCache> AsRef<T> for Cached<T, C> {
+    fn as_ref(&self) -> &T {
+        &self.cell
     }
 }
 
-impl<T: Cachable + PartialEq, C: CellCache> PartialEq<T> for Cached<T, C> {
-    fn eq(&self, rhs: &T) -> bool {
-        (*self.cell).eq(rhs)
+impl<T: Cachable, C: CellCache> AsMut<T> for Cached<T, C> {
+    fn as_mut(&mut self) -> &mut T {
+        &mut self.cell
+    }
+}
+
+impl<T: Cachable, C: CellCache> Borrow<T> for Cached<T, C> {
+    fn borrow(&self) -> &T {
+        &self.cell
+    }
+}
+
+impl<T: Cachable, C: CellCache> BorrowMut<T> for Cached<T, C> {
+    fn borrow_mut(&mut self) -> &mut T {
+        &mut self.cell
+    }
+}
+
+impl<T, U, C1, C2> PartialEq<Cached<U, C2>> for Cached<T, C1>
+where
+    T: Cachable + PartialEq<U>,
+    U: Cachable,
+    C1: CellCache,
+    C2: CellCache,
+{
+    fn eq(&self, rhs: &Cached<U, C2>) -> bool {
+        self.cell.eq(&rhs.cell)
     }
 }
 
 impl<T: Cachable + Eq, C: CellCache> Eq for Cached<T, C> {}
 
-impl<T: Cachable + PartialOrd, C: CellCache> PartialOrd for Cached<T, C> {
-    fn partial_cmp(&self, rhs: &Self) -> Option<Ordering> {
+impl<T, U, C1, C2> PartialOrd<Cached<U, C2>> for Cached<T, C1>
+where
+    T: Cachable + PartialOrd<U>,
+    U: Cachable,
+    C1: CellCache,
+    C2: CellCache,
+{
+    fn partial_cmp(&self, rhs: &Cached<U, C2>) -> Option<Ordering> {
         self.cell.partial_cmp(&rhs.cell)
-    }
-}
-
-impl<T: Cachable + PartialOrd, C: CellCache> PartialOrd<T> for Cached<T, C> {
-    fn partial_cmp(&self, rhs: &T) -> Option<Ordering> {
-        (*self.cell).partial_cmp(rhs)
     }
 }
 
 impl<T: Cachable + Ord, C: CellCache> Ord for Cached<T, C> {
     fn cmp(&self, rhs: &Self) -> Ordering {
         self.cell.cmp(&rhs.cell)
+    }
+}
+
+impl<T: Cachable + Debug, C: CellCache> Debug for Cached<T, C> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        (*self.cell).fmt(f)
+    }
+}
+
+impl<T: Cachable + Display, C: CellCache> Display for Cached<T, C> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        (*self.cell).fmt(f)
+    }
+}
+
+impl<T: Cachable + Hash, C: CellCache> Hash for Cached<T, C> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (*self.cell).hash(state)
     }
 }
 
