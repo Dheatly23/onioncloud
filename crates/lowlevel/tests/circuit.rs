@@ -94,7 +94,7 @@ async fn test_circuit_create_fast() {
 
         let mut cell = cache.cache(Relay::new(cache.get_cached(), id, 13, 1, &[]));
         digest.wrap_digest_forward(&mut *cell);
-        encrypt.encrypt_forward(cell.as_mut()).unwrap();
+        encrypt.encrypt_forward((*cell).as_mut()).unwrap();
         send.send_async(Cached::map_into(cell)).await.unwrap();
 
         let cell = recv.recv_async().await.unwrap();
@@ -104,7 +104,7 @@ async fn test_circuit_create_fast() {
                 .unwrap()
                 .unwrap(),
         );
-        encrypt.decrypt_backward(cell.as_mut()).unwrap();
+        encrypt.decrypt_backward((*cell).as_mut()).unwrap();
         digest.unwrap_digest_backward(&mut *cell).unwrap();
         drop(cell);
 
