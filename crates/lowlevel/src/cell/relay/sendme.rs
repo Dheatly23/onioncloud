@@ -1,6 +1,7 @@
 use std::mem::size_of;
 use std::num::{NonZeroU16, NonZeroU32};
 
+use zerocopy::byteorder::big_endian::U16;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned, transmute_ref};
 
 use super::{
@@ -13,9 +14,16 @@ use crate::errors;
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
-struct AuthSendme {
-    /// Must be 1.
+struct SendmeHeader {
     ty: u8,
+    len: U16,
+}
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct AuthSendme {
+    /// Must be authenticated SENDME header.
+    header: SendmeHeader,
     /// Digest.
     digest: [u8; 20],
 }
@@ -107,7 +115,13 @@ impl RelaySendme {
     /// ```
     pub fn new_unauth(cell: FixedCell, stream: NonZeroU16) -> Self {
         let mut data = RelayWrapper::from(cell);
-        data.set_data(&[0]);
+        data.set_data(
+            SendmeHeader {
+                ty: 0,
+                len: 0.into(),
+            }
+            .as_bytes(),
+        );
 
         debug_assert!(Self::check(data.data()));
 
@@ -137,7 +151,16 @@ impl RelaySendme {
     /// ```
     pub fn new_auth(cell: FixedCell, stream: NonZeroU16, digest: [u8; 20]) -> Self {
         let mut data = RelayWrapper::from(cell);
-        data.set_data(AuthSendme { ty: 1, digest }.as_bytes());
+        data.set_data(
+            AuthSendme {
+                header: SendmeHeader {
+                    ty: 1,
+                    len: 20.into(),
+                },
+                digest,
+            }
+            .as_bytes(),
+        );
 
         debug_assert!(Self::check(data.data()));
 
@@ -185,11 +208,18 @@ impl RelaySendme {
     }
 
     fn check(data: &[u8]) -> bool {
-        match data {
+        let Ok((header, data)) = SendmeHeader::ref_from_prefix(data) else {
+            return false;
+        };
+        let Some(data) = data.get(..header.len.get().into()) else {
+            return false;
+        };
+
+        match header.ty {
             // Unauthenticated SENDME, ignore the rest of the message.
-            [0, ..] => true,
+            0 => true,
             // Authenticated SENDME, must contain at least 20 bytes.
-            data @ [1, ..] => AuthSendme::ref_from_prefix(data).is_ok(),
+            1 => data.len() >= 20,
             _ => false,
         }
     }
@@ -233,7 +263,7 @@ mod tests {
             NonZeroU32::new(1).unwrap(),
             RelaySendme::ID,
             1,
-            &[0; 2],
+            &[0, 0, 1, 1],
         );
         let cell = RelaySendme::try_from_relay(&mut Some(cell))
             .unwrap()
@@ -250,7 +280,7 @@ mod tests {
             RelaySendme::ID,
             1,
             &[
-                1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+                1, 0, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
             ],
         );
         let cell = RelaySendme::try_from_relay(&mut Some(cell))
@@ -277,9 +307,9 @@ mod tests {
         ) {
             let mut v = Vec::new();
             match &data {
-                SendmeData::Unauth => v.push(0),
+                SendmeData::Unauth => v.extend_from_slice(&[0; 3]),
                 SendmeData::Auth(digest) => {
-                    v.push(1);
+                    v.extend_from_slice(&[1, 0, 20]);
                     v.extend_from_slice(digest);
                 }
             }
@@ -312,7 +342,7 @@ mod tests {
                 NonZeroU32::new(1).unwrap(),
                 RelaySendme::ID,
                 1,
-                &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][..n],
+                &[1, 0, n as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][..n + 3],
             ));
             RelaySendme::try_from_relay(&mut cell).unwrap_err();
             cell.unwrap();
