@@ -175,6 +175,7 @@ impl<R: Runtime, C: CircuitController, M> Circuit<R, C, M> {
     pub fn restart_with(
         self: Pin<&mut Self>,
         r: &R,
+        linkver: u16,
         send: CheckedSender<C::Cell>,
         recv: Receiver<C::Cell>,
     ) -> bool
@@ -190,7 +191,7 @@ impl<R: Runtime, C: CircuitController, M> Circuit<R, C, M> {
 
         this.handle
             .as_mut()
-            .set(spawn_with(r, this.inner.clone(), send, recv).into());
+            .set(spawn_with(r, this.inner.clone(), linkver, send, recv).into());
         true
     }
 }
@@ -249,12 +250,19 @@ impl<R: Runtime, C: CircuitController, M> CircuitRef<'_, R, C, M> {
 
     /// Restarts controller if stopped (with attached cell sender/receiver).
     #[inline(always)]
-    pub fn restart_with(&mut self, send: CheckedSender<C::Cell>, recv: Receiver<C::Cell>) -> bool
+    pub fn restart_with(
+        &mut self,
+        linkver: u16,
+        send: CheckedSender<C::Cell>,
+        recv: Receiver<C::Cell>,
+    ) -> bool
     where
         R: 'static + Clone,
         C: 'static,
     {
-        self.inner.as_mut().restart_with(self.runtime, send, recv)
+        self.inner
+            .as_mut()
+            .restart_with(self.runtime, linkver, send, recv)
     }
 }
 
@@ -273,10 +281,11 @@ fn spawn<
 fn spawn_with<R: 'static + Runtime + Clone, C: 'static + CircuitController>(
     runtime: &R,
     config: Arc<CircuitInner<C>>,
+    linkver: u16,
     send: CheckedSender<C::Cell>,
     recv: Receiver<C::Cell>,
 ) -> R::Task<bool> {
-    runtime.spawn(handle_circuit(runtime.clone(), config, send, recv))
+    runtime.spawn(handle_circuit(runtime.clone(), config, linkver, send, recv))
 }
 
 #[instrument(skip_all, fields(config = %cfg.config))]
@@ -295,6 +304,7 @@ async fn handle_create_circuit<
             sender,
             receiver,
         },
+        linkver,
     } = match recv.await {
         Ok(Ok(v)) => v,
         Err(_) => {
@@ -307,20 +317,21 @@ async fn handle_create_circuit<
         }
     };
 
-    handle_circuit(rt, cfg, CheckedSender::new(id, sender), receiver).await
+    handle_circuit(rt, cfg, linkver, CheckedSender::new(id, sender), receiver).await
 }
 
 #[instrument(skip_all, fields(circ_id = send.id()))]
 async fn handle_circuit<R: Runtime, C: 'static + CircuitController>(
     rt: R,
     cfg: Arc<CircuitInner<C>>,
+    linkver: u16,
     send: CheckedSender<C::Cell>,
     recv: Receiver<C::Cell>,
 ) -> bool {
     // SAFETY: Destroy cell has been checked
     let sender = unsafe { send.inner_sender().clone() };
 
-    let fut = CircuitFutSteady {
+    let mut fut = CircuitFutSteady {
         runtime: rt,
         ctrl_recv: cfg.receiver.clone().into_stream(),
         stream_map: CellMap::new(
@@ -336,6 +347,7 @@ async fn handle_circuit<R: Runtime, C: 'static + CircuitController>(
         stream_cell_msg_pause: true,
         span: debug_span!("CircuitFutSteady"),
     };
+    fut.controller.set_linkver(linkver);
 
     let cell = match fut.await {
         Ok(Some(cell)) => cell,

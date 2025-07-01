@@ -39,5 +39,14 @@ pub trait CircuitController:
         256
     }
 
+    /// Create new [`CircuitController`].
     fn new(cfg: Arc<dyn Send + Sync + AsRef<Self::Config>>, circ_id: NonZeroU32) -> Self;
+
+    /// Set link version.
+    ///
+    /// By default, it is ignored.
+    /// Controller can use the value to inform which link protocol version is used.
+    fn set_linkver(&mut self, linkver: u16) {
+        let _ = linkver;
+    }
 }

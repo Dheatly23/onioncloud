@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use flume::TrySendError;
+use futures_channel::oneshot::{Receiver, Sender, channel};
 use tracing::instrument;
 
 use crate::cache::{Cached, CellCache, cast};
@@ -13,7 +14,8 @@ use crate::cell::destroy::DestroyReason;
 use crate::cell::{Cell, CellHeader};
 use crate::circuit::controller::CircuitController;
 use crate::circuit::{
-    CellMsg, CellMsgPause, CircuitInput, CircuitOutput, ControlMsg, StreamCellMsg, Timeout,
+    CellMsg, CellMsgPause, CircuitInput, CircuitOutput, ControlMsg, NewStream, StreamCellMsg,
+    Timeout,
 };
 use crate::crypto::onion::{CircuitDigest, OnionLayer128, OnionLayerFast};
 use crate::errors;
@@ -35,6 +37,7 @@ pub trait DirConfig {
 
 pub struct DirController<Cfg> {
     cache: CacheTy,
+    linkver: u16,
 
     state: State,
 
@@ -50,6 +53,8 @@ enum State {
 
 pub enum DirControlMsg {
     Shutdown,
+    /// Create new stream.
+    NewStream(Sender<Result<NewStream<CachedCell>, errors::NoFreeCircIDError>>),
 }
 
 pub struct DirStreamMeta {}
@@ -66,8 +71,13 @@ impl<Cfg: 'static + Send + Sync + Display + DirConfig> CircuitController for Dir
         Self {
             state: State::Init(InitState::new(&cache, circ_id)),
             cache,
+            linkver: 0,
             _p: PhantomData,
         }
+    }
+
+    fn set_linkver(&mut self, linkver: u16) {
+        self.linkver = linkver;
     }
 }
 
@@ -120,6 +130,7 @@ impl<Cfg> Handle<ControlMsg<DirControlMsg>> for DirController<Cfg> {
                 self.state = State::Shutdown;
                 Ok(())
             }
+            DirControlMsg::NewStream(_) => todo!(),
         }
     }
 }
@@ -231,6 +242,8 @@ impl InitState {
                 digest: layer.digest,
 
                 is_timeout: false,
+                forward_data_count: 0,
+                backward_data_count: 0,
             });
         }
 
@@ -247,6 +260,8 @@ struct SteadyState {
     digest: CircuitDigest,
 
     is_timeout: bool,
+    forward_data_count: usize,
+    backward_data_count: usize,
 }
 
 impl SteadyState {

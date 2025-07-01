@@ -159,13 +159,24 @@ impl From<bool> for CellMsgPause {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct NewCircuit<Cell> {
+    /// Handler data.
     pub inner: NewHandler<Cell>,
+
+    /// Link protocol version.
+    pub linkver: u16,
 }
 
 impl<Cell> NewCircuit<Cell> {
     /// Create `NewCircuit`.
     pub fn new(handler: NewHandler<Cell>) -> Self {
-        Self { inner: handler }
+        Self {
+            inner: handler,
+            linkver: 0,
+        }
+    }
+
+    pub fn with_linkver(self, linkver: u16) -> Self {
+        Self { linkver, ..self }
     }
 }
 

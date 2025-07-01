@@ -639,18 +639,19 @@ impl SteadyState {
 
         // Process pending open
         for send in self.pending_open.drain(..) {
+            let m = circ_map
+                .open_with(&AnyIDGenerator::from_config(cfg), 64, |_| CircuitMeta {
+                    closing: false,
+
+                    last_full: input.time(),
+                    backoff_mult: 0,
+                })
+                .map(|v| NewCircuit::new(v.0).with_linkver(cfg.linkver.inner.version()));
             if let Err(Ok(NewCircuit {
                 inner: NewHandler { id, .. },
-            })) = send.send(
-                circ_map
-                    .open_with(&AnyIDGenerator::from_config(cfg), 64, |_| CircuitMeta {
-                        closing: false,
-
-                        last_full: input.time(),
-                        backoff_mult: 0,
-                    })
-                    .map(|v| NewCircuit::new(v.0)),
-            ) {
+                ..
+            })) = send.send(m)
+            {
                 circ_map.remove(id);
             }
         }
