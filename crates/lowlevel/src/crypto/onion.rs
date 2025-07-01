@@ -40,6 +40,8 @@ use crate::util::{print_ed, print_hex};
 /// Implementers **should only** modify the [`recognized`](`RelayLike::recognized`) and [`digest`](`RelayLike::digest`) field.
 /// All other relay fields should be left unchanged.
 pub trait RelayDigest {
+    type Digest: AsRef<[u8]>;
+
     /// Set digest of cell going forward.
     fn wrap_digest_forward<T: ?Sized + RelayLike>(&mut self, cell: &mut T);
 
@@ -50,13 +52,19 @@ pub trait RelayDigest {
     fn unwrap_digest_forward<T: ?Sized + RelayLike>(
         &mut self,
         cell: &mut T,
-    ) -> Result<(), errors::CellDigestError>;
+    ) -> Result<Self::Digest, errors::CellDigestError>;
 
     /// Process and check digest of cell going backward.
     fn unwrap_digest_backward<T: ?Sized + RelayLike>(
         &mut self,
         cell: &mut T,
-    ) -> Result<(), errors::CellDigestError>;
+    ) -> Result<Self::Digest, errors::CellDigestError>;
+
+    /// Get current forward digest.
+    fn this_digest_forward(&self) -> Self::Digest;
+
+    /// Get current backward digest.
+    fn this_digest_backward(&self) -> Self::Digest;
 }
 
 /// Circuit rolling digest handler.
@@ -94,6 +102,8 @@ impl CircuitDigest {
 }
 
 impl RelayDigest for CircuitDigest {
+    type Digest = Sha1Output;
+
     fn wrap_digest_forward<T: ?Sized + RelayLike>(&mut self, cell: &mut T) {
         cell.set_recognized([0; 2]);
         cell.set_digest([0; 4]);
@@ -113,7 +123,7 @@ impl RelayDigest for CircuitDigest {
     fn unwrap_digest_forward<T: ?Sized + RelayLike>(
         &mut self,
         cell: &mut T,
-    ) -> Result<(), errors::CellDigestError> {
+    ) -> Result<Self::Digest, errors::CellDigestError> {
         if !cell.is_recognized() {
             return Err(errors::CellDigestError);
         }
@@ -121,18 +131,18 @@ impl RelayDigest for CircuitDigest {
         cell.set_digest([0; 4]);
 
         self.forward.update(cell.as_ref());
-        let other: [u8; 4] = self.digest_forward()[..4].try_into().unwrap();
+        let other = self.digest_forward();
 
-        if digest != other {
+        if digest != &other[..4] {
             return Err(errors::CellDigestError);
         }
-        Ok(())
+        Ok(other)
     }
 
     fn unwrap_digest_backward<T: ?Sized + RelayLike>(
         &mut self,
         cell: &mut T,
-    ) -> Result<(), errors::CellDigestError> {
+    ) -> Result<Self::Digest, errors::CellDigestError> {
         if !cell.is_recognized() {
             return Err(errors::CellDigestError);
         }
@@ -140,12 +150,20 @@ impl RelayDigest for CircuitDigest {
         cell.set_digest([0; 4]);
 
         self.backward.update(cell.as_ref());
-        let other: [u8; 4] = self.digest_backward()[..4].try_into().unwrap();
+        let other = self.digest_backward();
 
-        if digest != other {
+        if digest != &other[..4] {
             return Err(errors::CellDigestError);
         }
-        Ok(())
+        Ok(other)
+    }
+
+    fn this_digest_forward(&self) -> Self::Digest {
+        self.digest_forward()
+    }
+
+    fn this_digest_backward(&self) -> Self::Digest {
+        self.digest_backward()
     }
 }
 
