@@ -503,14 +503,15 @@ impl SteadyState {
     ) -> Result<CellMsgPause, errors::DirControllerError> {
         let mut cell = Cached::map(cell, Some);
 
-        let cell = if let Some(cell) = cast::<Relay>(&mut cell)? {
+        let mut cell = if let Some(cell) = cast::<Relay>(&mut cell)? {
             cell
-        } else if let Some(cell) = cast::<Relay>(&mut cell)? {
+        } else if let Some(cell) = cast::<RelayEarly>(&mut cell)? {
             cell.into()
         } else {
             let cell = Cached::transpose(cell).unwrap();
             return Err(errors::InvalidCellHeader::with_cell(&cell).into());
         };
+        cell.circuit = cfg.circ_id;
         self.out_buffer.push_back(cfg.cache.cache(cell));
 
         Ok(self.out_buffer.is_full().into())
