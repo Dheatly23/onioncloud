@@ -4,7 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 
 use thiserror::Error;
 
-use crate::cell::CellHeader;
+use crate::cell::{Cell, CellHeader};
 use crate::crypto::relay::RelayId;
 use crate::util::{print_hex, print_list};
 
@@ -83,6 +83,15 @@ impl InvalidCellHeader {
     pub fn with_header(header: &CellHeader) -> Self {
         Self {
             header: Some(header.dup()),
+        }
+    }
+
+    pub fn with_cell(cell: &Cell) -> Self {
+        Self {
+            header: Some(CellHeader {
+                circuit: cell.circuit,
+                command: cell.command,
+            }),
         }
     }
 }

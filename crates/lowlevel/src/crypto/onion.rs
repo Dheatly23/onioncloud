@@ -20,7 +20,7 @@ use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout, Unaligne
 use super::{
     Cipher128, Cipher256, CipherKey128, CipherKey256, EdPublicKey, Sha1Output, Sha256Output,
 };
-use crate::cache::{Cached, CellCache};
+use crate::cache::{Cached, CellCache, CellCacheExt};
 use crate::cell::create::{Create2, CreateFast, Created2, CreatedFast};
 use crate::cell::relay::RelayLike;
 use crate::cell::{FIXED_CELL_SIZE, FixedCell};

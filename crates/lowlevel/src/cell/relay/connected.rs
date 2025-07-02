@@ -325,7 +325,7 @@ mod tests {
             let cell = RelayConnected::try_from_relay(&mut Some(cell)).unwrap().unwrap();
 
             assert_eq!(cell.stream, stream);
-            assert_eq!(cell.v(), Some((addr, ttl)));
+            assert_eq!(cell.data(), Some((addr, ttl)));
 
             let cell = cell.into_relay(NonZeroU32::new(1).unwrap());
 

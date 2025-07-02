@@ -324,6 +324,13 @@ pub(crate) fn print_ed(key: &EdPublicKey) -> impl Debug + Display {
     S(a)
 }
 
+pub(crate) fn option_ord_min<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
+    match (a, b) {
+        (v, None) | (None, v) => v,
+        (Some(a), Some(b)) => Some(a.min(b)),
+    }
+}
+
 #[cfg(test)]
 pub(crate) use tests::*;
 

@@ -15,7 +15,7 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tracing::{debug, error, info, instrument, trace, warn};
 
-use crate::cache::{Cached, CellCache, cast};
+use crate::cache::{Cached, CellCache, CellCacheExt, cast};
 use crate::cell::auth::AuthChallenge;
 use crate::cell::certs::Certs;
 use crate::cell::create::Create2;
@@ -37,7 +37,7 @@ use crate::errors;
 use crate::linkver::StandardLinkver;
 use crate::util::cell_map::{AnyIDGenerator, CellMap, NewHandler};
 use crate::util::sans_io::Handle;
-use crate::util::{InBuffer, OutBuffer, print_ed, print_hex};
+use crate::util::{InBuffer, OutBuffer, option_ord_min, print_ed, print_hex};
 
 /// Trait for [`UserController`] configuration type.
 pub trait UserConfig: ChannelConfig {
@@ -458,12 +458,8 @@ impl InitState {
                     }
                 }
 
-                if let Some(cell) = &*cell {
-                    return Err(errors::InvalidCellHeader::with_header(&CellHeader::new(
-                        cell.circuit,
-                        cell.command,
-                    ))
-                    .into());
+                if let Some(cell) = Cached::transpose(cell) {
+                    return Err(errors::InvalidCellHeader::with_cell(&cell).into());
                 }
             }
             Self::NetinfoWrite(w) => {
@@ -592,13 +588,6 @@ fn check_cert(
     }
 
     Ok(())
-}
-
-fn option_ord_min<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
-    match (a, b) {
-        (v, None) | (None, v) => v,
-        (Some(a), Some(b)) => Some(a.min(b)),
-    }
 }
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 5);
@@ -841,11 +830,14 @@ fn read_handler(
                 // Circuit is closing, drop cell and close it for real
                 Err(TrySendError::Disconnected(_)) => {
                     debug!(id, "cannot send cell, circuit is closing");
-                    circ.meta.closing = true;
 
-                    this.pending_close.push_back((id, DestroyReason::Internal));
-                    // Pending DESTROY cell, clear flag
-                    flags &= !FLAG_WRITE_EMPTY;
+                    if !circ.meta.closing {
+                        circ.meta.closing = true;
+
+                        this.pending_close.push_back((id, DestroyReason::Internal));
+                        // Pending DESTROY cell, clear flag
+                        flags &= !FLAG_WRITE_EMPTY;
+                    }
                 }
             }
 
@@ -881,13 +873,25 @@ fn write_handler(
             update_last_packet(last_packet, input);
         }
 
-        let mut found = this.pending_close.pop_front().map(|(id, reason)| {
-            let meta = circ_map.remove(id);
-            debug_assert!(meta.expect("circuit must exist").closing);
+        let mut found: Option<CachedCell> = None;
+
+        while found.is_none() {
+            let Some((id, reason)) = this.pending_close.pop_front() else {
+                continue;
+            };
+            let Some(meta) = circ_map.remove(id) else {
+                continue;
+            };
+
+            debug_assert!(meta.closing);
+
             // Prepend DESTROY cell
-            cfg.cache
-                .cache(Destroy::new(cfg.cache.get_cached(), id, reason).into())
-        });
+            found = Some(
+                cfg.cache
+                    .cache(Destroy::new(cfg.cache.get_cached(), id, reason).into()),
+            );
+        }
+
         while found.is_none() {
             let Some(cell) = this.out_buffer.pop_front() else {
                 break;
@@ -900,8 +904,12 @@ fn write_handler(
             let mut cell = Cached::map(cell, Some);
 
             found = if let Some(cell) = cast::<Destroy>(&mut cell)? {
-                circ_map.remove(cell.circuit);
-                Some(cfg.cache.cache(cell.into()))
+                let cell = cfg.cache.cache(cell);
+                if circ_map.remove(cell.circuit).is_none() {
+                    continue;
+                }
+
+                Some(Cached::map_into(cell))
             } else {
                 Cached::transpose(cell)
             };

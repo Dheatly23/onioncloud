@@ -52,3 +52,16 @@ pub CertTypeError: pub(crate) CertTypeInner {
     #[error("certificate key mismatch (expected {expect}, got {actual})")]
     KeyTy { expect: u8, actual: u8 },
 }}
+
+wraps_enum! {
+/// Circuit protocol error.
+pub CircuitProtocolError: pub(crate) CircuitProtocolInner {
+    #[error("unexpected RELAY_BEGIN/RELAY_BEGIN_DIR from peer")]
+    RelayBegin,
+    #[error("token bucket undeflows")]
+    BucketUnderflow,
+    #[error("unexpected RELAY_SENDME cell")]
+    UnexpectedSendme,
+    #[error("SENDME digest mismatch")]
+    SendmeDigest,
+}}

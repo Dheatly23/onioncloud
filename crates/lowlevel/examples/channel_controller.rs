@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Error as AnyError, Result as AnyResult, bail};
 use digest::Digest;
-use onioncloud_lowlevel::cache::{Cached, CellCache, StandardCellCache, cast};
+use onioncloud_lowlevel::cache::{Cached, CellCache, CellCacheExt, StandardCellCache, cast};
 use onioncloud_lowlevel::cell::auth::AuthChallenge;
 use onioncloud_lowlevel::cell::certs::Certs;
 use onioncloud_lowlevel::cell::dispatch::{CellReader, CellType, WithCellConfig};

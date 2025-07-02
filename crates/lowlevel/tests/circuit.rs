@@ -7,7 +7,7 @@ use std::sync::Arc;
 use test_log::test;
 use tracing::{info, instrument};
 
-use onioncloud_lowlevel::cache::{Cached, CellCache, StandardCellCache, cast};
+use onioncloud_lowlevel::cache::{Cached, CellCache, CellCacheExt, StandardCellCache, cast};
 use onioncloud_lowlevel::cell::destroy::{Destroy, DestroyReason};
 use onioncloud_lowlevel::cell::relay::Relay;
 use onioncloud_lowlevel::channel::controller::{UserConfig, UserControlMsg, UserController};

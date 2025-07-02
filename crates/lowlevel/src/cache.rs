@@ -16,7 +16,7 @@ use crate::errors;
 ///
 /// To improve memory usage, we recommend using a cache to temporarily store [`FixedCell`].
 /// Unused cells should be returned into the cache, to be then reused somewhere else.
-pub trait CellCache: Sync {
+pub trait CellCache {
     /// Gets a [`FixedCell`], preferably from a cache.
     ///
     /// The behavior can be as simple as creating a new [`FixedCell`] every time.
@@ -30,7 +30,24 @@ pub trait CellCache: Sync {
     /// The behavior can be as simple as dropping the cell.
     /// More advanced implementation should be caching it for a reasonable time.
     fn cache_cell(&self, cell: FixedCell);
+}
 
+impl<T> CellCache for T
+where
+    T: Deref + ?Sized,
+    T::Target: CellCache,
+{
+    fn get_cached(&self) -> FixedCell {
+        <T as Deref>::Target::get_cached(self)
+    }
+
+    fn cache_cell(&self, cell: FixedCell) {
+        <T as Deref>::Target::cache_cell(self, cell)
+    }
+}
+
+/// Extension trait for [`CellCache`].
+pub trait CellCacheExt: CellCache {
     /// Helper function to cache a cell.
     ///
     /// Note that it requires [`Self`] to be [`Clone`], which is **not recommended** to be implemented.
@@ -42,7 +59,7 @@ pub trait CellCache: Sync {
     /// use std::sync::Arc;
     /// use onioncloud_lowlevel::cell::FixedCell;
     /// use onioncloud_lowlevel::cell::padding::Padding;
-    /// use onioncloud_lowlevel::cache::{CellCache, StandardCellCache};
+    /// use onioncloud_lowlevel::cache::{CellCache, CellCacheExt, StandardCellCache};
     ///
     /// let cache = Arc::new(StandardCellCache::default());
     /// let cell = cache.cache(FixedCell::default());
@@ -54,21 +71,21 @@ pub trait CellCache: Sync {
     {
         Cached::new(self.clone(), cell)
     }
-}
 
-impl<T> CellCache for T
-where
-    T: Deref + ?Sized + Sync,
-    T::Target: CellCache,
-{
-    fn get_cached(&self) -> FixedCell {
-        <T as Deref>::Target::get_cached(self)
-    }
-
-    fn cache_cell(&self, cell: FixedCell) {
-        <T as Deref>::Target::cache_cell(self, cell)
+    /// Discard any value that implements [`Cachable`].
+    ///
+    /// Unlike [`Cached`], this do not allocate anything.
+    fn discard<T>(&self, cell: T)
+    where
+        T: Cachable,
+    {
+        if let Some(cell) = cell.maybe_into_fixed() {
+            self.cache_cell(cell);
+        }
     }
 }
+
+impl<T: ?Sized + CellCache> CellCacheExt for T {}
 
 /// Null cell cache provider.
 ///

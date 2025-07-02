@@ -1,3 +1,4 @@
+use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::net::IpAddr;
 use std::num::{NonZeroU16, NonZeroU32};
 
@@ -254,6 +255,33 @@ pub enum EndReason {
 
     /// Client sent RELAY_BEGIN_DIR to a non-directory relay.
     NotDirectory,
+}
+
+impl Display for EndReason {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let s = match self {
+            Self::Misc => "unknown reason",
+            Self::ResolveFailed => "hostname resolution failed",
+            Self::ConnectRefused => "remote host connection refused",
+            Self::ExitPolicy(None) => "relay exit policy",
+            Self::Destroy => "circuit is destroying",
+            Self::Done => "TCP connection is closed",
+            Self::Timeout => "connection timeout",
+            Self::NoRoute => "unknown connection routing error",
+            Self::Hibernating => "relay is hibernating",
+            Self::Internal => "internal error",
+            Self::ResourceLimit => "relay resource limit reached",
+            Self::ConnReset => "connection is reset",
+            Self::TorProtocol => "protocol violation",
+            Self::NotDirectory => "relay is not a directory node",
+
+            Self::ExitPolicy(Some(ExitPolicy { addr, .. })) => {
+                return write!(f, "relay exit policy (resolved address: {addr})");
+            }
+        };
+
+        write!(f, "{s}")
+    }
 }
 
 /// Additional data for [`EndReason::ExitPolicy`].

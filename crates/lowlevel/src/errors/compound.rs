@@ -108,7 +108,13 @@ pub enum DirControllerError {
     #[error(transparent)]
     CellFormatError(#[from] super::CellFormatError),
     #[error(transparent)]
+    CipherError(#[from] super::CipherError),
+    #[error(transparent)]
+    CellDigestError(#[from] super::CellDigestError),
+    #[error(transparent)]
     CircuitHandshakeError(#[from] super::CircuitHandshakeError),
     #[error(transparent)]
     ChannelClosedError(#[from] super::ChannelClosedError),
+    #[error(transparent)]
+    CircuitProtocolError(#[from] super::CircuitProtocolError),
 }
