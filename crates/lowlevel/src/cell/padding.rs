@@ -406,6 +406,39 @@ mod tests {
 
     use proptest::prelude::*;
 
+    use crate::cell::{CellHeader, cast};
+
+    #[test]
+    fn test_padding_negotiate_err_version() {
+        let mut cell = FixedCell::default();
+        cell.data_mut()[0] = 1;
+        let mut cell = Some(Cell::from_fixed(
+            CellHeader::new(0, PaddingNegotiate::ID),
+            cell,
+        ));
+        cast::<PaddingNegotiate>(&mut cell).unwrap_err();
+    }
+
+    #[test]
+    fn test_padding_negotiate_err_command() {
+        let mut cell = FixedCell::default();
+        cell.data_mut()[1] = 3;
+        let mut cell = Some(Cell::from_fixed(
+            CellHeader::new(0, PaddingNegotiate::ID),
+            cell,
+        ));
+        cast::<PaddingNegotiate>(&mut cell).unwrap_err();
+    }
+
+    #[test]
+    fn test_padding_negotiate_err_zeros() {
+        let mut cell = Some(Cell::from_fixed(
+            CellHeader::new(0, PaddingNegotiate::ID),
+            FixedCell::default(),
+        ));
+        cast::<PaddingNegotiate>(&mut cell).unwrap_err();
+    }
+
     proptest! {
         #[test]
         fn test_vpadding_size(length in any::<u16>()) {
