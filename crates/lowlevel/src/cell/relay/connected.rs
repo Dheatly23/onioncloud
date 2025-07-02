@@ -192,7 +192,7 @@ impl RelayConnected {
     /// Get content of RELAY_CONNECTED.
     ///
     /// Returns an [`Option`] of IP address and TTL.
-    pub fn get_data(&self) -> Option<(IpAddr, u32)> {
+    pub fn data(&self) -> Option<(IpAddr, u32)> {
         if self.data.is_empty() {
             return None;
         }
@@ -302,7 +302,7 @@ mod tests {
             let cell = RelayConnected::new(FixedCell::default(), stream, addr, ttl);
 
             assert_eq!(cell.stream, stream);
-            assert_eq!(cell.get_data(), Some((addr, ttl)));
+            assert_eq!(cell.data(), Some((addr, ttl)));
         }
 
         #[test]
@@ -325,7 +325,7 @@ mod tests {
             let cell = RelayConnected::try_from_relay(&mut Some(cell)).unwrap().unwrap();
 
             assert_eq!(cell.stream, stream);
-            assert_eq!(cell.get_data(), Some((addr, ttl)));
+            assert_eq!(cell.v(), Some((addr, ttl)));
 
             let cell = cell.into_relay(NonZeroU32::new(1).unwrap());
 
@@ -337,7 +337,7 @@ mod tests {
             let cell = RelayConnected::new_empty(FixedCell::default(), stream);
 
             assert_eq!(cell.stream, stream);
-            assert_eq!(cell.get_data(), None);
+            assert_eq!(cell.data(), None);
         }
 
         #[test]
@@ -355,7 +355,7 @@ mod tests {
                 .unwrap();
 
             assert_eq!(cell.stream, stream);
-            assert_eq!(cell.get_data(), None);
+            assert_eq!(cell.data(), None);
 
             let cell = cell.into_relay(NonZeroU32::new(1).unwrap());
 
