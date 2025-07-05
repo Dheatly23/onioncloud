@@ -43,10 +43,10 @@ pub trait RelayDigest {
     type Digest: AsRef<[u8]>;
 
     /// Set digest of cell going forward.
-    fn wrap_digest_forward<T: ?Sized + RelayLike>(&mut self, cell: &mut T);
+    fn wrap_digest_forward<T: ?Sized + RelayLike>(&mut self, cell: &mut T) -> Self::Digest;
 
     /// Set digest of cell going backward.
-    fn wrap_digest_backward<T: ?Sized + RelayLike>(&mut self, cell: &mut T);
+    fn wrap_digest_backward<T: ?Sized + RelayLike>(&mut self, cell: &mut T) -> Self::Digest;
 
     /// Process and check digest of cell going forward.
     fn unwrap_digest_forward<T: ?Sized + RelayLike>(
@@ -104,20 +104,24 @@ impl CircuitDigest {
 impl RelayDigest for CircuitDigest {
     type Digest = Sha1Output;
 
-    fn wrap_digest_forward<T: ?Sized + RelayLike>(&mut self, cell: &mut T) {
+    fn wrap_digest_forward<T: ?Sized + RelayLike>(&mut self, cell: &mut T) -> Self::Digest {
         cell.set_recognized([0; 2]);
         cell.set_digest([0; 4]);
 
         self.forward.update(cell.as_ref());
-        cell.set_digest(self.digest_forward()[..4].try_into().unwrap());
+        let digest = self.digest_forward();
+        cell.set_digest(digest[..4].try_into().unwrap());
+        digest
     }
 
-    fn wrap_digest_backward<T: ?Sized + RelayLike>(&mut self, cell: &mut T) {
+    fn wrap_digest_backward<T: ?Sized + RelayLike>(&mut self, cell: &mut T) -> Self::Digest {
         cell.set_recognized([0; 2]);
         cell.set_digest([0; 4]);
 
         self.backward.update(cell.as_ref());
-        cell.set_digest(self.digest_backward()[..4].try_into().unwrap());
+        let digest = self.digest_backward();
+        cell.set_digest(digest[..4].try_into().unwrap());
+        digest
     }
 
     fn unwrap_digest_forward<T: ?Sized + RelayLike>(

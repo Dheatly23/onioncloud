@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use flume::TrySendError;
 use futures_channel::oneshot::{Receiver, Sender, channel};
 use scopeguard::guard;
-use tracing::{debug, instrument, trace, warn};
+use tracing::{debug, info, instrument, trace, warn};
 
 use crate::cache::{Cached, CellCache, CellCacheExt, cast};
 use crate::cell::Cell;
@@ -160,7 +160,13 @@ impl<'a, Cfg>
     ) -> Result<CircuitOutput<'a, CachedCell>, errors::DirControllerError> {
         match self.state {
             State::Init(ref mut s) => s.handle(&self.cfg, input),
-            State::Steady(ref mut s) => s.handle(&self.cfg, input, stream_map),
+            State::Steady(ref mut s) => {
+                let (out, is_shutdowun) = s.handle(&self.cfg, input, stream_map)?;
+                if is_shutdowun {
+                    self.state = State::Shutdown;
+                }
+                Ok(out)
+            }
             State::Shutdown => {
                 let mut output = input.output();
                 output.shutdown(self.cfg.cache.clone(), DestroyReason::Internal);
@@ -309,9 +315,12 @@ impl InitState {
             return Ok(SteadyState {
                 encrypt: layer.encrypt,
                 digest: layer.digest,
+                early_cnt: 8,
 
                 in_buffer: InBuffer::new(),
                 out_buffer: OutBuffer::new(),
+                cell_send: None,
+                pause_out_buffer: false,
 
                 pending_close: VecDeque::new(),
                 pending_open: take(&mut self.pending_open),
@@ -325,6 +334,8 @@ impl InitState {
                 backward_data_modulo: 0,
                 forward_sendme_digest: VecDeque::new(),
                 backward_sendme_digest: VecDeque::new(),
+
+                last_packet: None,
             });
         }
 
@@ -336,9 +347,12 @@ impl InitState {
 struct SteadyState {
     encrypt: OnionLayer128,
     digest: CircuitDigest,
+    early_cnt: u8,
 
     in_buffer: InBuffer<CachedCell<Option<Relay>>>,
     out_buffer: OutBuffer<CachedCell<Relay>>,
+    cell_send: Option<CachedCell>,
+    pause_out_buffer: bool,
 
     pending_close: VecDeque<(NonZeroU16, EndReason)>,
     pending_open: PendingOpen,
@@ -352,9 +366,11 @@ struct SteadyState {
     backward_data_modulo: u8,
     forward_sendme_digest: VecDeque<[u8; 20]>,
     backward_sendme_digest: VecDeque<[u8; 20]>,
+
+    last_packet: Option<Instant>,
 }
 
-const IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 5);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const FULL_TIMEOUT: Duration = Duration::from_millis(100);
 const CLOSE_SCAN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: u8 = 20;
@@ -374,7 +390,21 @@ impl SteadyState {
         cfg: &CfgData,
         mut input: CircuitInput<'a, CachedCell>,
         stream_map: &'a mut StreamMap,
-    ) -> Result<CircuitOutput<'a, CachedCell>, errors::DirControllerError> {
+    ) -> Result<(CircuitOutput<'a, CachedCell>, bool), errors::DirControllerError> {
+        let last_packet = self
+            .last_packet
+            .get_or_insert_with(|| input.time() + IDLE_TIMEOUT);
+        if self.is_timeout && *last_packet <= input.time() {
+            info!("circuit idled for 1 minutes, gracefully shutting down");
+            let mut out = input.output();
+            out.shutdown(cfg.cache.clone(), DestroyReason::default());
+            return Ok((out, true));
+        }
+
+        if self.has_new_cell {
+            update_last_packet(last_packet, &input);
+        }
+
         let mut flags = 0u8;
         let mut full_timeout = None;
 
@@ -388,8 +418,7 @@ impl SteadyState {
 
             // Process write cells
             if flags & (FLAG_WRITE | FLAG_WRITE_EMPTY) == 0 {
-                //flags = write_handler(self, cfg, &mut input, circ_map, flags)?;
-                todo!();
+                flags = write_handler(self, cfg, &mut input, stream_map, flags)?;
             }
 
             trace!(flags, "processing");
@@ -398,6 +427,14 @@ impl SteadyState {
             }
         }
 
+        let mut timeout = self.last_packet.unwrap();
+        //timeout = timeout.min(self.close_scan);
+        if let Some(t) = full_timeout {
+            // Full timeout
+            timeout = timeout.min(t);
+        }
+
+        let mut out = input.output();
         todo!();
     }
 
@@ -440,9 +477,11 @@ impl SteadyState {
                     }
                 };
 
-                self.backward_data_modulo = (self.backward_data_modulo + 1) % 100;
-                if self.backward_data_modulo == 0 {
+                self.backward_data_modulo += 1;
+                debug_assert!(self.backward_data_modulo <= 100);
+                if self.backward_data_modulo == 100 {
                     // Every 100 decrement, send a SENDME cell.
+                    self.backward_data_modulo = 0;
                     self.backward_sendme_digest.push_back(digest);
                 }
             }
@@ -456,29 +495,30 @@ impl SteadyState {
             // RELAY_SENDME, check digest and increment forward data counter.
             let cell = cfg.cache.cache(cell);
 
-            match cell.data() {
-                SendmeData::Unauth => (),
-                SendmeData::Auth(digest) => match (digest, self.backward_sendme_digest.pop_front())
-                {
-                    (_, None) => {
-                        return Err(errors::CircuitProtocolError(
-                            errors::CircuitProtocolInner::UnexpectedSendme,
-                        )
-                        .into());
-                    }
-                    (a, Some(b)) if a == b => (),
-                    (a, Some(b)) => {
-                        debug!(
-                            expect = display(print_hex(&b)),
-                            sent = display(print_hex(&a)),
-                            "SENDME digest mismatch"
-                        );
-                        return Err(errors::CircuitProtocolError(
-                            errors::CircuitProtocolInner::SendmeDigest,
-                        )
-                        .into());
-                    }
-                },
+            let digest = match cell.data() {
+                None | Some(SendmeData::Unauth) => None,
+                Some(SendmeData::Auth(digest)) => Some(digest),
+            };
+            match (digest, self.backward_sendme_digest.pop_front()) {
+                (_, None) => {
+                    return Err(errors::CircuitProtocolError(
+                        errors::CircuitProtocolInner::UnexpectedSendme,
+                    )
+                    .into());
+                }
+                (None, _) => (),
+                (Some(a), Some(b)) if a == b => (),
+                (Some(a), Some(b)) => {
+                    debug!(
+                        expect = display(print_hex(&b)),
+                        sent = display(print_hex(&a)),
+                        "SENDME digest mismatch"
+                    );
+                    return Err(errors::CircuitProtocolError(
+                        errors::CircuitProtocolInner::SendmeDigest,
+                    )
+                    .into());
+                }
             }
 
             self.forward_data_count = self
@@ -643,4 +683,136 @@ fn read_handler(
     flags |= FLAG_READ;
 
     Ok((flags, full_timeout))
+}
+
+#[inline(always)]
+fn write_handler(
+    this: &mut SteadyState,
+    cfg: &CfgData,
+    input: &mut CircuitInput<'_, CachedCell>,
+    stream_map: &mut StreamMap,
+    flags: u8,
+) -> Result<u8, errors::DirControllerError> {
+    if let Some(cell) = this.cell_send.take() {
+        match input.try_send(cell) {
+            Ok(()) => update_last_packet(this.last_packet.as_mut().unwrap(), input),
+            Err(TrySendError::Full(cell)) => {
+                this.cell_send = Some(cell);
+                return Ok(flags | FLAG_WRITE);
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                debug!("circuit closed");
+                return Err(errors::ChannelClosedError.into());
+            }
+        }
+    }
+
+    let mut found: Option<CachedCell<Relay>> = None;
+
+    if let Some((id, reason)) = this.pending_close.pop_front()
+        && let Some(meta) = stream_map.remove(id.into())
+    {
+        debug_assert!(meta.closing);
+
+        // Prepend RELAY_END cell
+        found = Some(
+            cfg.cache
+                .cache(RelayEnd::new(cfg.cache.get_cached(), id, reason).into_relay(cfg.circ_id)),
+        );
+    }
+
+    if found.is_none()
+        && let Some(digest) = this.forward_sendme_digest.pop_front()
+    {
+        let data = match this.sendme_ty {
+            SendmeType::Disabled => None,
+            SendmeType::Unauth => Some(SendmeData::Unauth),
+            SendmeType::Auth => Some(SendmeData::Auth(digest)),
+        };
+
+        if let Some(data) = data {
+            // Prepend RELAY_SENDME cell
+            found = Some(cfg.cache.cache(
+                RelaySendme::from_data(cfg.cache.get_cached(), data).into_relay(cfg.circ_id),
+            ));
+
+            this.backward_data_count = this
+                .backward_data_count
+                .checked_add(100)
+                .expect("token bucket overflow");
+            this.pause_out_buffer = false;
+        }
+    }
+
+    while found.is_none() && !this.pause_out_buffer {
+        let Some(cell) = this.out_buffer.pop_front() else {
+            break;
+        };
+
+        let Some(id) = NonZeroU16::new(cell.stream()) else {
+            continue;
+        };
+        if !stream_map.has(id.into()) {
+            // Unmapped stream ID. Probably non-graceful shutdown.
+            continue;
+        }
+        let mut cell = Cached::map(cell, Some);
+
+        found = if let Some(cell) = cast_r::<RelayEnd>(&mut cell)? {
+            let cell = cfg.cache.cache(cell);
+            if stream_map.remove(id.into()).is_none() {
+                continue;
+            }
+
+            Some(Cached::map(cell, |cell| cell.into_relay(cfg.circ_id)))
+        } else {
+            Cached::transpose(cell)
+        };
+    }
+
+    let Some(mut cell) = found else {
+        return Ok(flags | FLAG_WRITE_EMPTY);
+    };
+    let command = cell.command();
+    let is_data = this.sendme_ty != SendmeType::Disabled && command == RelayData::ID;
+
+    if is_data {
+        // Data-bearing cell, decrement forward data counter.
+        this.forward_data_count = match this.forward_data_count.checked_sub(1) {
+            Some(v) => v,
+            None => {
+                // Token bucket is empty, repush cell and pause out buffer.
+                this.out_buffer.push_front(cell);
+                this.pause_out_buffer = true;
+                return Ok(flags);
+            }
+        };
+
+        this.forward_data_modulo += 1;
+        debug_assert!(this.forward_data_modulo <= 100);
+        if this.forward_data_modulo == 100 {
+            this.forward_data_modulo = 0;
+        }
+    }
+
+    // Set circuit ID.
+    cell.circuit = cfg.circ_id.into();
+
+    // Encrypt and set digest,
+    let digest = this.digest.wrap_digest_forward(&mut *cell);
+    this.encrypt.encrypt_forward((*cell).as_mut())?;
+
+    if is_data && this.forward_data_modulo == 0 {
+        // Every 100 decrement, send a SENDME cell.
+        this.forward_sendme_digest.push_back(digest);
+    }
+
+    this.cell_send = Some(if let Some(v) = this.early_cnt.checked_sub(1) {
+        this.early_cnt = v;
+        Cached::map_into(Cached::map_into::<RelayEarly>(cell))
+    } else {
+        Cached::map_into(cell)
+    });
+
+    Ok(flags)
 }

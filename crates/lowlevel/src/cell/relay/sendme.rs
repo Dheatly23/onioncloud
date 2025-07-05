@@ -39,7 +39,7 @@ struct AuthSendmePad {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RelaySendme {
     /// Stream ID.
-    pub stream: NonZeroU16,
+    pub stream: u16,
     /// Cell payload.
     data: RelayWrapper,
 }
@@ -58,14 +58,16 @@ impl Cachable for RelaySendme {
 
 impl TryFromRelay for RelaySendme {
     fn try_from_relay(relay: &mut Option<Relay>) -> Result<Option<Self>, errors::CellFormatError> {
-        let stream = match &*relay {
-            Some(r) if r.command() == Self::ID => {
-                NonZeroU16::new(r.stream()).ok_or(errors::CellFormatError)?
-            }
-            _ => return Ok(None),
-        };
+        if !matches!(relay, Some(r) if r.command() == Self::ID) {
+            return Ok(None);
+        }
 
-        take_if(relay, Self::check).map(|v| v.map(|data| Self { stream, data }))
+        take_if(relay, Self::check).map(|v| {
+            v.map(|data| Self {
+                stream: data.stream(),
+                data,
+            })
+        })
     }
 }
 
@@ -89,7 +91,7 @@ impl RelaySendme {
         debug_assert!(Self::check(data.data()));
 
         Self {
-            stream: NonZeroU16::new(data.stream()).expect("stream ID is zero"),
+            stream: data.stream(),
             data,
         }
     }
@@ -99,21 +101,17 @@ impl RelaySendme {
     /// # Parameters
     ///
     /// - `cell` : Cached [`FixedCell`].
-    /// - `stream` : Stream ID.
     ///
     /// # Example
     ///
     /// ```
-    /// use std::num::NonZeroU16;
-    ///
     /// use onioncloud_lowlevel::cell::relay::sendme::RelaySendme;
     ///
     /// let cell = RelaySendme::new_unauth(
     ///     Default::default(),
-    ///     NonZeroU16::new(1).unwrap(),
     /// );
     /// ```
-    pub fn new_unauth(cell: FixedCell, stream: NonZeroU16) -> Self {
+    pub fn new_unauth(cell: FixedCell) -> Self {
         let mut data = RelayWrapper::from(cell);
         data.set_data(
             SendmeHeader {
@@ -125,7 +123,7 @@ impl RelaySendme {
 
         debug_assert!(Self::check(data.data()));
 
-        Self { stream, data }
+        Self { stream: 0, data }
     }
 
     /// Creates new authenticated sendme cell.
@@ -133,23 +131,19 @@ impl RelaySendme {
     /// # Parameters
     ///
     /// - `cell` : Cached [`FixedCell`].
-    /// - `stream` : Stream ID.
     /// - `digest` : Digest.
     ///
     /// # Example
     ///
     /// ```
-    /// use std::num::NonZeroU16;
-    ///
     /// use onioncloud_lowlevel::cell::relay::sendme::RelaySendme;
     ///
     /// let cell = RelaySendme::new_auth(
     ///     Default::default(),
-    ///     NonZeroU16::new(1).unwrap(),
     ///     [0; 20],
     /// );
     /// ```
-    pub fn new_auth(cell: FixedCell, stream: NonZeroU16, digest: [u8; 20]) -> Self {
+    pub fn new_auth(cell: FixedCell, digest: [u8; 20]) -> Self {
         let mut data = RelayWrapper::from(cell);
         data.set_data(
             AuthSendme {
@@ -164,7 +158,40 @@ impl RelaySendme {
 
         debug_assert!(Self::check(data.data()));
 
-        Self { stream, data }
+        Self { stream: 0, data }
+    }
+
+    /// Creates new stream-level sendme cell.
+    ///
+    /// Stream-level SENDME are always unauthenticated.
+    ///
+    /// # Parameters
+    ///
+    /// - `cell` : Cached [`FixedCell`].
+    /// - `stream` : Stream ID.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::num::NonZeroU16;
+    ///
+    /// use onioncloud_lowlevel::cell::relay::sendme::RelaySendme;
+    ///
+    /// let cell = RelaySendme::new_stream_unauth(
+    ///     Default::default(),
+    ///     NonZeroU16::new(1).unwrap(),
+    /// );
+    /// ```
+    pub fn new_stream_unauth(cell: FixedCell, stream: NonZeroU16) -> Self {
+        let mut data = RelayWrapper::from(cell);
+        data.set_data(&[]);
+
+        debug_assert!(Self::check(data.data()));
+
+        Self {
+            stream: stream.into(),
+            data,
+        }
     }
 
     /// Creates new RELAY_SENDME from [`SendmeData`].
@@ -172,42 +199,46 @@ impl RelaySendme {
     /// # Parameters
     ///
     /// - `cell` : Cached [`FixedCell`].
-    /// - `stream` : Stream ID.
     /// - `digest` : Digest.
     ///
     /// # Example
     ///
     /// ```
-    /// use std::num::NonZeroU16;
-    ///
     /// use onioncloud_lowlevel::cell::relay::sendme::{RelaySendme, SendmeData};
     ///
     /// let cell = RelaySendme::from_data(
     ///     Default::default(),
-    ///     NonZeroU16::new(1).unwrap(),
     ///     SendmeData::Unauth,
     /// );
     /// ```
-    pub fn from_data(cell: FixedCell, stream: NonZeroU16, data: SendmeData) -> Self {
+    pub fn from_data(cell: FixedCell, data: SendmeData) -> Self {
         match data {
-            SendmeData::Unauth => Self::new_unauth(cell, stream),
-            SendmeData::Auth(digest) => Self::new_auth(cell, stream, digest),
+            SendmeData::Unauth => Self::new_unauth(cell),
+            SendmeData::Auth(digest) => Self::new_auth(cell, digest),
         }
     }
 
     /// Get SENDME data.
-    pub fn data(&self) -> SendmeData {
-        match self.data.data_padding() {
+    pub fn data(&self) -> Option<SendmeData> {
+        if self.data.len() == 0 {
+            return None;
+        }
+
+        Some(match self.data.data_padding() {
             [0, ..] => SendmeData::Unauth,
             data @ [1, ..] => {
                 let p: &AuthSendmePad = transmute_ref!(data);
                 SendmeData::Auth(p.data.digest)
             }
             _ => unreachable!("data must be valid"),
-        }
+        })
     }
 
     fn check(data: &[u8]) -> bool {
+        if data.is_empty() {
+            return true;
+        }
+
         let Ok((header, data)) = SendmeHeader::ref_from_prefix(data) else {
             return false;
         };
@@ -246,14 +277,11 @@ mod tests {
 
     use crate::cell::relay::tests::assert_relay_eq;
 
-    fn strat() -> impl Strategy<Value = (NonZeroU16, SendmeData)> {
-        (
-            any::<NonZeroU16>(),
-            prop_oneof![
-                Just(()).prop_map(|_| SendmeData::Unauth),
-                [any::<u8>(); 20].prop_map(SendmeData::Auth),
-            ],
-        )
+    fn strat() -> impl Strategy<Value = SendmeData> {
+        prop_oneof![
+            Just(()).prop_map(|_| SendmeData::Unauth),
+            [any::<u8>(); 20].prop_map(SendmeData::Auth),
+        ]
     }
 
     #[test]
@@ -262,14 +290,14 @@ mod tests {
             FixedCell::default(),
             NonZeroU32::new(1).unwrap(),
             RelaySendme::ID,
-            1,
+            0,
             &[0, 0, 1, 1],
         );
         let cell = RelaySendme::try_from_relay(&mut Some(cell))
             .unwrap()
             .unwrap();
 
-        assert_eq!(cell.data(), SendmeData::Unauth);
+        assert_eq!(cell.data(), Some(SendmeData::Unauth));
     }
 
     #[test]
@@ -278,7 +306,7 @@ mod tests {
             FixedCell::default(),
             NonZeroU32::new(1).unwrap(),
             RelaySendme::ID,
-            1,
+            0,
             &[
                 1, 0, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
             ],
@@ -287,23 +315,23 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(cell.data(), SendmeData::Auth([0; 20]));
+        assert_eq!(cell.data(), Some(SendmeData::Auth([0; 20])));
     }
 
     proptest! {
         #[test]
         fn test_sendme_from_data(
-            (stream, data) in strat(),
+            data in strat(),
         ) {
-            let cell = RelaySendme::from_data(FixedCell::default(), stream, data.clone());
+            let cell = RelaySendme::from_data(FixedCell::default(), data.clone());
 
-            assert_eq!(cell.stream, stream);
-            assert_eq!(cell.data(), data);
+            assert_eq!(cell.stream, 0);
+            assert_eq!(cell.data(), Some(data));
         }
 
         #[test]
         fn test_sendme_from_into_relay(
-            (stream, data) in strat(),
+            data in strat(),
         ) {
             let mut v = Vec::new();
             match &data {
@@ -314,13 +342,13 @@ mod tests {
                 }
             }
 
-            let cell = Relay::new(FixedCell::default(), NonZeroU32::new(1).unwrap(), RelaySendme::ID, stream.into(), &v);
+            let cell = Relay::new(FixedCell::default(), NonZeroU32::new(1).unwrap(), RelaySendme::ID, 0, &v);
             drop(v);
             let data_ = RelayWrapper::from(AsRef::<FixedCell>::as_ref(&cell).clone());
             let cell = RelaySendme::try_from_relay(&mut Some(cell)).unwrap().unwrap();
 
-            assert_eq!(cell.stream, stream);
-            assert_eq!(cell.data(), data);
+            assert_eq!(cell.stream, 0);
+            assert_eq!(cell.data(), Some(data));
 
             let cell = cell.into_relay(NonZeroU32::new(1).unwrap());
 
@@ -328,11 +356,11 @@ mod tests {
         }
 
         #[test]
-        fn test_sendme_new_auth(stream: NonZeroU16, data: [u8; 20]) {
-            let cell = RelaySendme::new_auth(FixedCell::default(), stream, data);
+        fn test_sendme_new_auth(data: [u8; 20]) {
+            let cell = RelaySendme::new_auth(FixedCell::default(), data);
 
-            assert_eq!(cell.stream, stream);
-            assert_eq!(cell.data(), SendmeData::Auth(data));
+            assert_eq!(cell.stream, 0);
+            assert_eq!(cell.data(), Some(SendmeData::Auth(data)));
         }
 
         #[test]
@@ -341,7 +369,7 @@ mod tests {
                 FixedCell::default(),
                 NonZeroU32::new(1).unwrap(),
                 RelaySendme::ID,
-                1,
+                0,
                 &[1, 0, n as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][..n + 3],
             ));
             RelaySendme::try_from_relay(&mut cell).unwrap_err();

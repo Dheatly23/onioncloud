@@ -875,14 +875,9 @@ fn write_handler(
 
         let mut found: Option<CachedCell> = None;
 
-        while found.is_none() {
-            let Some((id, reason)) = this.pending_close.pop_front() else {
-                continue;
-            };
-            let Some(meta) = circ_map.remove(id) else {
-                continue;
-            };
-
+        if let Some((id, reason)) = this.pending_close.pop_front()
+            && let Some(meta) = circ_map.remove(id)
+        {
             debug_assert!(meta.closing);
 
             // Prepend DESTROY cell
