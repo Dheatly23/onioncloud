@@ -414,6 +414,31 @@ impl IDGenerator for ResponderIDGenerator {
     }
 }
 
+/// ID generator for stream ID.
+#[derive(Debug)]
+pub struct StreamIDGenerator {
+    _p: (),
+}
+
+impl Default for StreamIDGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StreamIDGenerator {
+    /// Create new `StreamIDGenerator`.
+    pub const fn new() -> Self {
+        Self { _p: () }
+    }
+}
+
+impl IDGenerator for StreamIDGenerator {
+    fn generate_id<R: RngCore + CryptoRng>(&self, rng: &mut R) -> NonZeroU32 {
+        NonZeroU32::new(rng.gen_range(1..=0xffff)).expect("ID must be nonzero")
+    }
+}
+
 /// Data for new handler.
 ///
 /// For controller, send it to task handler.

@@ -17,6 +17,7 @@ use crate::cell::create::CreatedFast;
 use crate::cell::destroy::DestroyReason;
 use crate::cell::relay::begin::RelayBegin;
 use crate::cell::relay::begin_dir::RelayBeginDir;
+use crate::cell::relay::connected::RelayConnected;
 use crate::cell::relay::data::RelayData;
 use crate::cell::relay::drop::RelayDrop;
 use crate::cell::relay::end::{EndReason, RelayEnd};
@@ -29,7 +30,7 @@ use crate::circuit::{
 };
 use crate::crypto::onion::{CircuitDigest, OnionLayer, OnionLayer128, OnionLayerFast, RelayDigest};
 use crate::errors;
-use crate::util::cell_map::CellMap;
+use crate::util::cell_map::{CellMap, StreamIDGenerator};
 use crate::util::sans_io::Handle;
 use crate::util::{InBuffer, OutBuffer, option_ord_min, print_hex};
 
@@ -37,6 +38,7 @@ type CacheTy = Arc<dyn Send + Sync + CellCache>;
 type CachedCell<C = Cell> = Cached<C, CacheTy>;
 type PendingOpen = VecDeque<Sender<Result<NewStream<CachedCell>, errors::NoFreeCircIDError>>>;
 type StreamMap = CellMap<CachedCell<Cell>, DirStreamMeta>;
+type NewStreamSender = Sender<Result<NewStream<CachedCell>, errors::NoFreeCircIDError>>;
 
 /// Trait for [`DirController`] configuration type.
 pub trait DirConfig {
@@ -92,7 +94,7 @@ enum State {
 pub enum DirControlMsg {
     Shutdown,
     /// Create new stream.
-    NewStream(Sender<Result<NewStream<CachedCell>, errors::NoFreeCircIDError>>),
+    NewStream(NewStreamSender),
 }
 
 /// [`DirController`] circuit metadata type.
@@ -112,6 +114,9 @@ pub struct DirStreamMeta {
     /// Every time it succeed, reduce backoff by 1.
     /// Backoff is clamped to MAX_BACKOFF.
     backoff_mult: u8,
+
+    /// New stream data, will be resolved after receiving RELAY_CONNECTED.
+    connect_resolve: Option<(NewStreamSender, NewStream<CachedCell>)>,
 }
 
 impl<Cfg: 'static + Send + Sync + Display + DirConfig> CircuitController for DirController<Cfg> {
@@ -628,6 +633,20 @@ fn read_handler(
                 stream_map.remove(id.into());
                 return Ok(());
             }
+            if let Some(cell) = cast_r::<RelayConnected>(cell)? {
+                cfg.cache.discard(cell);
+                trace!(id, "directory stream connected");
+
+                if let Some((s, m)) = stream.meta.connect_resolve.take()
+                    && s.send(Ok(m)).is_err()
+                {
+                    stream.meta.closing = true;
+
+                    this.pending_close.push_back((id, EndReason::Internal));
+                    // Pending RELAY_END cell, clear flag
+                    flags &= !FLAG_WRITE_EMPTY;
+                }
+            }
 
             if stream.meta.last_full > input.time() {
                 // Sender recently full
@@ -671,7 +690,7 @@ fn read_handler(
                     stream.meta.closing = true;
 
                     this.pending_close.push_back((id, EndReason::Internal));
-                    // Pending DESTROY cell, clear flag
+                    // Pending RELAY_END cell, clear flag
                     flags &= !FLAG_WRITE_EMPTY;
                 }
             }
@@ -722,26 +741,54 @@ fn write_handler(
     }
 
     if found.is_none()
-        && let Some(digest) = this.forward_sendme_digest.pop_front()
+        && let Some(send) = this.pending_open.pop_front()
     {
-        let data = match this.sendme_ty {
+        // Open stream and prepend RELAY_BEGIN_DIR cell
+        match stream_map.open_with(&StreamIDGenerator::new(), 64, |_| DirStreamMeta {
+            closing: false,
+
+            last_full: input.time(),
+            backoff_mult: 0,
+
+            connect_resolve: None,
+        }) {
+            Ok((m, v)) => {
+                found = Some(
+                    cfg.cache.cache(
+                        RelayBeginDir::new(cfg.cache.get_cached(), m.id.try_into().unwrap())
+                            .into_relay(cfg.circ_id),
+                    ),
+                );
+
+                // Store handle to be resolved later.
+                v.meta.connect_resolve = Some((send, NewStream::new(m, input)));
+            }
+            Err(e) => {
+                // Failed to create stream.
+                let _ = send.send(Err(e));
+            }
+        }
+    }
+
+    if found.is_none()
+        && let Some(digest) = this.forward_sendme_digest.pop_front()
+        && let Some(data) = match this.sendme_ty {
             SendmeType::Disabled => None,
             SendmeType::Unauth => Some(SendmeData::Unauth),
             SendmeType::Auth => Some(SendmeData::Auth(digest)),
-        };
-
-        if let Some(data) = data {
-            // Prepend RELAY_SENDME cell
-            found = Some(cfg.cache.cache(
+        }
+    {
+        // Prepend RELAY_SENDME cell
+        found =
+            Some(cfg.cache.cache(
                 RelaySendme::from_data(cfg.cache.get_cached(), data).into_relay(cfg.circ_id),
             ));
 
-            this.backward_data_count = this
-                .backward_data_count
-                .checked_add(100)
-                .expect("token bucket overflow");
-            this.pause_out_buffer = false;
-        }
+        this.backward_data_count = this
+            .backward_data_count
+            .checked_add(100)
+            .expect("token bucket overflow");
+        this.pause_out_buffer = false;
     }
 
     while found.is_none() && !this.pause_out_buffer {
