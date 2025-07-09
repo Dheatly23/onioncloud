@@ -9,7 +9,7 @@ use flume::{Sender, TrySendError};
 
 use crate::cache::{Cachable, Cached, CellCache};
 use crate::cell::CellLike;
-use crate::cell::destroy::{Destroy, DestroyReason};
+use crate::cell::destroy::DestroyReason;
 use crate::util::cell_map::NewHandler;
 
 /// A [`Sender`] wrapper with circuit ID checking.
@@ -66,20 +66,20 @@ impl<Cell> CheckedSender<Cell> {
 /// `Cell` is the type of cells that controller receives/sends.
 pub struct CircuitInput<'a, Cell> {
     time: Instant,
-    agg_send: &'a mut CheckedSender<Cell>,
+    agg_sender: &'a mut CheckedSender<Cell>,
 }
 
 impl<'a, Cell> Deref for CircuitInput<'a, Cell> {
     type Target = CheckedSender<Cell>;
 
     fn deref(&self) -> &Self::Target {
-        self.agg_send
+        &*self.agg_sender
     }
 }
 
 impl<'a, Cell> DerefMut for CircuitInput<'a, Cell> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.agg_send
+        &mut *self.agg_sender
     }
 }
 
@@ -89,91 +89,34 @@ impl<'a, Cell> CircuitInput<'a, Cell> {
     /// # Parameters
     ///
     /// - `time` : Current time.
-    /// - `agg_send` : Aggregate sender.
-    pub(crate) fn new(time: Instant, agg_send: &'a mut CheckedSender<Cell>) -> Self {
-        Self { time, agg_send }
+    /// - `agg_sender` : Aggregate sender.
+    pub(crate) fn new(time: Instant, agg_sender: &'a mut CheckedSender<Cell>) -> Self {
+        Self { time, agg_sender }
     }
 
     /// Get current time.
     pub fn time(&self) -> Instant {
         self.time
     }
-
-    /// Create [`CircuitOutput`] from self.
-    pub fn output(self) -> CircuitOutput<'a, Cell> {
-        CircuitOutput::new(self)
-    }
 }
 
-/// Circuit controller input.
-///
-/// Created only fron [`CircuitInput`] by using [`CircuitOutput::new`] or [`CircuitInput::output`].
-/// Implements [`Deref`] to [`CircuitInput`].
-pub struct CircuitOutput<'a, Cell> {
-    input: CircuitInput<'a, Cell>,
-
+/// Circuit controller output.
+pub struct CircuitOutput {
     pub(crate) timeout: Option<Instant>,
-    pub(crate) shutdown: Option<Cell>,
+    pub(crate) shutdown: Option<DestroyReason>,
     pub(crate) cell_msg_pause: bool,
     pub(crate) stream_cell_msg_pause: bool,
 }
 
-impl<'a, Cell> Deref for CircuitOutput<'a, Cell> {
-    type Target = CircuitInput<'a, Cell>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.input
-    }
-}
-
-impl<'a, Cell> DerefMut for CircuitOutput<'a, Cell> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.input
-    }
-}
-
-impl<'a, Cell> CircuitOutput<'a, Cell> {
+impl CircuitOutput {
     /// Create new [`ChannelOutput`].
-    pub fn new(input: CircuitInput<'a, Cell>) -> Self {
+    pub fn new() -> Self {
         Self {
-            input,
             timeout: None,
             shutdown: None,
             cell_msg_pause: false,
             stream_cell_msg_pause: false,
         }
-    }
-
-    /// Shutdown circuit with cell (unchecked).
-    ///
-    /// # Safety
-    ///
-    /// Cell must be a DESTROY cell with correct circuit ID.
-    pub unsafe fn shutdown_with_unchecked(&mut self, cell: Cell) -> &mut Self {
-        self.shutdown = Some(cell);
-        self
-    }
-
-    /// Shutdown circuit with supplied DESTROY cell.
-    ///
-    /// When returned, start graceful shutdown sequence:
-    /// 1. Send DESTROY cell.
-    /// 2. Receive cells until closed.
-    ///
-    /// The controller will no longer be used.
-    ///
-    /// # Panics
-    ///
-    /// Panics if cell is not a DESTROY cell with correct circuit ID.
-    pub fn shutdown_with(&mut self, cell: Cell) -> &mut Self
-    where
-        Cell: CellLike,
-    {
-        assert_eq!(cell.circuit(), self.input.id().get(), "circuit ID mismatch");
-        assert_eq!(cell.command(), Destroy::ID, "cell is not DESTROY");
-
-        // SAFETY: Cell has been checked
-        unsafe { self.shutdown_with_unchecked(cell) }
     }
 
     /// Set timeout to be notified.
@@ -193,26 +136,13 @@ impl<'a, Cell> CircuitOutput<'a, Cell> {
         self.stream_cell_msg_pause = value.0;
         self
     }
-}
 
-impl<Cell, Cache> CircuitOutput<'_, Cached<Cell, Cache>>
-where
-    Cell: Cachable + From<Destroy> + CellLike,
-    Cache: CellCache,
-{
     /// Shutdown circuit.
     ///
     /// Shut down circuit with a [`DestroyReason`].
-    ///
-    /// See [`shutdown_with`] for shutdown sequence.
-    ///
-    /// # Panics
-    ///
-    /// It should _never_ panics, unless the `Cell` implementation is weird
-    /// to not convert [`Destroy`] cell faithfully.
-    pub fn shutdown(&mut self, cache: Cache, reason: DestroyReason) -> &mut Self {
-        let cell = Destroy::new(cache.get_cached(), self.input.id(), reason);
-        self.shutdown_with(Cached::new(cache, cell.into()))
+    pub fn shutdown(&mut self, reason: DestroyReason) -> &mut Self {
+        self.shutdown = Some(reason);
+        self
     }
 }
 

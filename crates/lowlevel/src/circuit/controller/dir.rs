@@ -14,7 +14,7 @@ use tracing::{debug, info, instrument, trace, warn};
 use crate::cache::{Cached, CellCache, CellCacheExt, cast};
 use crate::cell::Cell;
 use crate::cell::create::CreatedFast;
-use crate::cell::destroy::DestroyReason;
+use crate::cell::destroy::{Destroy, DestroyReason};
 use crate::cell::relay::begin::RelayBegin;
 use crate::cell::relay::begin_dir::RelayBeginDir;
 use crate::cell::relay::connected::RelayConnected;
@@ -146,6 +146,19 @@ impl<Cfg: 'static + Send + Sync + Display + DirConfig> CircuitController for Dir
     fn set_linkver(&mut self, linkver: u16) {
         self.cfg.linkver = linkver;
     }
+
+    fn error_reason(err: Self::Error) -> DestroyReason {
+        match err {
+            // TODO: Map error code
+            _ => DestroyReason::Internal,
+        }
+    }
+
+    fn make_destroy_cell(&mut self, reason: DestroyReason) -> Self::Cell {
+        self.cfg
+            .cache
+            .cache(Destroy::new(self.cfg.cache.get_cached(), self.cfg.circ_id, reason).into())
+    }
 }
 
 impl<'a, Cfg>
@@ -154,7 +167,7 @@ impl<'a, Cfg>
         &'a mut CellMap<CachedCell, DirStreamMeta>,
     )> for DirController<Cfg>
 {
-    type Return = Result<CircuitOutput<'a, CachedCell>, errors::DirControllerError>;
+    type Return = Result<CircuitOutput, errors::DirControllerError>;
 
     fn handle(
         &mut self,
@@ -162,7 +175,7 @@ impl<'a, Cfg>
             CircuitInput<'a, CachedCell>,
             &'a mut CellMap<CachedCell, DirStreamMeta>,
         ),
-    ) -> Result<CircuitOutput<'a, CachedCell>, errors::DirControllerError> {
+    ) -> Result<CircuitOutput, errors::DirControllerError> {
         match self.state {
             State::Init(ref mut s) => s.handle(&self.cfg, input),
             State::Steady(ref mut s) => {
@@ -173,8 +186,8 @@ impl<'a, Cfg>
                 Ok(out)
             }
             State::Shutdown => {
-                let mut output = input.output();
-                output.shutdown(self.cfg.cache.clone(), DestroyReason::Internal);
+                let mut output = CircuitOutput::new();
+                output.shutdown(DestroyReason::default());
                 Ok(output)
             }
         }
@@ -275,10 +288,10 @@ impl InitState {
     #[instrument(level = "debug", skip_all)]
     fn handle<'a>(
         &mut self,
-        cfg: &CfgData,
-        input: CircuitInput<'a, CachedCell>,
-    ) -> Result<CircuitOutput<'a, CachedCell>, errors::DirControllerError> {
-        let mut output = input.output();
+        _cfg: &CfgData,
+        mut input: CircuitInput<'a, CachedCell>,
+    ) -> Result<CircuitOutput, errors::DirControllerError> {
+        let mut output = CircuitOutput::new();
 
         output
             .cell_msg_pause(true.into())
@@ -286,16 +299,16 @@ impl InitState {
 
         let timeout = *self
             .timeout
-            .get_or_insert_with(|| output.time() + CREATE_TIMEOUT);
+            .get_or_insert_with(|| input.time() + CREATE_TIMEOUT);
         output.timeout(timeout);
 
-        if timeout >= output.time() {
-            output.shutdown(cfg.cache.clone(), DestroyReason::Timeout);
+        if timeout >= input.time() {
+            output.shutdown(DestroyReason::Timeout);
             return Ok(output);
         }
 
         if let Some(cell) = self.cell.take() {
-            match output.try_send(cell) {
+            match input.try_send(cell) {
                 Ok(()) => (),
                 Err(TrySendError::Full(cell)) => self.cell = Some(cell),
                 Err(TrySendError::Disconnected(_)) => return Err(errors::ChannelClosedError.into()),
@@ -395,14 +408,14 @@ impl SteadyState {
         cfg: &CfgData,
         mut input: CircuitInput<'a, CachedCell>,
         stream_map: &'a mut StreamMap,
-    ) -> Result<(CircuitOutput<'a, CachedCell>, bool), errors::DirControllerError> {
+    ) -> Result<(CircuitOutput, bool), errors::DirControllerError> {
         let last_packet = self
             .last_packet
             .get_or_insert_with(|| input.time() + IDLE_TIMEOUT);
         if self.is_timeout && *last_packet <= input.time() {
             info!("circuit idled for 1 minutes, gracefully shutting down");
-            let mut out = input.output();
-            out.shutdown(cfg.cache.clone(), DestroyReason::default());
+            let mut out = CircuitOutput::new();
+            out.shutdown(DestroyReason::default());
             return Ok((out, true));
         }
 
@@ -439,8 +452,8 @@ impl SteadyState {
             timeout = timeout.min(t);
         }
 
-        let mut out = input.output();
-        todo!();
+        let mut out = CircuitOutput::new();
+        Ok((out, false))
     }
 
     #[instrument(level = "debug", skip_all)]

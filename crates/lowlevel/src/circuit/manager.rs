@@ -19,6 +19,7 @@ use super::controller::CircuitController;
 use super::{
     CellMsg, CheckedSender, CircuitInput, CircuitOutput, ControlMsg, StreamCellMsg, Timeout,
 };
+use crate::cell::destroy::DestroyReason;
 use crate::channel::NewCircuit;
 use crate::errors;
 use crate::runtime::{Runtime, Timer};
@@ -331,14 +332,19 @@ async fn handle_circuit<R: Runtime, C: 'static + CircuitController>(
     // SAFETY: Destroy cell has been checked
     let sender = unsafe { send.inner_sender().clone() };
 
-    let mut fut = CircuitFutSteady {
+    let ctrl_recv = cfg.receiver.clone().into_stream();
+    let stream_map = CellMap::new(
+        C::channel_cap(&cfg.config),
+        C::channel_aggregate_cap(&cfg.config),
+    );
+    let mut controller = C::new(cfg, send.id());
+    controller.set_linkver(linkver);
+
+    let fut = CircuitFutSteady {
         runtime: rt,
-        ctrl_recv: cfg.receiver.clone().into_stream(),
-        stream_map: CellMap::new(
-            C::channel_cap(&cfg.config),
-            C::channel_aggregate_cap(&cfg.config),
-        ),
-        controller: C::new(cfg, send.id()),
+        ctrl_recv,
+        stream_map,
+        controller: &mut controller,
         send,
         recv: recv.stream(),
         timer: None,
@@ -347,17 +353,19 @@ async fn handle_circuit<R: Runtime, C: 'static + CircuitController>(
         stream_cell_msg_pause: true,
         span: debug_span!("CircuitFutSteady"),
     };
-    fut.controller.set_linkver(linkver);
 
-    let cell = match fut.await {
-        Ok(Some(cell)) => cell,
+    let (reason, ret) = match fut.await {
+        Ok(Some(reason)) => (reason, true),
         Ok(None) => return false,
         Err(e) => {
-            error!(error = display(e), "circuit error");
-            return false;
+            error!(error = display(&e), "circuit error");
+            (C::error_reason(e), false)
         }
     };
     // Hopefully fut is dropped at this point
+
+    let cell = controller.make_destroy_cell(reason);
+    drop(controller);
 
     CircuitFutDestroy {
         recv: recv.into_stream(),
@@ -365,13 +373,13 @@ async fn handle_circuit<R: Runtime, C: 'static + CircuitController>(
     }
     .instrument(debug_span!("CircuitFutDestroy"))
     .await;
-    true
+    ret
 }
 
 #[pin_project]
 struct CircuitFutSteady<'a, R: Runtime, C: CircuitController> {
     runtime: R,
-    controller: C,
+    controller: &'a mut C,
     #[pin]
     ctrl_recv: RecvStream<'a, C::ControlMsg>,
     stream_map: CellMap<C::Cell, C::StreamMeta>,
@@ -393,7 +401,7 @@ const FLAG_TIMEOUT: u8 = 1 << 3;
 const FLAG_EMPTY_HANDLE: u8 = 1 << 7;
 
 impl<R: Runtime, C: CircuitController> Future for CircuitFutSteady<'_, R, C> {
-    type Output = Result<Option<C::Cell>, C::Error>;
+    type Output = Result<Option<DestroyReason>, C::Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
@@ -490,15 +498,14 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFutSteady<'_, R, C> {
                     timeout,
                     cell_msg_pause,
                     stream_cell_msg_pause,
-                    ..
                 } = this.controller.handle((
                     CircuitInput::new(Instant::now(), this.send),
                     &mut *this.stream_map,
                 ))?;
 
-                if let Some(cell) = shutdown {
+                if let Some(reason) = shutdown {
                     info!("controller requesting graceful shutdown");
-                    return Ready(Ok(Some(cell)));
+                    return Ready(Ok(Some(reason)));
                 }
 
                 if let Some(t) = timeout {

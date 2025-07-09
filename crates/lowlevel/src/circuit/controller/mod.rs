@@ -5,8 +5,10 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use super::{
-    CellMsg, CellMsgPause, CircuitInput, CircuitOutput, ControlMsg, StreamCellMsg, Timeout,
+    CellMsg, CellMsgPause, CheckedSender, CircuitInput, CircuitOutput, ControlMsg, StreamCellMsg,
+    Timeout,
 };
+use crate::cell::destroy::DestroyReason;
 use crate::util::cell_map::CellMap;
 use crate::util::sans_io::Handle;
 
@@ -17,7 +19,7 @@ pub trait CircuitController:
             CircuitInput<'a, Self::Cell>,
             &'a mut CellMap<Self::Cell, Self::StreamMeta>,
         ),
-        Return = Result<CircuitOutput<'a, Self::Cell>, Self::Error>,
+        Return = Result<CircuitOutput, Self::Error>,
     > + Handle<Timeout, Return = Result<(), Self::Error>>
     + Handle<ControlMsg<Self::ControlMsg>, Return = Result<(), Self::Error>>
     + Handle<CellMsg<Self::Cell>, Return = Result<CellMsgPause, Self::Error>>
@@ -49,4 +51,15 @@ pub trait CircuitController:
     fn set_linkver(&mut self, linkver: u16) {
         let _ = linkver;
     }
+
+    /// Get destroy reason from error value.
+    ///
+    /// Defaults to [`DestroyReason::Internal`].
+    fn error_reason(err: Self::Error) -> DestroyReason {
+        let _ = err;
+        DestroyReason::Internal
+    }
+
+    /// Create DESTROY cell from reason.
+    fn make_destroy_cell(&mut self, reason: DestroyReason) -> Self::Cell;
 }
