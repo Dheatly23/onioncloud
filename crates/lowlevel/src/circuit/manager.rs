@@ -1,5 +1,6 @@
 use std::fmt::{Debug, Display};
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll::*;
@@ -16,9 +17,7 @@ use pin_project::pin_project;
 use tracing::{Instrument, Span, debug, debug_span, error, info, instrument, trace, warn};
 
 use super::controller::CircuitController;
-use super::{
-    CellMsg, CheckedSender, CircuitInput, CircuitOutput, ControlMsg, StreamCellMsg, Timeout,
-};
+use super::{CellMsg, CircuitInput, CircuitOutput, ControlMsg, StreamCellMsg, Timeout};
 use crate::cell::destroy::DestroyReason;
 use crate::channel::NewCircuit;
 use crate::errors;
@@ -177,7 +176,8 @@ impl<R: Runtime, C: CircuitController, M> Circuit<R, C, M> {
         self: Pin<&mut Self>,
         r: &R,
         linkver: u16,
-        send: CheckedSender<C::Cell>,
+        circ_id: NonZeroU32,
+        send: Sender<C::Cell>,
         recv: Receiver<C::Cell>,
     ) -> bool
     where
@@ -192,7 +192,7 @@ impl<R: Runtime, C: CircuitController, M> Circuit<R, C, M> {
 
         this.handle
             .as_mut()
-            .set(spawn_with(r, this.inner.clone(), linkver, send, recv).into());
+            .set(spawn_with(r, this.inner.clone(), linkver, circ_id, send, recv).into());
         true
     }
 }
@@ -254,7 +254,8 @@ impl<R: Runtime, C: CircuitController, M> CircuitRef<'_, R, C, M> {
     pub fn restart_with(
         &mut self,
         linkver: u16,
-        send: CheckedSender<C::Cell>,
+        circ_id: NonZeroU32,
+        send: Sender<C::Cell>,
         recv: Receiver<C::Cell>,
     ) -> bool
     where
@@ -263,7 +264,7 @@ impl<R: Runtime, C: CircuitController, M> CircuitRef<'_, R, C, M> {
     {
         self.inner
             .as_mut()
-            .restart_with(self.runtime, linkver, send, recv)
+            .restart_with(self.runtime, linkver, circ_id, send, recv)
     }
 }
 
@@ -283,10 +284,18 @@ fn spawn_with<R: 'static + Runtime + Clone, C: 'static + CircuitController>(
     runtime: &R,
     config: Arc<CircuitInner<C>>,
     linkver: u16,
-    send: CheckedSender<C::Cell>,
+    circ_id: NonZeroU32,
+    send: Sender<C::Cell>,
     recv: Receiver<C::Cell>,
 ) -> R::Task<bool> {
-    runtime.spawn(handle_circuit(runtime.clone(), config, linkver, send, recv))
+    runtime.spawn(handle_circuit(
+        runtime.clone(),
+        config,
+        linkver,
+        circ_id,
+        send,
+        recv,
+    ))
 }
 
 #[instrument(skip_all, fields(config = %cfg.config))]
@@ -318,34 +327,33 @@ async fn handle_create_circuit<
         }
     };
 
-    handle_circuit(rt, cfg, linkver, CheckedSender::new(id, sender), receiver).await
+    handle_circuit(rt, cfg, linkver, id, sender, receiver).await
 }
 
-#[instrument(skip_all, fields(circ_id = send.id()))]
+#[instrument(skip_all, fields(circ_id))]
 async fn handle_circuit<R: Runtime, C: 'static + CircuitController>(
     rt: R,
     cfg: Arc<CircuitInner<C>>,
     linkver: u16,
-    send: CheckedSender<C::Cell>,
+    circ_id: NonZeroU32,
+    send: Sender<C::Cell>,
     recv: Receiver<C::Cell>,
 ) -> bool {
-    // SAFETY: Destroy cell has been checked
-    let sender = unsafe { send.inner_sender().clone() };
-
     let ctrl_recv = cfg.receiver.clone().into_stream();
     let stream_map = CellMap::new(
         C::channel_cap(&cfg.config),
         C::channel_aggregate_cap(&cfg.config),
     );
-    let mut controller = C::new(cfg, send.id());
+    let mut controller = C::new(cfg, circ_id);
     controller.set_linkver(linkver);
 
     let fut = CircuitFutSteady {
         runtime: rt,
+        circ_id,
         ctrl_recv,
         stream_map,
         controller: &mut controller,
-        send,
+        send: &send,
         recv: recv.stream(),
         timer: None,
         timer_finished: false,
@@ -369,7 +377,7 @@ async fn handle_circuit<R: Runtime, C: 'static + CircuitController>(
 
     CircuitFutDestroy {
         recv: recv.into_stream(),
-        fut: Some(sender.into_send_async(cell)),
+        fut: Some(send.into_send_async(cell)),
     }
     .instrument(debug_span!("CircuitFutDestroy"))
     .await;
@@ -380,10 +388,11 @@ async fn handle_circuit<R: Runtime, C: 'static + CircuitController>(
 struct CircuitFutSteady<'a, R: Runtime, C: CircuitController> {
     runtime: R,
     controller: &'a mut C,
+    circ_id: NonZeroU32,
     #[pin]
     ctrl_recv: RecvStream<'a, C::ControlMsg>,
     stream_map: CellMap<C::Cell, C::StreamMeta>,
-    send: CheckedSender<C::Cell>,
+    send: &'a Sender<C::Cell>,
     #[pin]
     recv: RecvStream<'a, C::Cell>,
     #[pin]
@@ -499,7 +508,7 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFutSteady<'_, R, C> {
                     cell_msg_pause,
                     stream_cell_msg_pause,
                 } = this.controller.handle((
-                    CircuitInput::new(Instant::now(), this.send),
+                    CircuitInput::new(*this.circ_id, Instant::now(), this.send),
                     &mut *this.stream_map,
                 ))?;
 

@@ -5,8 +5,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use super::{
-    CellMsg, CellMsgPause, CheckedSender, CircuitInput, CircuitOutput, ControlMsg, StreamCellMsg,
-    Timeout,
+    CellMsg, CellMsgPause, CircuitInput, CircuitOutput, ControlMsg, StreamCellMsg, Timeout,
 };
 use crate::cell::destroy::DestroyReason;
 use crate::util::cell_map::CellMap;

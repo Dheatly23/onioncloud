@@ -2,41 +2,51 @@ pub mod controller;
 pub mod manager;
 
 use std::num::NonZeroU32;
-use std::ops::{Deref, DerefMut};
 use std::time::Instant;
 
 use flume::{Sender, TrySendError};
 
-use crate::cache::{Cachable, Cached, CellCache};
 use crate::cell::CellLike;
 use crate::cell::destroy::DestroyReason;
 use crate::util::cell_map::NewHandler;
 
-/// A [`Sender`] wrapper with circuit ID checking.
-#[derive(Debug, Clone)]
-pub struct CheckedSender<Cell> {
-    id: NonZeroU32,
-    send: Sender<Cell>,
+/// Circuit controller input.
+///
+/// `Cell` is the type of cells that controller receives/sends.
+pub struct CircuitInput<'a, Cell> {
+    circ_id: NonZeroU32,
+    time: Instant,
+    agg_sender: &'a mut dyn AggSender<Cell>,
 }
 
-impl<Cell> CheckedSender<Cell> {
-    /// Create new [`CheckedSender`].
-    pub fn new(id: NonZeroU32, send: Sender<Cell>) -> Self {
-        Self { id, send }
+impl<'a, Cell> CircuitInput<'a, Cell> {
+    /// Create new [`CircuitInput`].
+    ///
+    /// # Parameters
+    ///
+    /// - `circ_id` : Circuit ID.
+    /// - `time` : Current time.
+    /// - `agg_sender` : Aggregate sender.
+    pub(crate) fn new(
+        circ_id: NonZeroU32,
+        time: Instant,
+        agg_sender: &'a mut dyn AggSender<Cell>,
+    ) -> Self {
+        Self {
+            circ_id,
+            time,
+            agg_sender,
+        }
+    }
+
+    /// Get current time.
+    pub fn time(&self) -> Instant {
+        self.time
     }
 
     /// Get circuit ID.
     pub fn id(&self) -> NonZeroU32 {
-        self.id
-    }
-
-    /// Get inner sender.
-    ///
-    /// # Safety
-    ///
-    /// Sender should ony be used to send cells with circuit ID matching [`id`].
-    pub unsafe fn inner_sender(&self) -> &Sender<Cell> {
-        &self.send
+        self.circ_id
     }
 
     /// Try to send cell unsafely.
@@ -45,7 +55,7 @@ impl<Cell> CheckedSender<Cell> {
     ///
     /// Cell circuit ID must match [`id`].
     pub unsafe fn try_send_unchecked(&mut self, cell: Cell) -> Result<(), TrySendError<Cell>> {
-        self.send.try_send(cell)
+        self.agg_sender.try_send_unchecked(cell)
     }
 
     /// Try to send cell.
@@ -55,48 +65,9 @@ impl<Cell> CheckedSender<Cell> {
     where
         Cell: CellLike,
     {
-        assert_eq!(cell.circuit(), self.id.get(), "circuit ID mismatch");
+        assert_eq!(cell.circuit(), self.circ_id.into(), "circuit ID mismatch");
         // SAFETY: Circuit ID has been checked
         unsafe { self.try_send_unchecked(cell) }
-    }
-}
-
-/// Circuit controller input.
-///
-/// `Cell` is the type of cells that controller receives/sends.
-pub struct CircuitInput<'a, Cell> {
-    time: Instant,
-    agg_sender: &'a mut CheckedSender<Cell>,
-}
-
-impl<'a, Cell> Deref for CircuitInput<'a, Cell> {
-    type Target = CheckedSender<Cell>;
-
-    fn deref(&self) -> &Self::Target {
-        &*self.agg_sender
-    }
-}
-
-impl<'a, Cell> DerefMut for CircuitInput<'a, Cell> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut *self.agg_sender
-    }
-}
-
-impl<'a, Cell> CircuitInput<'a, Cell> {
-    /// Create new [`CircuitInput`].
-    ///
-    /// # Parameters
-    ///
-    /// - `time` : Current time.
-    /// - `agg_sender` : Aggregate sender.
-    pub(crate) fn new(time: Instant, agg_sender: &'a mut CheckedSender<Cell>) -> Self {
-        Self { time, agg_sender }
-    }
-
-    /// Get current time.
-    pub fn time(&self) -> Instant {
-        self.time
     }
 }
 
@@ -225,5 +196,22 @@ impl<Cell> NewStream<Cell> {
             inner: handle,
             circ_id: input.id(),
         }
+    }
+}
+
+/// Internal trait for a aggregate sender.
+pub(crate) trait AggSender<Cell> {
+    fn try_send_unchecked(&mut self, cell: Cell) -> Result<(), TrySendError<Cell>>;
+}
+
+impl<Cell> AggSender<Cell> for Sender<Cell> {
+    fn try_send_unchecked(&mut self, cell: Cell) -> Result<(), TrySendError<Cell>> {
+        self.try_send(cell)
+    }
+}
+
+impl<Cell> AggSender<Cell> for &Sender<Cell> {
+    fn try_send_unchecked(&mut self, cell: Cell) -> Result<(), TrySendError<Cell>> {
+        self.try_send(cell)
     }
 }

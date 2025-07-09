@@ -453,6 +453,9 @@ impl SteadyState {
         }
 
         let mut out = CircuitOutput::new();
+        out.timeout(timeout);
+        out.cell_msg_pause(self.in_buffer.is_full().into());
+        out.stream_cell_msg_pause(self.out_buffer.is_full().into());
         Ok((out, false))
     }
 
