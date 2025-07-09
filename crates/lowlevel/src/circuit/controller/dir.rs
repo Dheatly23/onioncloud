@@ -150,6 +150,12 @@ impl<Cfg: 'static + Send + Sync + Display + DirConfig> CircuitController for Dir
     fn error_reason(err: Self::Error) -> DestroyReason {
         match err {
             // TODO: Map error code
+            errors::DirControllerError::CircuitProtocolError(_)
+            | errors::DirControllerError::CircuitHandshakeError(_)
+            | errors::DirControllerError::InvalidCellHeader(_)
+            | errors::DirControllerError::CellFormatError(_) => DestroyReason::Protocol,
+            errors::DirControllerError::CipherError(_)
+            | errors::DirControllerError::CellDigestError(_) => DestroyReason::None,
             _ => DestroyReason::Internal,
         }
     }
@@ -834,6 +840,7 @@ fn write_handler(
     }
 
     let Some(mut cell) = found else {
+        // Nothing to write
         return Ok(flags | FLAG_WRITE_EMPTY);
     };
     let command = cell.command();
@@ -859,7 +866,7 @@ fn write_handler(
     }
 
     // Set circuit ID.
-    cell.circuit = cfg.circ_id.into();
+    cell.circuit = cfg.circ_id;
 
     // Encrypt and set digest,
     let digest = this.digest.wrap_digest_forward(&mut *cell);
@@ -870,12 +877,11 @@ fn write_handler(
         this.forward_sendme_digest.push_back(digest);
     }
 
-    this.cell_send = Some(if let Some(v) = this.early_cnt.checked_sub(1) {
-        this.early_cnt = v;
-        Cached::map_into(Cached::map_into::<RelayEarly>(cell))
-    } else {
-        Cached::map_into(cell)
+    this.cell_send = Some(match this.early_cnt {
+        1.. => Cached::map_into(Cached::map_into::<RelayEarly>(cell)),
+        0 => Cached::map_into(cell),
     });
+    this.early_cnt = this.early_cnt.saturating_sub(1);
 
     Ok(flags)
 }
