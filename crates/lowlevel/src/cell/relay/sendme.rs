@@ -73,7 +73,7 @@ impl TryFromRelay for RelaySendme {
 
 impl IntoRelay for RelaySendme {
     fn into_relay(self, circuit: NonZeroU32) -> Relay {
-        with_cmd_stream(self.data, Self::ID, self.stream.into(), circuit)
+        with_cmd_stream(self.data, Self::ID, self.stream, circuit)
     }
 }
 

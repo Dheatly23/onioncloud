@@ -137,7 +137,7 @@ impl RelayDigest for CircuitDigest {
         self.forward.update(cell.as_ref());
         let other = self.digest_forward();
 
-        if digest != &other[..4] {
+        if digest != other[..4] {
             return Err(errors::CellDigestError);
         }
         Ok(other)
@@ -156,7 +156,7 @@ impl RelayDigest for CircuitDigest {
         self.backward.update(cell.as_ref());
         let other = self.digest_backward();
 
-        if digest != &other[..4] {
+        if digest != other[..4] {
             return Err(errors::CellDigestError);
         }
         Ok(other)
