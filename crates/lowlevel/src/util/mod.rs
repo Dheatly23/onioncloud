@@ -196,13 +196,27 @@ where
     .await
 }
 
-#[pin_project(project = FutureRepollableProj)]
-pub(crate) enum FutureRepollable<F: Future> {
+/// Future wrapper that can be polled infinitely.
+///
+/// Requires that return value is [`Copy`].
+///
+/// If underlying future has finished, polling it again will return the same result.
+/// If underlying future has panicked, repolling will always panic.
+///
+/// To reset, just reassign it.
+///
+/// Also implements [`FusedFuture`] because it can always be polled, thus never terminates.
+#[pin_project]
+pub struct FutureRepollable<F: Future>(#[pin] FutureRepollableInner<F>);
+
+#[pin_project(project = FutureRepollableInnerProj)]
+pub(crate) enum FutureRepollableInner<F: Future> {
     Fut(#[pin] F),
     Res(F::Output),
     Panic,
 }
 
+/// Wraps future into [`FutureRepollable`].
 impl<F: Future> From<F> for FutureRepollable<F> {
     fn from(fut: F) -> Self {
         Self::new(fut)
@@ -210,12 +224,19 @@ impl<F: Future> From<F> for FutureRepollable<F> {
 }
 
 impl<F: Future> FutureRepollable<F> {
-    pub(crate) const fn new(fut: F) -> Self {
-        Self::Fut(fut)
+    /// Create new [`FutureRepollable`].
+    pub const fn new(fut: F) -> Self {
+        Self(FutureRepollableInner::Fut(fut))
     }
 
-    pub(crate) const fn is_finished(&self) -> bool {
-        matches!(self, Self::Res(_) | Self::Panic)
+    /// Check if future is finished.
+    ///
+    /// If future panicked, it will return `true` too.
+    pub const fn is_finished(&self) -> bool {
+        matches!(
+            self.0,
+            FutureRepollableInner::Res(_) | FutureRepollableInner::Panic
+        )
     }
 }
 
@@ -227,16 +248,18 @@ where
     type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut this = guard_on_unwind(self, |mut this| this.set(Self::Panic));
+        let mut this = guard_on_unwind(self.project().0, |mut this| {
+            this.set(FutureRepollableInner::Panic)
+        });
 
         match this.as_mut().project() {
-            FutureRepollableProj::Fut(f) => {
+            FutureRepollableInnerProj::Fut(f) => {
                 let r = ready!(f.poll(cx));
-                this.set(Self::Res(r));
+                this.set(FutureRepollableInner::Res(r));
                 Ready(r)
             }
-            FutureRepollableProj::Res(r) => Ready(*r),
-            FutureRepollableProj::Panic => panic!("future has panicked before"),
+            FutureRepollableInnerProj::Res(r) => Ready(*r),
+            FutureRepollableInnerProj::Panic => panic!("future has panicked before"),
         }
     }
 }
