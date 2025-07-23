@@ -1,3 +1,5 @@
+pub mod event;
+
 /// Trait for handling a value.
 ///
 /// Useful for sans-io operations.
@@ -64,5 +66,29 @@ where
 
     fn handle(&mut self, v: V) -> R {
         (self.0)(v)
+    }
+}
+
+/// Wrapper type for pausing cell messages.
+///
+/// Useful to stop controller from receiving excessive cell message before it's all transmitted.
+///
+/// # Example
+///
+/// ```
+/// use onioncloud_lowlevel::util::sans_io::CellMsgPause;
+///
+/// // Pause cell message
+/// CellMsgPause(true);
+///
+/// // Resume cell message
+/// CellMsgPause(false);
+/// ```
+#[derive(Debug)]
+pub struct CellMsgPause(pub bool);
+
+impl From<bool> for CellMsgPause {
+    fn from(v: bool) -> Self {
+        Self(v)
     }
 }

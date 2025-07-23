@@ -11,6 +11,7 @@ use std::mem::size_of;
 use std::pin::Pin;
 use std::task::Poll::*;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use base64ct::{Base64Url, Encoding};
 use futures_core::future::FusedFuture;
@@ -20,6 +21,7 @@ use pin_project::pin_project;
 use scopeguard::guard_on_unwind;
 
 use crate::crypto::EdPublicKey;
+use crate::runtime::{Runtime, Timer};
 pub use buffer::*;
 pub use channel::*;
 
@@ -272,6 +274,74 @@ where
     fn is_terminated(&self) -> bool {
         // Always can be polled
         false
+    }
+}
+
+/// Timer manager.
+#[pin_project]
+pub struct TimerManager<R: Runtime> {
+    #[pin]
+    timer: Option<R::Timer>,
+    finished: bool,
+}
+
+impl<R: Runtime> Default for TimerManager<R> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<R: Runtime> TimerManager<R> {
+    /// Create new [`TimerManager`].
+    pub const fn new() -> Self {
+        Self {
+            timer: None,
+            finished: false,
+        }
+    }
+
+    /// Returns `true` if timer wants to be polled.
+    pub fn wants_poll(&self) -> bool {
+        matches!(
+            self,
+            Self {
+                timer: Some(_),
+                finished: false
+            }
+        )
+    }
+
+    /// Set timer to fire at time.
+    pub fn set(self: Pin<&mut Self>, runtime: &R, time: Instant) {
+        let mut this = self.project();
+        match this.timer.as_mut().as_pin_mut() {
+            Some(timer) => timer.reset(time),
+            None => this.timer.set(Some(runtime.timer(time))),
+        }
+        *this.finished = false;
+    }
+
+    /// Set timer to never fires.
+    pub fn unset(self: Pin<&mut Self>) {
+        *self.project().finished = true;
+    }
+}
+
+impl<R: Runtime> Future for TimerManager<R> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = self.project();
+
+        if !*this.finished
+            && let Some(timer) = this.timer.as_pin_mut()
+        {
+            ready!(timer.poll(cx));
+            *this.finished = true;
+            Ready(())
+        } else {
+            Pending
+        }
     }
 }
 

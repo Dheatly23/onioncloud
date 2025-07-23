@@ -21,16 +21,15 @@ use onioncloud_lowlevel::channel::controller::{
     ChannelController, UserConfig, UserControlMsg, UserController,
 };
 use onioncloud_lowlevel::channel::manager::ChannelManager;
-use onioncloud_lowlevel::channel::{
-    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, ControlMsg, Timeout,
-};
+use onioncloud_lowlevel::channel::{ChannelConfig, ChannelInput, ChannelOutput};
 use onioncloud_lowlevel::crypto::relay::RelayId;
 use onioncloud_lowlevel::errors;
 use onioncloud_lowlevel::linkver::StandardLinkver;
 use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
 use onioncloud_lowlevel::util::TestController;
 use onioncloud_lowlevel::util::cell_map::CellMap;
-use onioncloud_lowlevel::util::sans_io::Handle;
+use onioncloud_lowlevel::util::sans_io::event::{ChildCellMsg, ControlMsg, Timeout};
+use onioncloud_lowlevel::util::sans_io::{CellMsgPause, Handle};
 
 use crate::common::get_relay_data;
 
@@ -204,11 +203,11 @@ impl Handle<ControlMsg<Infallible>> for VersionOnlyController {
     }
 }
 
-impl Handle<CellMsg<Cell>> for VersionOnlyController {
+impl Handle<ChildCellMsg<Cell>> for VersionOnlyController {
     type Return = AnyResult<CellMsgPause>;
 
     #[instrument(name = "handle_cell", skip_all)]
-    fn handle(&mut self, _: CellMsg<Cell>) -> Self::Return {
+    fn handle(&mut self, _: ChildCellMsg<Cell>) -> Self::Return {
         panic!("controller should never get any cell message");
     }
 }

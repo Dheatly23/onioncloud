@@ -27,16 +27,14 @@ use crate::cell::versions::Versions;
 use crate::cell::writer::CellWriter;
 use crate::cell::{Cell, CellHeader, CellLike, FixedCell};
 use crate::channel::controller::ChannelController;
-use crate::channel::{
-    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, ControlMsg, NewCircuit,
-    Timeout,
-};
+use crate::channel::{ChannelConfig, ChannelInput, ChannelOutput, NewCircuit};
 use crate::crypto::cert::{UnverifiedEdCert, UnverifiedRsaCert, extract_rsa_from_x509};
 use crate::crypto::{EdPublicKey, Sha256Output};
 use crate::errors;
 use crate::linkver::StandardLinkver;
 use crate::util::cell_map::{AnyIDGenerator, CellMap, NewHandler};
-use crate::util::sans_io::Handle;
+use crate::util::sans_io::event::{ChildCellMsg, ControlMsg, Timeout};
+use crate::util::sans_io::{CellMsgPause, Handle};
 use crate::util::{InBuffer, OutBuffer, option_ord_min, print_ed, print_hex};
 
 /// Trait for [`UserController`] configuration type.
@@ -276,7 +274,7 @@ impl<'a, Cfg: 'static + UserConfig + Send + Sync>
         let mut ret = ChannelOutput::new();
         ret.timeout(*last_packet);
         // Should not receive cell messages
-        ret.cell_msg_pause(true.into());
+        ret.cell_msg_pause(CellMsgPause(true));
         Ok(ret)
     }
 }
@@ -507,14 +505,16 @@ impl<Cfg: 'static + UserConfig + Send + Sync> Handle<ControlMsg<UserControlMsg>>
     }
 }
 
-impl<Cfg: 'static + UserConfig + Send + Sync> Handle<CellMsg<CachedCell>> for UserController<Cfg> {
+impl<Cfg: 'static + UserConfig + Send + Sync> Handle<ChildCellMsg<CachedCell>>
+    for UserController<Cfg>
+{
     type Return = Result<CellMsgPause, errors::UserControllerError>;
 
     #[instrument(level = "debug", name = "handle_cell", skip_all)]
-    fn handle(&mut self, msg: CellMsg<CachedCell>) -> Self::Return {
+    fn handle(&mut self, msg: ChildCellMsg<CachedCell>) -> Self::Return {
         match self.state {
             State::Steady(ref mut s) => s.handle_cell(msg.0),
-            State::Shutdown => Ok(true.into()),
+            State::Shutdown => Ok(CellMsgPause(true)),
             State::Init { .. } => unreachable!("init state does not create circuits"),
         }
     }
@@ -684,7 +684,7 @@ impl SteadyState {
         let mut ret = ChannelOutput::new();
         ret.timeout(timeout);
         // Pause cell messages if out buffer is full
-        ret.cell_msg_pause(self.out_buffer.is_full().into());
+        ret.cell_msg_pause(CellMsgPause(self.out_buffer.is_full()));
         Ok(ret)
     }
 
@@ -694,7 +694,7 @@ impl SteadyState {
         cell: CachedCell,
     ) -> Result<CellMsgPause, errors::UserControllerError> {
         self.out_buffer.push_back(cell);
-        Ok(self.out_buffer.is_full().into())
+        Ok(CellMsgPause(self.out_buffer.is_full()))
     }
 }
 

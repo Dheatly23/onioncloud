@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::channel::controller::ChannelController;
-use crate::channel::{CellMsg, ChannelInput, ControlMsg, Stream, Timeout};
+use crate::channel::{ChannelInput, Stream};
 use crate::util::cell_map::CellMap;
+use crate::util::sans_io::event::{ChildCellMsg, ControlMsg, Timeout};
 
 /// Test controller.
 ///
@@ -47,7 +48,7 @@ impl<C: ChannelController> TestController<C> {
             },
             controller: C::new(config),
             circ_map,
-            cell_msg_pause: false,
+            cell_msg_pause: true,
             time: Instant::now(),
             timeout: None,
             ctrl_msgs: Vec::new(),
@@ -134,7 +135,7 @@ impl<C: ChannelController> TestController<C> {
                 };
 
                 // Event: cell message
-                self.cell_msg_pause = self.controller.handle(CellMsg(m))?.0;
+                self.cell_msg_pause = self.controller.handle(ChildCellMsg(m))?.0;
                 has_event = true;
             }
 

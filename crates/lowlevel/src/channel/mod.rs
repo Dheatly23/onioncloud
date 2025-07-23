@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use crate::crypto::relay::{RelayId, RelayIdEd};
 use crate::util::cell_map::NewHandler;
+use crate::util::sans_io::CellMsgPause;
 
 /// Trait for channel configuration.
 pub trait ChannelConfig {
@@ -99,56 +100,6 @@ impl ChannelOutput {
     pub fn cell_msg_pause(&mut self, value: CellMsgPause) -> &mut Self {
         self.cell_msg_pause = value.0;
         self
-    }
-}
-
-/// Marker type for channel timeout.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Timeout;
-
-/// Wrapper type for signalling a control message.
-#[derive(Debug)]
-pub struct ControlMsg<M>(pub M);
-
-impl<M> ControlMsg<M> {
-    /// Unwraps into inner value.
-    pub fn into_inner(self) -> M {
-        self.0
-    }
-}
-
-/// Wrapper type for signalling a cell message.
-#[derive(Debug)]
-pub struct CellMsg<M>(pub M);
-
-impl<M> CellMsg<M> {
-    /// Unwraps into inner value.
-    pub fn into_inner(self) -> M {
-        self.0
-    }
-}
-
-/// Wrapper type for pausing cell messages.
-///
-/// Useful to stop controller from receiving excessive cell message before it's all transmitted.
-///
-/// # Example
-///
-/// ```
-/// use onioncloud_lowlevel::channel::CellMsgPause;
-///
-/// // Pause cell message
-/// CellMsgPause::from(true);
-///
-/// // Resume cell message
-/// CellMsgPause::from(false);
-/// ```
-#[derive(Debug)]
-pub struct CellMsgPause(pub(crate) bool);
-
-impl From<bool> for CellMsgPause {
-    fn from(v: bool) -> Self {
-        Self(v)
     }
 }
 

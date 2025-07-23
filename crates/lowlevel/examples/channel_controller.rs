@@ -21,9 +21,7 @@ use onioncloud_lowlevel::cell::writer::CellWriter;
 use onioncloud_lowlevel::cell::{Cell, CellHeader, CellLike, FixedCell};
 use onioncloud_lowlevel::channel::controller::ChannelController;
 use onioncloud_lowlevel::channel::manager::ChannelManager;
-use onioncloud_lowlevel::channel::{
-    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, ControlMsg, Timeout,
-};
+use onioncloud_lowlevel::channel::{ChannelConfig, ChannelInput, ChannelOutput};
 use onioncloud_lowlevel::crypto::cert::{
     UnverifiedEdCert, UnverifiedRsaCert, extract_rsa_from_x509,
 };
@@ -34,7 +32,8 @@ use onioncloud_lowlevel::errors::CellError;
 use onioncloud_lowlevel::linkver::StandardLinkver;
 use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
 use onioncloud_lowlevel::util::cell_map::CellMap;
-use onioncloud_lowlevel::util::sans_io::Handle;
+use onioncloud_lowlevel::util::sans_io::event::{ChildCellMsg, ControlMsg, Timeout};
+use onioncloud_lowlevel::util::sans_io::{CellMsgPause, Handle};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tracing::{debug, info, instrument, warn};
@@ -449,11 +448,11 @@ impl Handle<ControlMsg<Infallible>> for Controller {
     }
 }
 
-impl Handle<CellMsg<Cached<Cell, Arc<LinkCfg>>>> for Controller {
+impl Handle<ChildCellMsg<Cached<Cell, Arc<LinkCfg>>>> for Controller {
     type Return = AnyResult<CellMsgPause>;
 
     #[instrument(name = "handle_cell", skip_all)]
-    fn handle(&mut self, _: CellMsg<Cached<Cell, Arc<LinkCfg>>>) -> Self::Return {
+    fn handle(&mut self, _: ChildCellMsg<Cached<Cell, Arc<LinkCfg>>>) -> Self::Return {
         panic!("controller should never get any cell message");
     }
 }

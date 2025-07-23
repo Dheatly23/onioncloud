@@ -6,11 +6,10 @@ use std::sync::Arc;
 
 use rustls::Error as RustlsError;
 
-use super::{
-    CellMsg, CellMsgPause, ChannelConfig, ChannelInput, ChannelOutput, ControlMsg, Timeout,
-};
+use super::{ChannelConfig, ChannelInput, ChannelOutput};
 use crate::util::cell_map::CellMap;
-use crate::util::sans_io::Handle;
+use crate::util::sans_io::event::{ChildCellMsg, ControlMsg, Timeout};
+use crate::util::sans_io::{CellMsgPause, Handle};
 
 pub use user::{UserConfig, UserControlMsg, UserController};
 
@@ -32,7 +31,7 @@ pub use user::{UserConfig, UserControlMsg, UserController};
 ///
 ///   Control message handler.
 ///
-/// - [`CellMsg<Self::Cell>`]
+/// - [`ChildCellMsg<Self::Cell>`]
 ///
 ///   Cell message handler. Returns [`CellMsgPause`] to pause next cell message handling.
 pub trait ChannelController:
@@ -44,7 +43,7 @@ pub trait ChannelController:
         ),
         Return = Result<ChannelOutput, Self::Error>,
     > + Handle<ControlMsg<Self::ControlMsg>, Return = Result<(), Self::Error>>
-    + Handle<CellMsg<Self::Cell>, Return = Result<CellMsgPause, Self::Error>>
+    + Handle<ChildCellMsg<Self::Cell>, Return = Result<CellMsgPause, Self::Error>>
     + Handle<Timeout, Return = Result<(), Self::Error>>
 {
     /// Error type.

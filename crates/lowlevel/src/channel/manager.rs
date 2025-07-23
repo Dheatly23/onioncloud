@@ -19,13 +19,16 @@ use scopeguard::guard;
 use tracing::{Span, debug, debug_span, error, info, instrument, trace, warn};
 
 use super::controller::ChannelController;
-use super::{CellMsg, ChannelConfig, ChannelInput, ControlMsg, Stream, Timeout};
+use super::{ChannelConfig, ChannelInput, Stream};
 use crate::crypto::relay::RelayId;
 use crate::crypto::tls::setup_client;
 use crate::errors;
-use crate::runtime::{Runtime, Stream as RTStream, Timer};
+use crate::runtime::{Runtime, Stream as RTStream};
 use crate::util::cell_map::CellMap;
-use crate::util::{AsyncReadWrapper, AsyncWriteWrapper, FutureRepollable, print_hex, print_list};
+use crate::util::sans_io::event::{ChildCellMsg, ControlMsg, Timeout};
+use crate::util::{
+    AsyncReadWrapper, AsyncWriteWrapper, FutureRepollable, TimerManager, print_hex, print_list,
+};
 
 struct ChannelInner<C: ChannelController> {
     sender: Sender<C::ControlMsg>,
@@ -634,16 +637,16 @@ async fn handle_stream<R: Runtime, C: ChannelController + 'static>(
             tls,
             addr: peer_addr,
         },
-        timer: None,
-        timer_finished: true,
-        ctrl_recv: Some(cfg.receiver.clone().into_stream()),
-        circ_map: Some(CellMap::new(
-            C::channel_cap(&cfg.config),
-            C::channel_aggregate_cap(&cfg.config),
-        )),
-        cell_msg_pause: true,
-        state: State::Normal,
-        cont: C::new(cfg),
+        state: State::Normal {
+            timer: TimerManager::new(),
+            ctrl_recv: cfg.receiver.clone().into_stream(),
+            circ_map: CellMap::new(
+                C::channel_cap(&cfg.config),
+                C::channel_aggregate_cap(&cfg.config),
+            ),
+            cell_msg_pause: true,
+            controller: C::new(cfg),
+        },
         span: debug_span!("ChannelFut"),
     };
 
@@ -656,9 +659,17 @@ async fn handle_stream<R: Runtime, C: ChannelController + 'static>(
     }
 }
 
-#[derive(PartialEq, Eq)]
-enum State {
-    Normal,
+#[pin_project(project = StateProj)]
+enum State<R: Runtime, C: ChannelController> {
+    Normal {
+        controller: C,
+        #[pin]
+        timer: TimerManager<R>,
+        #[pin]
+        ctrl_recv: RecvStream<'static, C::ControlMsg>,
+        circ_map: CellMap<C::Cell, C::CircMeta>,
+        cell_msg_pause: bool,
+    },
     ReqShutdown,
     TlsShutdown,
     Shutdown,
@@ -670,14 +681,7 @@ struct ChannelFut<R: Runtime, C: ChannelController> {
     #[pin]
     stream: StreamWrapper<R::Stream>,
     #[pin]
-    timer: Option<R::Timer>,
-    timer_finished: bool,
-    #[pin]
-    ctrl_recv: Option<RecvStream<'static, C::ControlMsg>>,
-    circ_map: Option<CellMap<C::Cell, C::CircMeta>>,
-    cell_msg_pause: bool,
-    cont: C,
-    state: State,
+    state: State<R, C>,
     span: Span,
 }
 
@@ -698,22 +702,15 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
 
         'main: loop {
             let _guard = this.span.enter();
+            let state = this.state.as_mut().project();
 
             // Process shutdown
-            match this.state {
-                State::Shutdown => {
-                    this.timer.set(None);
-                    *this.circ_map = None;
-                    this.ctrl_recv.set(None);
-                    return this.stream.poll_close(cx).map_err(|e| e.into());
-                }
-                State::ReqShutdown => {
+            match state {
+                StateProj::Shutdown => return this.stream.poll_close(cx).map_err(|e| e.into()),
+                StateProj::ReqShutdown => {
                     debug!("graceful shutdown request received");
                     this.stream.as_mut().tls().send_close_notify();
-                    this.timer.set(None);
-                    *this.state = State::TlsShutdown;
-                    *this.circ_map = None;
-                    this.ctrl_recv.set(None);
+                    this.state.set(State::TlsShutdown);
                     continue;
                 }
                 _ => (),
@@ -723,16 +720,16 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
             match this
                 .stream
                 .as_mut()
-                .process(cx, *this.state == State::TlsShutdown, pending)
+                .process(cx, matches!(state, StateProj::TlsShutdown), pending)
             {
                 Ok(Pending) => return Pending,
                 Ok(Ready(None)) => {
-                    *this.state = State::Shutdown;
+                    this.state.set(State::Shutdown);
                     continue;
                 }
                 Ok(Ready(Some(v))) => pending = v,
                 Err(e) => {
-                    *this.state = State::Shutdown;
+                    this.state.set(State::Shutdown);
                     return Ready(Err(match e {
                         ErrorType::Io(e) => e.into(),
                         ErrorType::Tls(e) => e.into(),
@@ -741,31 +738,27 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
             }
 
             // Process controller
+            let StateProj::Normal {
+                controller,
+                mut timer,
+                mut ctrl_recv,
+                circ_map,
+                cell_msg_pause,
+            } = state
+            else {
+                unreachable!("all states should be handled")
+            };
             let mut has_event = false;
-            let mut ctrl_recv = this
-                .ctrl_recv
-                .as_mut()
-                .as_pin_mut()
-                .expect("control receiver should not be dropped");
-            let circ_map = this
-                .circ_map
-                .as_mut()
-                .expect("circuit map should not be dropped");
 
-            if !*this.timer_finished && pending & FLAG_TIMEOUT == 0 {
+            if pending & FLAG_TIMEOUT == 0 && timer.wants_poll() {
                 pending |= FLAG_TIMEOUT;
 
-                if this
-                    .timer
-                    .as_mut()
-                    .as_pin_mut()
-                    .is_some_and(|t| t.poll(cx).is_ready())
-                {
-                    *this.timer_finished = true;
+                if timer.as_mut().poll(cx).is_ready() {
                     // Event: timeout
-                    this.cont
-                        .handle(Timeout)
-                        .inspect_err(|_| *this.state = State::Shutdown)?;
+                    if let Err(e) = controller.handle(Timeout) {
+                        this.state.set(State::Shutdown);
+                        return Ready(Err(e));
+                    }
                     has_event = true;
                 }
             }
@@ -776,14 +769,15 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                         error!(
                             "shutting down: control channel disconnected (this might be a bug in channel manager)"
                         );
-                        *this.state = State::Shutdown;
+                        this.state.set(State::Shutdown);
                         continue 'main;
                     };
 
                     // Event: control message
-                    this.cont
-                        .handle(ControlMsg(msg))
-                        .inspect_err(|_| *this.state = State::Shutdown)?;
+                    if let Err(e) = controller.handle(ControlMsg(msg)) {
+                        this.state.set(State::Shutdown);
+                        return Ready(Err(e));
+                    }
                     has_event = true;
                 }
 
@@ -791,22 +785,24 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
             }
 
             if pending & FLAG_CELLMSG == 0 {
-                while !*this.cell_msg_pause {
+                while !*cell_msg_pause {
                     let Ready(msg) = circ_map.poll_recv(cx) else {
                         pending |= FLAG_CELLMSG;
                         break;
                     };
 
                     // Event: cell message
-                    *this.cell_msg_pause = this
-                        .cont
-                        .handle(CellMsg(
-                            msg.expect("circuit map aggregate receiver should never close"),
-                        ))
-                        .inspect_err(|_| *this.state = State::Shutdown)?
-                        .0;
+                    *cell_msg_pause = match controller.handle(ChildCellMsg(
+                        msg.expect("circuit map aggregate receiver should never close"),
+                    )) {
+                        Ok(v) => v.0,
+                        Err(e) => {
+                            this.state.set(State::Shutdown);
+                            return Ready(Err(e));
+                        }
+                    };
                     has_event = true;
-                    if *this.cell_msg_pause {
+                    if *cell_msg_pause {
                         debug!("pausing cell message receiving");
                     }
                 }
@@ -814,39 +810,36 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
 
             if has_event || pending & FLAG_EMPTY_HANDLE == 0 {
                 // Handle channel
-                let ret = this
-                    .cont
-                    .handle((
-                        ChannelInput::new(this.stream.as_mut().as_stream(), Instant::now()),
-                        circ_map,
-                    ))
-                    .inspect_err(|_| *this.state = State::Shutdown)?;
+                let ret = match controller.handle((
+                    ChannelInput::new(this.stream.as_mut().as_stream(), Instant::now()),
+                    circ_map,
+                )) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        this.state.set(State::Shutdown);
+                        return Ready(Err(e));
+                    }
+                };
 
                 if ret.shutdown {
                     info!("controller requesting graceful shutdown");
-                    *this.state = State::ReqShutdown;
+                    this.state.set(State::ReqShutdown);
                     continue;
                 }
-                if let Some(t) = ret.timeout {
-                    debug!(timeout = debug(t), "resetting timer");
-                    match this.timer.as_mut().as_pin_mut() {
-                        Some(f) => f.reset(t),
-                        None => this.timer.set(Some(this.runtime.timer(t))),
-                    }
-
-                    *this.timer_finished = false;
+                if let Some(time) = ret.timeout {
+                    debug!(timeout = debug(time), "resetting timer");
+                    timer.as_mut().set(this.runtime, time);
                     pending &= !FLAG_TIMEOUT;
                 } else {
                     debug!("clearing timer");
-                    // Regardless, mark timer as "finished"
-                    *this.timer_finished = true;
+                    timer.as_mut().unset();
                 }
-                match (*this.cell_msg_pause, ret.cell_msg_pause) {
+                match (*cell_msg_pause, ret.cell_msg_pause) {
                     (true, false) => debug!("resuming cell message receiving"),
                     (false, true) => debug!("pausing cell message receiving"),
                     _ => (),
                 }
-                *this.cell_msg_pause = ret.cell_msg_pause;
+                *cell_msg_pause = ret.cell_msg_pause;
             }
             // Mark empty handle as true, because either timeout already fires or it has been handled previously.
             pending |= FLAG_EMPTY_HANDLE;
@@ -862,11 +855,11 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                 pending &= !FLAG_EMPTY_HANDLE; // Make sure controller will handle
                 retry = true;
             }
-            if pending & FLAG_TIMEOUT == 0 && !*this.timer_finished && this.timer.is_some() {
+            if pending & FLAG_TIMEOUT == 0 && timer.wants_poll() {
                 trace!("repolling: timer wants to be polled");
                 retry = true;
             }
-            if pending & FLAG_CELLMSG == 0 && !*this.cell_msg_pause {
+            if pending & FLAG_CELLMSG == 0 && !*cell_msg_pause {
                 trace!("repolling: cell aggregate channel wants to be polled");
                 retry = true;
             }
