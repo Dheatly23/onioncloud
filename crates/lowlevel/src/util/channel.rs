@@ -27,7 +27,8 @@ impl<C: ChannelController> TestController<C> {
     /// Create new [`TestController`].
     ///
     /// # Parameters
-    /// - `controller` : Channel controller to be tested.
+    /// - `config` : Configuration.
+    /// - `peer_addr` : Peer address.
     /// - `link_cert` : Link certificate.
     pub fn new(
         config: Arc<impl 'static + Send + Sync + AsRef<C::Config>>,
@@ -129,8 +130,10 @@ impl<C: ChannelController> TestController<C> {
                 has_event = true;
             }
 
+            let mut cell_msg_block = false;
             while !self.cell_msg_pause {
                 let Ok(m) = self.circ_map.try_recv() else {
+                    cell_msg_block = true;
                     break;
                 };
 
@@ -145,7 +148,6 @@ impl<C: ChannelController> TestController<C> {
                     &mut self.circ_map,
                 ))?;
                 empty_handle = true;
-                let old_pause = self.cell_msg_pause;
                 self.cell_msg_pause = ret.cell_msg_pause;
                 self.timeout = ret.timeout;
 
@@ -154,7 +156,7 @@ impl<C: ChannelController> TestController<C> {
                         shutdown: true,
                         cell_msg_pause: self.cell_msg_pause,
                     });
-                } else if self.timeout.is_some() || (old_pause && !self.cell_msg_pause) {
+                } else if self.timeout.is_some() || (!cell_msg_block && !self.cell_msg_pause) {
                     // Repoll
                     continue;
                 }

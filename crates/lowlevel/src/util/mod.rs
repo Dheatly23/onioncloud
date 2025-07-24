@@ -1,6 +1,7 @@
 mod buffer;
 pub mod cell_map;
-mod channel;
+pub mod channel;
+pub mod circuit;
 pub mod sans_io;
 
 use std::error::Error;
@@ -23,7 +24,6 @@ use scopeguard::guard_on_unwind;
 use crate::crypto::EdPublicKey;
 use crate::runtime::{Runtime, Timer};
 pub use buffer::*;
-pub use channel::*;
 
 pub(crate) fn wrap_eof(v: IoResult<usize>) -> IoResult<usize> {
     match v {

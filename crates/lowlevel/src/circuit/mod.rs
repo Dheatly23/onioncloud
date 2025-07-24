@@ -9,6 +9,7 @@ use flume::{Sender, TrySendError};
 use crate::cell::CellLike;
 use crate::cell::destroy::DestroyReason;
 use crate::util::cell_map::NewHandler;
+use crate::util::sans_io::CellMsgPause;
 
 /// Circuit controller input.
 ///
@@ -16,7 +17,7 @@ use crate::util::cell_map::NewHandler;
 pub struct CircuitInput<'a, Cell> {
     circ_id: NonZeroU32,
     time: Instant,
-    agg_sender: &'a mut dyn AggSender<Cell>,
+    agg_sender: &'a mut dyn AggSender<Cell = Cell>,
 }
 
 impl<'a, Cell> CircuitInput<'a, Cell> {
@@ -30,7 +31,7 @@ impl<'a, Cell> CircuitInput<'a, Cell> {
     pub(crate) fn new(
         circ_id: NonZeroU32,
         time: Instant,
-        agg_sender: &'a mut dyn AggSender<Cell>,
+        agg_sender: &'a mut dyn AggSender<Cell = Cell>,
     ) -> Self {
         Self {
             circ_id,
@@ -75,8 +76,8 @@ impl<'a, Cell> CircuitInput<'a, Cell> {
 pub struct CircuitOutput {
     pub(crate) timeout: Option<Instant>,
     pub(crate) shutdown: Option<DestroyReason>,
-    pub(crate) cell_msg_pause: bool,
-    pub(crate) stream_cell_msg_pause: bool,
+    pub(crate) parent_cell_msg_pause: bool,
+    pub(crate) child_cell_msg_pause: bool,
 }
 
 impl CircuitOutput {
@@ -85,8 +86,8 @@ impl CircuitOutput {
         Self {
             timeout: None,
             shutdown: None,
-            cell_msg_pause: false,
-            stream_cell_msg_pause: false,
+            parent_cell_msg_pause: false,
+            child_cell_msg_pause: false,
         }
     }
 
@@ -96,15 +97,15 @@ impl CircuitOutput {
         self
     }
 
-    /// Pause cell message receiving. By default it's set to [`false`].
-    pub fn cell_msg_pause(&mut self, value: CellMsgPause) -> &mut Self {
-        self.cell_msg_pause = value.0;
+    /// Pause parent cell message receiving. By default it's set to [`false`].
+    pub fn parent_cell_msg_pause(&mut self, value: CellMsgPause) -> &mut Self {
+        self.parent_cell_msg_pause = value.0;
         self
     }
 
-    /// Pause stream cell message receiving. By default it's set to [`false`].
-    pub fn stream_cell_msg_pause(&mut self, value: CellMsgPause) -> &mut Self {
-        self.stream_cell_msg_pause = value.0;
+    /// Pause child cell message receiving. By default it's set to [`false`].
+    pub fn child_cell_msg_pause(&mut self, value: CellMsgPause) -> &mut Self {
+        self.child_cell_msg_pause = value.0;
         self
     }
 
@@ -117,67 +118,6 @@ impl CircuitOutput {
     }
 }
 
-/// Marker type for circuit timeout.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Timeout;
-
-/// Wrapper struct for control message.
-#[derive(Debug)]
-pub struct ControlMsg<Msg>(pub Msg);
-
-impl<M> ControlMsg<M> {
-    /// Unwraps into inner value.
-    pub fn into_inner(self) -> M {
-        self.0
-    }
-}
-
-/// Wrapper struct for cell message.
-#[derive(Debug)]
-pub struct CellMsg<Msg>(pub Msg);
-
-impl<M> CellMsg<M> {
-    /// Unwraps into inner value.
-    pub fn into_inner(self) -> M {
-        self.0
-    }
-}
-
-/// Wrapper struct for stream cell message.
-#[derive(Debug)]
-pub struct StreamCellMsg<Msg>(pub Msg);
-
-impl<M> StreamCellMsg<M> {
-    /// Unwraps into inner value.
-    pub fn into_inner(self) -> M {
-        self.0
-    }
-}
-
-/// Wrapper type for pausing cell messages.
-///
-/// Useful to stop controller from receiving excessive cell message before it's all transmitted.
-///
-/// # Example
-///
-/// ```
-/// use onioncloud_lowlevel::circuit::CellMsgPause;
-///
-/// // Pause cell message
-/// CellMsgPause::from(true);
-///
-/// // Resume cell message
-/// CellMsgPause::from(false);
-/// ```
-#[derive(Debug)]
-pub struct CellMsgPause(pub(crate) bool);
-
-impl From<bool> for CellMsgPause {
-    fn from(v: bool) -> Self {
-        Self(v)
-    }
-}
-
 /// Data for new stream handler.
 ///
 /// For circuit controller, send it to stream handler.
@@ -185,7 +125,12 @@ impl From<bool> for CellMsgPause {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct NewStream<Cell> {
+    /// Handle data.
+    ///
+    /// ID here is stream ID.
     pub inner: NewHandler<Cell>,
+
+    /// Circuit ID.
     pub circ_id: NonZeroU32,
 }
 
@@ -200,17 +145,23 @@ impl<Cell> NewStream<Cell> {
 }
 
 /// Internal trait for a aggregate sender.
-pub(crate) trait AggSender<Cell> {
-    fn try_send_unchecked(&mut self, cell: Cell) -> Result<(), TrySendError<Cell>>;
+pub(crate) trait AggSender {
+    type Cell;
+
+    fn try_send_unchecked(&mut self, cell: Self::Cell) -> Result<(), TrySendError<Self::Cell>>;
 }
 
-impl<Cell> AggSender<Cell> for Sender<Cell> {
+impl<Cell> AggSender for Sender<Cell> {
+    type Cell = Cell;
+
     fn try_send_unchecked(&mut self, cell: Cell) -> Result<(), TrySendError<Cell>> {
         self.try_send(cell)
     }
 }
 
-impl<Cell> AggSender<Cell> for &Sender<Cell> {
+impl<Cell> AggSender for &Sender<Cell> {
+    type Cell = Cell;
+
     fn try_send_unchecked(&mut self, cell: Cell) -> Result<(), TrySendError<Cell>> {
         self.try_send(cell)
     }

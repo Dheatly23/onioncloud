@@ -17,13 +17,14 @@ use pin_project::pin_project;
 use tracing::{Instrument, Span, debug, debug_span, error, info, instrument, trace, warn};
 
 use super::controller::CircuitController;
-use super::{CellMsg, CircuitInput, CircuitOutput, ControlMsg, StreamCellMsg, Timeout};
+use super::{CircuitInput, CircuitOutput};
 use crate::cell::destroy::DestroyReason;
 use crate::channel::NewCircuit;
 use crate::errors;
-use crate::runtime::{Runtime, Timer};
-use crate::util::FutureRepollable;
+use crate::runtime::Runtime;
 use crate::util::cell_map::{CellMap, NewHandler};
+use crate::util::sans_io::event::{ChildCellMsg, ControlMsg, ParentCellMsg, Timeout};
+use crate::util::{FutureRepollable, TimerManager};
 
 pub type NewCircuitSender<C, E> = OneshotSender<Result<NewCircuit<C>, E>>;
 type NewCircuitReceiver<C, E> = OneshotReceiver<Result<NewCircuit<C>, E>>;
@@ -355,10 +356,9 @@ async fn handle_circuit<R: Runtime, C: 'static + CircuitController>(
         controller: &mut controller,
         send: &send,
         recv: recv.stream(),
-        timer: None,
-        timer_finished: false,
-        cell_msg_pause: true,
-        stream_cell_msg_pause: true,
+        timer: TimerManager::new(),
+        parent_cell_msg_pause: true,
+        child_cell_msg_pause: true,
         span: debug_span!("CircuitFutSteady"),
     };
 
@@ -396,16 +396,15 @@ struct CircuitFutSteady<'a, R: Runtime, C: CircuitController> {
     #[pin]
     recv: RecvStream<'a, C::Cell>,
     #[pin]
-    timer: Option<R::Timer>,
-    timer_finished: bool,
-    cell_msg_pause: bool,
-    stream_cell_msg_pause: bool,
+    timer: TimerManager<R>,
+    parent_cell_msg_pause: bool,
+    child_cell_msg_pause: bool,
     span: Span,
 }
 
 const FLAG_CTRLMSG: u8 = 1 << 0;
-const FLAG_CELLMSG: u8 = 1 << 1;
-const FLAG_STREAMCELLMSG: u8 = 1 << 2;
+const FLAG_PARENTCELLMSG: u8 = 1 << 1;
+const FLAG_CHILDCELLMSG: u8 = 1 << 2;
 const FLAG_TIMEOUT: u8 = 1 << 3;
 const FLAG_EMPTY_HANDLE: u8 = 1 << 7;
 
@@ -423,16 +422,10 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFutSteady<'_, R, C> {
             // Process controller
             let mut has_event = false;
 
-            if !*this.timer_finished && pending & FLAG_TIMEOUT == 0 {
+            if pending & FLAG_TIMEOUT == 0 && this.timer.wants_poll() {
                 pending |= FLAG_TIMEOUT;
 
-                if this
-                    .timer
-                    .as_mut()
-                    .as_pin_mut()
-                    .is_some_and(|t| t.poll(cx).is_ready())
-                {
-                    *this.timer_finished = true;
+                if this.timer.as_mut().poll(cx).is_ready() {
                     // Event: timeout
                     this.controller.handle(Timeout)?;
                     has_event = true;
@@ -456,11 +449,11 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFutSteady<'_, R, C> {
                 pending |= FLAG_CTRLMSG;
             }
 
-            if pending & FLAG_CELLMSG == 0 {
-                while !*this.cell_msg_pause {
+            if pending & FLAG_PARENTCELLMSG == 0 {
+                while !*this.parent_cell_msg_pause {
                     let msg = match this.recv.as_mut().poll_next(cx) {
                         Pending => {
-                            pending |= FLAG_CELLMSG;
+                            pending |= FLAG_PARENTCELLMSG;
                             break;
                         }
                         Ready(None) => {
@@ -470,31 +463,31 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFutSteady<'_, R, C> {
                         Ready(Some(v)) => v,
                     };
 
-                    // Event: cell message
-                    *this.cell_msg_pause = this.controller.handle(CellMsg(msg))?.0;
+                    // Event: parent cell message
+                    *this.parent_cell_msg_pause = this.controller.handle(ParentCellMsg(msg))?.0;
                     has_event = true;
-                    if *this.cell_msg_pause {
+                    if *this.parent_cell_msg_pause {
                         debug!("pausing cell message receiving");
                     }
                 }
             }
 
-            if pending & FLAG_STREAMCELLMSG == 0 {
-                while !*this.stream_cell_msg_pause {
+            if pending & FLAG_CHILDCELLMSG == 0 {
+                while !*this.child_cell_msg_pause {
                     let Ready(msg) = this.stream_map.poll_recv(cx) else {
-                        pending |= FLAG_STREAMCELLMSG;
+                        pending |= FLAG_CHILDCELLMSG;
                         break;
                     };
 
-                    // Event: stream cell message
-                    *this.stream_cell_msg_pause = this
+                    // Event: child cell message
+                    *this.child_cell_msg_pause = this
                         .controller
-                        .handle(StreamCellMsg(
+                        .handle(ChildCellMsg(
                             msg.expect("stream map aggregate receiver should never close"),
                         ))?
                         .0;
                     has_event = true;
-                    if *this.stream_cell_msg_pause {
+                    if *this.child_cell_msg_pause {
                         debug!("pausing stream cell message receiving");
                     }
                 }
@@ -505,8 +498,8 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFutSteady<'_, R, C> {
                 let CircuitOutput {
                     shutdown,
                     timeout,
-                    cell_msg_pause,
-                    stream_cell_msg_pause,
+                    parent_cell_msg_pause,
+                    child_cell_msg_pause,
                 } = this.controller.handle((
                     CircuitInput::new(*this.circ_id, Instant::now(), this.send),
                     &mut *this.stream_map,
@@ -517,48 +510,42 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFutSteady<'_, R, C> {
                     return Ready(Ok(Some(reason)));
                 }
 
-                if let Some(t) = timeout {
-                    debug!(timeout = debug(t), "resetting timer");
-                    match this.timer.as_mut().as_pin_mut() {
-                        Some(f) => f.reset(t),
-                        None => this.timer.set(Some(this.runtime.timer(t))),
-                    }
-
-                    *this.timer_finished = false;
+                if let Some(time) = timeout {
+                    debug!(timeout = debug(time), "resetting timer");
+                    this.timer.as_mut().set(this.runtime, time);
                     pending &= !FLAG_TIMEOUT;
                 } else {
                     debug!("clearing timer");
-                    // Regardless, mark timer as "finished"
-                    *this.timer_finished = true;
+                    this.timer.as_mut().unset();
                 }
 
-                match (*this.cell_msg_pause, cell_msg_pause) {
+                match (*this.parent_cell_msg_pause, parent_cell_msg_pause) {
                     (true, false) => debug!("resuming cell message receiving"),
                     (false, true) => debug!("pausing cell message receiving"),
                     _ => (),
                 }
-                *this.cell_msg_pause = cell_msg_pause;
+                *this.parent_cell_msg_pause = parent_cell_msg_pause;
 
-                match (*this.stream_cell_msg_pause, stream_cell_msg_pause) {
+                match (*this.child_cell_msg_pause, child_cell_msg_pause) {
                     (true, false) => debug!("resuming stream cell message receiving"),
                     (false, true) => debug!("pausing stream cell message receiving"),
                     _ => (),
                 }
-                *this.stream_cell_msg_pause = stream_cell_msg_pause;
+                *this.child_cell_msg_pause = child_cell_msg_pause;
             }
             // Mark empty handle as true, because either timeout already fires or it has been handled previously.
             pending |= FLAG_EMPTY_HANDLE;
 
             let mut retry = false;
-            if pending & FLAG_TIMEOUT == 0 && !*this.timer_finished && this.timer.is_some() {
+            if pending & FLAG_TIMEOUT == 0 && this.timer.wants_poll() {
                 trace!("repolling: timer wants to be polled");
                 retry = true;
             }
-            if pending & FLAG_CELLMSG == 0 && !*this.cell_msg_pause {
+            if pending & FLAG_PARENTCELLMSG == 0 && !*this.parent_cell_msg_pause {
                 trace!("repolling: cell aggregate channel wants to be polled");
                 retry = true;
             }
-            if pending & FLAG_STREAMCELLMSG == 0 && !*this.stream_cell_msg_pause {
+            if pending & FLAG_CHILDCELLMSG == 0 && !*this.child_cell_msg_pause {
                 trace!("repolling: stream cell aggregate channel wants to be polled");
                 retry = true;
             }

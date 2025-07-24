@@ -26,8 +26,8 @@ use onioncloud_lowlevel::crypto::relay::RelayId;
 use onioncloud_lowlevel::errors;
 use onioncloud_lowlevel::linkver::StandardLinkver;
 use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
-use onioncloud_lowlevel::util::TestController;
 use onioncloud_lowlevel::util::cell_map::CellMap;
+use onioncloud_lowlevel::util::channel::TestController;
 use onioncloud_lowlevel::util::sans_io::event::{ChildCellMsg, ControlMsg, Timeout};
 use onioncloud_lowlevel::util::sans_io::{CellMsgPause, Handle};
 

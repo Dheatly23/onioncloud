@@ -24,14 +24,12 @@ use crate::cell::relay::end::{EndReason, RelayEnd};
 use crate::cell::relay::sendme::{RelaySendme, SendmeData};
 use crate::cell::relay::{IntoRelay, Relay, RelayEarly, RelayLike, cast as cast_r};
 use crate::circuit::controller::CircuitController;
-use crate::circuit::{
-    CellMsg, CellMsgPause, CircuitInput, CircuitOutput, ControlMsg, NewStream, StreamCellMsg,
-    Timeout,
-};
+use crate::circuit::{CircuitInput, CircuitOutput, NewStream};
 use crate::crypto::onion::{CircuitDigest, OnionLayer, OnionLayer128, OnionLayerFast, RelayDigest};
 use crate::errors;
 use crate::util::cell_map::{CellMap, StreamIDGenerator};
-use crate::util::sans_io::Handle;
+use crate::util::sans_io::event::{ChildCellMsg, ControlMsg, ParentCellMsg, Timeout};
+use crate::util::sans_io::{CellMsgPause, Handle};
 use crate::util::{InBuffer, OutBuffer, option_ord_min, print_hex};
 
 type CacheTy = Arc<dyn Send + Sync + CellCache>;
@@ -235,12 +233,12 @@ impl<Cfg> Handle<ControlMsg<DirControlMsg>> for DirController<Cfg> {
     }
 }
 
-impl<Cfg> Handle<CellMsg<CachedCell>> for DirController<Cfg> {
+impl<Cfg> Handle<ParentCellMsg<CachedCell>> for DirController<Cfg> {
     type Return = Result<CellMsgPause, errors::DirControllerError>;
 
     fn handle(
         &mut self,
-        msg: CellMsg<CachedCell>,
+        msg: ParentCellMsg<CachedCell>,
     ) -> Result<CellMsgPause, errors::DirControllerError> {
         match self.state {
             State::Init(ref mut s) => {
@@ -248,24 +246,24 @@ impl<Cfg> Handle<CellMsg<CachedCell>> for DirController<Cfg> {
                 Ok(false.into())
             }
             State::Steady(ref mut s) => s.handle_cell(&self.cfg, msg.0),
-            State::Shutdown => Ok(true.into()),
+            State::Shutdown => Ok(CellMsgPause(true)),
         }
     }
 }
 
-impl<Cfg> Handle<StreamCellMsg<CachedCell>> for DirController<Cfg> {
+impl<Cfg> Handle<ChildCellMsg<CachedCell>> for DirController<Cfg> {
     type Return = Result<CellMsgPause, errors::DirControllerError>;
 
     fn handle(
         &mut self,
-        msg: StreamCellMsg<CachedCell>,
+        msg: ChildCellMsg<CachedCell>,
     ) -> Result<CellMsgPause, errors::DirControllerError> {
         match self.state {
             State::Init(_) => {
                 panic!("state should not receive stream cell message")
             }
             State::Steady(ref mut s) => s.handle_stream_cell(&self.cfg, msg.0),
-            State::Shutdown => Ok(true.into()),
+            State::Shutdown => Ok(CellMsgPause(true)),
         }
     }
 }
@@ -300,8 +298,8 @@ impl InitState {
         let mut output = CircuitOutput::new();
 
         output
-            .cell_msg_pause(true.into())
-            .stream_cell_msg_pause(true.into());
+            .parent_cell_msg_pause(CellMsgPause(true))
+            .child_cell_msg_pause(CellMsgPause(true));
 
         let timeout = *self
             .timeout
@@ -460,8 +458,8 @@ impl SteadyState {
 
         let mut out = CircuitOutput::new();
         out.timeout(timeout);
-        out.cell_msg_pause(self.in_buffer.is_full().into());
-        out.stream_cell_msg_pause(self.out_buffer.is_full().into());
+        out.parent_cell_msg_pause(CellMsgPause(self.in_buffer.is_full()));
+        out.child_cell_msg_pause(CellMsgPause(self.out_buffer.is_full()));
         Ok((out, false))
     }
 
@@ -559,7 +557,7 @@ impl SteadyState {
             trace!("unhandled cell with command {} received", cell.command());
         }
 
-        Ok(self.in_buffer.is_full().into())
+        Ok(CellMsgPause(self.in_buffer.is_full()))
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -581,7 +579,7 @@ impl SteadyState {
         cell.circuit = cfg.circ_id;
         self.out_buffer.push_back(cfg.cache.cache(cell));
 
-        Ok(self.out_buffer.is_full().into())
+        Ok(CellMsgPause(self.out_buffer.is_full()))
     }
 }
 

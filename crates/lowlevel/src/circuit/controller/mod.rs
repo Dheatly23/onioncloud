@@ -4,12 +4,11 @@ use std::fmt::{Debug, Display};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use super::{
-    CellMsg, CellMsgPause, CircuitInput, CircuitOutput, ControlMsg, StreamCellMsg, Timeout,
-};
+use super::{CircuitInput, CircuitOutput};
 use crate::cell::destroy::DestroyReason;
 use crate::util::cell_map::CellMap;
-use crate::util::sans_io::Handle;
+use crate::util::sans_io::event::{ChildCellMsg, ControlMsg, ParentCellMsg, Timeout};
+use crate::util::sans_io::{CellMsgPause, Handle};
 
 pub trait CircuitController:
     Send
@@ -21,8 +20,8 @@ pub trait CircuitController:
         Return = Result<CircuitOutput, Self::Error>,
     > + Handle<Timeout, Return = Result<(), Self::Error>>
     + Handle<ControlMsg<Self::ControlMsg>, Return = Result<(), Self::Error>>
-    + Handle<CellMsg<Self::Cell>, Return = Result<CellMsgPause, Self::Error>>
-    + Handle<StreamCellMsg<Self::Cell>, Return = Result<CellMsgPause, Self::Error>>
+    + Handle<ChildCellMsg<Self::Cell>, Return = Result<CellMsgPause, Self::Error>>
+    + Handle<ParentCellMsg<Self::Cell>, Return = Result<CellMsgPause, Self::Error>>
 {
     type Config: 'static + Send + Sync + Display;
     type Error: 'static + Debug + Display + Send + Sync;
