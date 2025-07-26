@@ -299,7 +299,7 @@ fn spawn_with<R: 'static + Runtime + Clone, C: 'static + CircuitController>(
     ))
 }
 
-#[instrument(skip_all, fields(config = %cfg.config))]
+#[instrument(skip_all)]
 async fn handle_create_circuit<
     R: Runtime,
     C: 'static + CircuitController,
@@ -331,7 +331,7 @@ async fn handle_create_circuit<
     handle_circuit(rt, cfg, linkver, id, sender, receiver).await
 }
 
-#[instrument(skip_all, fields(circ_id))]
+#[instrument(skip_all, fields(circ_id, linkver))]
 async fn handle_circuit<R: Runtime, C: 'static + CircuitController>(
     rt: R,
     cfg: Arc<CircuitInner<C>>,

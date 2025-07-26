@@ -1,5 +1,4 @@
 use std::collections::vec_deque::VecDeque;
-use std::fmt::Display;
 use std::marker::PhantomData;
 use std::mem::take;
 use std::num::{NonZeroU16, NonZeroU32};
@@ -95,6 +94,16 @@ pub enum DirControlMsg {
     NewStream(NewStreamSender),
 }
 
+impl DirControlMsg {
+    pub fn new_stream() -> (
+        Receiver<Result<NewStream<CachedCell>, errors::NoFreeCircIDError>>,
+        Self,
+    ) {
+        let (send, recv) = channel();
+        (recv, Self::NewStream(send))
+    }
+}
+
 /// [`DirController`] circuit metadata type.
 ///
 /// It is marked public only for [`CircuitController`] purposes.
@@ -117,7 +126,7 @@ pub struct DirStreamMeta {
     connect_resolve: Option<(NewStreamSender, NewStream<CachedCell>)>,
 }
 
-impl<Cfg: 'static + Send + Sync + Display + DirConfig> CircuitController for DirController<Cfg> {
+impl<Cfg: 'static + Send + Sync + DirConfig> CircuitController for DirController<Cfg> {
     type Config = Cfg;
     type Error = errors::DirControllerError;
     type ControlMsg = DirControlMsg;
@@ -243,7 +252,7 @@ impl<Cfg> Handle<ParentCellMsg<CachedCell>> for DirController<Cfg> {
         match self.state {
             State::Init(ref mut s) => {
                 self.state = State::Steady(s.handle_cell(&self.cfg, msg.0)?);
-                Ok(false.into())
+                Ok(CellMsgPause(false))
             }
             State::Steady(ref mut s) => s.handle_cell(&self.cfg, msg.0),
             State::Shutdown => Ok(CellMsgPause(true)),
@@ -306,7 +315,7 @@ impl InitState {
             .get_or_insert_with(|| input.time() + CREATE_TIMEOUT);
         output.timeout(timeout);
 
-        if timeout >= input.time() {
+        if timeout <= input.time() {
             output.shutdown(DestroyReason::Timeout);
             return Ok(output);
         }

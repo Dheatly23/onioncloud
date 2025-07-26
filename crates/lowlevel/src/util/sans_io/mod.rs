@@ -86,9 +86,3 @@ where
 /// ```
 #[derive(Debug)]
 pub struct CellMsgPause(pub bool);
-
-impl From<bool> for CellMsgPause {
-    fn from(v: bool) -> Self {
-        Self(v)
-    }
-}

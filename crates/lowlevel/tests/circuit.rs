@@ -2,6 +2,7 @@ mod common;
 
 use std::borrow::Cow;
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use test_log::test;
@@ -13,12 +14,14 @@ use onioncloud_lowlevel::cell::relay::Relay;
 use onioncloud_lowlevel::channel::controller::{UserConfig, UserControlMsg, UserController};
 use onioncloud_lowlevel::channel::manager::ChannelManager;
 use onioncloud_lowlevel::channel::{ChannelConfig, NewCircuit};
+use onioncloud_lowlevel::circuit::controller::dir::{DirConfig, DirControlMsg, DirController};
 use onioncloud_lowlevel::crypto::onion::{
     OnionLayer as _, OnionLayerData, OnionLayerFast, RelayDigest as _,
 };
 use onioncloud_lowlevel::crypto::relay::RelayId;
 use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
 use onioncloud_lowlevel::util::cell_map::NewHandler;
+use onioncloud_lowlevel::util::circuit::TestController;
 
 use crate::common::get_relay_data;
 
@@ -122,4 +125,55 @@ async fn test_circuit_create_fast() {
         .send_and_completion(UserControlMsg::Shutdown)
         .await
         .unwrap();
+}
+
+struct ConfigDir {
+    cache: Arc<dyn Send + Sync + CellCache>,
+}
+
+impl AsRef<Self> for ConfigDir {
+    fn as_ref(&self) -> &Self {
+        self
+    }
+}
+
+impl DirConfig for ConfigDir {
+    fn get_cache(&self) -> Arc<dyn Send + Sync + CellCache> {
+        self.cache.clone()
+    }
+}
+
+#[test]
+fn test_circuit_dir() {
+    let cache: Arc<dyn Send + Sync + CellCache> = Arc::<StandardCellCache>::default();
+
+    let mut v = TestController::<DirController<ConfigDir>>::new(
+        ConfigDir {
+            cache: cache.clone(),
+        }
+        .into(),
+        NonZeroU32::new(1).unwrap(),
+        4,
+    );
+
+    let ret = v.process().unwrap();
+    assert_eq!(ret.shutdown, None);
+    info!("time: {:?} timeout: {:?}", v.cur_time(), v.timeout());
+
+    let (layer, cell) = OnionLayerFast::derive_server_cached(
+        &cache.cache(
+            cast(&mut match v.recv_cell() {
+                Some(v) => Cached::map(v, Some),
+                None => cache.cache(None),
+            })
+            .unwrap()
+            .unwrap(),
+        ),
+    )
+    .unwrap();
+    v.send_cell(Cached::map_into(cell));
+
+    let ret = v.process().unwrap();
+    assert_eq!(ret.shutdown, None);
+    info!("time: {:?} timeout: {:?}", v.cur_time(), v.timeout());
 }
