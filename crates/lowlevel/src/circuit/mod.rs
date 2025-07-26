@@ -81,7 +81,8 @@ pub struct CircuitOutput {
 }
 
 impl CircuitOutput {
-    /// Create new [`ChannelOutput`].
+    /// Create new [`CircuitOutput`].
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             timeout: None,
