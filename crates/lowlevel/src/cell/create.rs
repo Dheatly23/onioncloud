@@ -597,7 +597,7 @@ pub struct CreatedFast {
 impl From<CreatedFast> for Cell {
     fn from(v: CreatedFast) -> Cell {
         Cell::from_fixed(
-            CellHeader::new(v.circuit.get(), CreateFast::ID),
+            CellHeader::new(v.circuit.get(), CreatedFast::ID),
             v.into_inner(),
         )
     }

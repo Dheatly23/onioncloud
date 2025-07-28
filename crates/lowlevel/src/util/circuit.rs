@@ -154,7 +154,11 @@ impl<C: CircuitController> TestController<C> {
                 self.timeout = timeout;
 
                 if let shutdown @ Some(_) = shutdown {
-                    return Ok(ProcessedCircuitOutput { shutdown });
+                    return Ok(ProcessedCircuitOutput {
+                        shutdown,
+                        parent_cell_msg_pause,
+                        child_cell_msg_pause,
+                    });
                 } else if self.timeout.is_some()
                     || (!self.pair.recv.is_empty() && !self.parent_cell_msg_pause)
                     || (!cell_msg_block && !self.child_cell_msg_pause)
@@ -164,7 +168,11 @@ impl<C: CircuitController> TestController<C> {
                 }
             }
 
-            return Ok(ProcessedCircuitOutput { shutdown: None });
+            return Ok(ProcessedCircuitOutput {
+                shutdown: None,
+                parent_cell_msg_pause: self.parent_cell_msg_pause,
+                child_cell_msg_pause: self.child_cell_msg_pause,
+            });
         }
     }
 }
@@ -174,6 +182,12 @@ impl<C: CircuitController> TestController<C> {
 pub struct ProcessedCircuitOutput {
     /// [`Some`] if controller request for shutdown and it's reason.
     pub shutdown: Option<DestroyReason>,
+
+    /// `true` if parent cell message is paused.
+    pub parent_cell_msg_pause: bool,
+
+    /// `true` if parent cell message is paused.
+    pub child_cell_msg_pause: bool,
 }
 
 struct TestPair<Cell> {

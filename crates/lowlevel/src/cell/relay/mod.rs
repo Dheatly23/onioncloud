@@ -588,6 +588,54 @@ impl<'a> From<&'a mut RelayWrapper> for &'a mut FixedCell {
     }
 }
 
+/// Helper for wrapping reference to RELAY cell payload.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct RelayRefWrapper([u8; FIXED_CELL_SIZE]);
+
+impl Sealed for RelayRefWrapper {}
+impl RelayLike for RelayRefWrapper {}
+
+impl AsRef<[u8; FIXED_CELL_SIZE]> for RelayRefWrapper {
+    fn as_ref(&self) -> &[u8; FIXED_CELL_SIZE] {
+        &self.0
+    }
+}
+
+impl AsMut<[u8; FIXED_CELL_SIZE]> for RelayRefWrapper {
+    fn as_mut(&mut self) -> &mut [u8; FIXED_CELL_SIZE] {
+        &mut self.0
+    }
+}
+
+impl<'a> From<&'a [u8; FIXED_CELL_SIZE]> for &'a RelayRefWrapper {
+    fn from(v: &'a [u8; FIXED_CELL_SIZE]) -> Self {
+        // SAFETY: RelayRefWrapper can be transparently transmuted to array
+        unsafe { transmute(v) }
+    }
+}
+
+impl<'a> From<&'a mut [u8; FIXED_CELL_SIZE]> for &'a mut RelayRefWrapper {
+    fn from(v: &'a mut [u8; FIXED_CELL_SIZE]) -> Self {
+        // SAFETY: RelayRefWrapper can be transparently transmuted to array
+        unsafe { transmute(v) }
+    }
+}
+
+impl<'a> From<&'a RelayRefWrapper> for &'a [u8; FIXED_CELL_SIZE] {
+    fn from(v: &'a RelayRefWrapper) -> Self {
+        // SAFETY: array can be transparently transmuted to RelayRefWrapper
+        unsafe { transmute(v) }
+    }
+}
+
+impl<'a> From<&'a mut RelayRefWrapper> for &'a mut [u8; FIXED_CELL_SIZE] {
+    fn from(v: &'a mut RelayRefWrapper) -> Self {
+        // SAFETY: array can be transparently transmuted to RelayRefWrapper
+        unsafe { transmute(v) }
+    }
+}
+
 /// Trait to cast from [`Relay`] cell.
 pub trait TryFromRelay: Sized {
     /// Checks cell content, take it, then cast it into `Self`.

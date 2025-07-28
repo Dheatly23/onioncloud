@@ -88,6 +88,7 @@ enum State {
     Shutdown,
 }
 
+#[derive(Debug)]
 pub enum DirControlMsg {
     Shutdown,
     /// Create new stream.
@@ -124,6 +125,16 @@ pub struct DirStreamMeta {
 
     /// New stream data, will be resolved after receiving RELAY_CONNECTED.
     connect_resolve: Option<(NewStreamSender, NewStream<CachedCell>)>,
+}
+
+impl<Cfg> DirController<Cfg> {
+    pub fn is_init(&self) -> bool {
+        matches!(self.state, State::Init(_))
+    }
+
+    pub fn is_shutdown(&self) -> bool {
+        matches!(self.state, State::Shutdown)
+    }
 }
 
 impl<Cfg: 'static + Send + Sync + DirConfig> CircuitController for DirController<Cfg> {
@@ -182,6 +193,7 @@ impl<'a, Cfg>
 {
     type Return = Result<CircuitOutput, errors::DirControllerError>;
 
+    #[instrument(level = "trace", skip_all)]
     fn handle(
         &mut self,
         (input, stream_map): (
@@ -223,6 +235,7 @@ impl<Cfg> Handle<Timeout> for DirController<Cfg> {
 impl<Cfg> Handle<ControlMsg<DirControlMsg>> for DirController<Cfg> {
     type Return = Result<(), errors::DirControllerError>;
 
+    #[instrument(level = "trace", skip_all, fields(msg))]
     fn handle(&mut self, msg: ControlMsg<DirControlMsg>) -> Result<(), errors::DirControllerError> {
         match msg.0 {
             DirControlMsg::Shutdown => {
@@ -230,6 +243,7 @@ impl<Cfg> Handle<ControlMsg<DirControlMsg>> for DirController<Cfg> {
                 Ok(())
             }
             DirControlMsg::NewStream(v) => {
+                debug!("queueing new stream");
                 match &mut self.state {
                     State::Init(v) => &mut v.pending_open,
                     State::Steady(v) => &mut v.pending_open,
@@ -298,7 +312,7 @@ impl InitState {
         }
     }
 
-    #[instrument(level = "debug", skip_all)]
+    #[instrument(level = "debug", skip_all, err)]
     fn handle<'a>(
         &mut self,
         _cfg: &CfgData,
@@ -307,7 +321,7 @@ impl InitState {
         let mut output = CircuitOutput::new();
 
         output
-            .parent_cell_msg_pause(CellMsgPause(true))
+            .parent_cell_msg_pause(CellMsgPause(false))
             .child_cell_msg_pause(CellMsgPause(true));
 
         let timeout = *self
@@ -331,7 +345,7 @@ impl InitState {
         Ok(output)
     }
 
-    #[instrument(level = "debug", skip_all)]
+    #[instrument(level = "debug", skip_all, err)]
     fn handle_cell(
         &mut self,
         cfg: &CfgData,
@@ -342,6 +356,8 @@ impl InitState {
         if let Some(cell) = cast::<CreatedFast>(&mut cell)? {
             let (client, sendme_ty) = self.data.take().expect("client params must exist");
             let layer = client.derive_client(&cfg.cache.cache(cell))?;
+
+            debug!("initialization finished");
 
             return Ok(SteadyState {
                 encrypt: layer.encrypt,
@@ -366,8 +382,11 @@ impl InitState {
                 forward_sendme_digest: VecDeque::new(),
                 backward_sendme_digest: VecDeque::new(),
 
-                last_packet: None,
+                time_data: None,
             });
+        } else if let Some(cell) = cast::<Destroy>(&mut cell)? {
+            warn!(reason = display(cell.display_reason()), "circuit destroyed");
+            return Err(errors::ChannelClosedError.into());
         }
 
         let cell = Cached::transpose(cell).unwrap();
@@ -398,12 +417,17 @@ struct SteadyState {
     forward_sendme_digest: VecDeque<[u8; 20]>,
     backward_sendme_digest: VecDeque<[u8; 20]>,
 
-    last_packet: Option<Instant>,
+    time_data: Option<TimeData>,
+}
+
+struct TimeData {
+    last_packet: Instant,
+    close_scan: Instant,
 }
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const FULL_TIMEOUT: Duration = Duration::from_millis(100);
-const CLOSE_SCAN_TIMEOUT: Duration = Duration::from_secs(5);
+const CLOSE_SCAN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: u8 = 20;
 
 fn update_last_packet(ptr: &mut Instant, input: &CircuitInput<'_, CachedCell>) {
@@ -415,26 +439,50 @@ const FLAG_WRITE: u8 = 1 << 1;
 const FLAG_WRITE_EMPTY: u8 = 1 << 2;
 
 impl SteadyState {
-    #[instrument(level = "debug", skip_all)]
+    #[instrument(level = "debug", skip_all, err)]
     fn handle<'a>(
         &mut self,
         cfg: &CfgData,
         mut input: CircuitInput<'a, CachedCell>,
         stream_map: &'a mut StreamMap,
     ) -> Result<(CircuitOutput, bool), errors::DirControllerError> {
-        let last_packet = self
-            .last_packet
-            .get_or_insert_with(|| input.time() + IDLE_TIMEOUT);
+        let TimeData {
+            last_packet,
+            close_scan,
+        } = self.time_data.get_or_insert_with(|| {
+            let time = input.time();
+            TimeData {
+                last_packet: time + IDLE_TIMEOUT,
+                close_scan: time + CLOSE_SCAN_TIMEOUT,
+            }
+        });
+
         if self.is_timeout && *last_packet <= input.time() {
             info!("circuit idled for 1 minutes, gracefully shutting down");
             let mut out = CircuitOutput::new();
-            out.shutdown(DestroyReason::default());
+            out.shutdown(DestroyReason::Finished);
             return Ok((out, true));
         }
 
         if self.has_new_cell {
             update_last_packet(last_packet, &input);
         }
+
+        // Scan for close circuits
+        if self.is_timeout && *close_scan <= input.time() {
+            for (&id, stream) in stream_map.items() {
+                if !stream.meta.closing && stream.is_closed() {
+                    debug!(id, "stream is closing");
+                    stream.meta.closing = true;
+                    self.pending_close
+                        .push_back((id.try_into().unwrap(), EndReason::Internal));
+                }
+            }
+
+            *close_scan = input.time() + CLOSE_SCAN_TIMEOUT;
+        }
+
+        let mut timeout = (*last_packet).min(*close_scan);
 
         let mut flags = 0u8;
         let mut full_timeout = None;
@@ -458,8 +506,6 @@ impl SteadyState {
             }
         }
 
-        let mut timeout = self.last_packet.unwrap();
-        //timeout = timeout.min(self.close_scan);
         if let Some(t) = full_timeout {
             // Full timeout
             timeout = timeout.min(t);
@@ -472,7 +518,7 @@ impl SteadyState {
         Ok((out, false))
     }
 
-    #[instrument(level = "debug", skip_all)]
+    #[instrument(level = "debug", skip_all, err)]
     fn handle_cell(
         &mut self,
         cfg: &CfgData,
@@ -492,7 +538,7 @@ impl SteadyState {
 
         // Decrypt and check digest cell
         self.encrypt.decrypt_backward((*cell).as_mut())?;
-        let digest = self.digest.unwrap_digest_backward(&mut *cell)?;
+        let digest = self.digest.unwrap_digest_backward((*cell).as_mut())?;
 
         let command = cell.command();
         let stream = cell.stream();
@@ -569,7 +615,7 @@ impl SteadyState {
         Ok(CellMsgPause(self.in_buffer.is_full()))
     }
 
-    #[instrument(level = "debug", skip_all)]
+    #[instrument(level = "debug", skip_all, err)]
     fn handle_stream_cell(
         &mut self,
         cfg: &CfgData,
@@ -743,7 +789,7 @@ fn write_handler(
 ) -> Result<u8, errors::DirControllerError> {
     if let Some(cell) = this.cell_send.take() {
         match input.try_send(cell) {
-            Ok(()) => update_last_packet(this.last_packet.as_mut().unwrap(), input),
+            Ok(()) => update_last_packet(&mut this.time_data.as_mut().unwrap().last_packet, input),
             Err(TrySendError::Full(cell)) => {
                 this.cell_send = Some(cell);
                 return Ok(flags | FLAG_WRITE);
@@ -782,6 +828,8 @@ fn write_handler(
             connect_resolve: None,
         }) {
             Ok((m, v)) => {
+                info!(stream_id = m.id, "opening new directory stream");
+
                 found = Some(
                     cfg.cache.cache(
                         RelayBeginDir::new(cfg.cache.get_cached(), m.id.try_into().unwrap())
@@ -876,7 +924,7 @@ fn write_handler(
     cell.circuit = cfg.circ_id;
 
     // Encrypt and set digest,
-    let digest = this.digest.wrap_digest_forward(&mut *cell);
+    let digest = this.digest.wrap_digest_forward((*cell).as_mut());
     this.encrypt.encrypt_forward((*cell).as_mut())?;
 
     if is_data && this.forward_data_modulo == 0 {
