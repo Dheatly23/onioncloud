@@ -592,7 +592,7 @@ fn check_cert(
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 const FULL_TIMEOUT: Duration = Duration::from_millis(100);
-const CLOSE_SCAN_TIMEOUT: Duration = Duration::from_secs(5);
+const CLOSE_SCAN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: u8 = 20;
 
 fn update_last_packet(ptr: &mut Instant, input: &ChannelInput<'_>) {
