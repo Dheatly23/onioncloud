@@ -33,9 +33,10 @@ use crate::util::{InBuffer, OutBuffer, option_ord_min, print_hex};
 
 type CacheTy = Arc<dyn Send + Sync + CellCache>;
 type CachedCell<C = Cell> = Cached<C, CacheTy>;
-type PendingOpen = VecDeque<Sender<Result<NewStream<CachedCell>, errors::NoFreeCircIDError>>>;
-type StreamMap = CellMap<CachedCell<Cell>, DirStreamMeta>;
-type NewStreamSender = Sender<Result<NewStream<CachedCell>, errors::NoFreeCircIDError>>;
+type PendingOpen =
+    VecDeque<Sender<Result<NewStream<CachedCell<Relay>>, errors::NoFreeCircIDError>>>;
+type StreamMap = CellMap<CachedCell<Relay>, DirStreamMeta>;
+type NewStreamSender = Sender<Result<NewStream<CachedCell<Relay>>, errors::NoFreeCircIDError>>;
 
 /// Trait for [`DirController`] configuration type.
 pub trait DirConfig {
@@ -97,7 +98,7 @@ pub enum DirControlMsg {
 
 impl DirControlMsg {
     pub fn new_stream() -> (
-        Receiver<Result<NewStream<CachedCell>, errors::NoFreeCircIDError>>,
+        Receiver<Result<NewStream<CachedCell<Relay>>, errors::NoFreeCircIDError>>,
         Self,
     ) {
         let (send, recv) = channel();
@@ -124,7 +125,7 @@ pub struct DirStreamMeta {
     backoff_mult: u8,
 
     /// New stream data, will be resolved after receiving RELAY_CONNECTED.
-    connect_resolve: Option<(NewStreamSender, NewStream<CachedCell>)>,
+    connect_resolve: Option<(NewStreamSender, NewStream<CachedCell<Relay>>)>,
 }
 
 impl<Cfg> DirController<Cfg> {
@@ -142,6 +143,7 @@ impl<Cfg: 'static + Send + Sync + DirConfig> CircuitController for DirController
     type Error = errors::DirControllerError;
     type ControlMsg = DirControlMsg;
     type Cell = CachedCell;
+    type StreamCell = CachedCell<Relay>;
     type StreamMeta = DirStreamMeta;
 
     fn new(cfg: Arc<dyn Send + Sync + AsRef<Self::Config>>, circ_id: NonZeroU32) -> Self {
@@ -188,7 +190,7 @@ impl<Cfg: 'static + Send + Sync + DirConfig> CircuitController for DirController
 impl<'a, Cfg>
     Handle<(
         CircuitInput<'a, CachedCell>,
-        &'a mut CellMap<CachedCell, DirStreamMeta>,
+        &'a mut CellMap<CachedCell<Relay>, DirStreamMeta>,
     )> for DirController<Cfg>
 {
     type Return = Result<CircuitOutput, errors::DirControllerError>;
@@ -198,7 +200,7 @@ impl<'a, Cfg>
         &mut self,
         (input, stream_map): (
             CircuitInput<'a, CachedCell>,
-            &'a mut CellMap<CachedCell, DirStreamMeta>,
+            &'a mut CellMap<CachedCell<Relay>, DirStreamMeta>,
         ),
     ) -> Result<CircuitOutput, errors::DirControllerError> {
         match self.state {
@@ -274,12 +276,12 @@ impl<Cfg> Handle<ParentCellMsg<CachedCell>> for DirController<Cfg> {
     }
 }
 
-impl<Cfg> Handle<ChildCellMsg<CachedCell>> for DirController<Cfg> {
+impl<Cfg> Handle<ChildCellMsg<CachedCell<Relay>>> for DirController<Cfg> {
     type Return = Result<CellMsgPause, errors::DirControllerError>;
 
     fn handle(
         &mut self,
-        msg: ChildCellMsg<CachedCell>,
+        msg: ChildCellMsg<CachedCell<Relay>>,
     ) -> Result<CellMsgPause, errors::DirControllerError> {
         match self.state {
             State::Init(_) => {
@@ -545,6 +547,7 @@ impl SteadyState {
         let mut cell = Cached::map(cell, Some);
 
         if stream != 0 {
+            // Stream cell, queue it for streams.
             if self.sendme_ty != SendmeType::Disabled && command == RelayData::ID {
                 // Data-bearing cell, decrement backward data counter.
                 self.backward_data_count = match self.backward_data_count.checked_sub(1) {
@@ -575,36 +578,39 @@ impl SteadyState {
             // RELAY_SENDME, check digest and increment forward data counter.
             let cell = cfg.cache.cache(cell);
 
-            let digest = match cell.data() {
-                None | Some(SendmeData::Unauth) => None,
-                Some(SendmeData::Auth(digest)) => Some(digest),
-            };
-            match (digest, self.backward_sendme_digest.pop_front()) {
-                (_, None) => {
-                    return Err(errors::CircuitProtocolError(
-                        errors::CircuitProtocolInner::UnexpectedSendme,
-                    )
-                    .into());
+            // Only proceed only if sendme handling is enabled.
+            if self.sendme_ty != SendmeType::Disabled {
+                let digest = match cell.data() {
+                    None | Some(SendmeData::Unauth) => None,
+                    Some(SendmeData::Auth(digest)) => Some(digest),
+                };
+                match (digest, self.backward_sendme_digest.pop_front()) {
+                    (_, None) => {
+                        return Err(errors::CircuitProtocolError(
+                            errors::CircuitProtocolInner::UnexpectedSendme,
+                        )
+                        .into());
+                    }
+                    (None, _) => (),
+                    (Some(a), Some(b)) if a == b => (),
+                    (Some(a), Some(b)) => {
+                        debug!(
+                            expect = display(print_hex(&b)),
+                            sent = display(print_hex(&a)),
+                            "SENDME digest mismatch"
+                        );
+                        return Err(errors::CircuitProtocolError(
+                            errors::CircuitProtocolInner::SendmeDigest,
+                        )
+                        .into());
+                    }
                 }
-                (None, _) => (),
-                (Some(a), Some(b)) if a == b => (),
-                (Some(a), Some(b)) => {
-                    debug!(
-                        expect = display(print_hex(&b)),
-                        sent = display(print_hex(&a)),
-                        "SENDME digest mismatch"
-                    );
-                    return Err(errors::CircuitProtocolError(
-                        errors::CircuitProtocolInner::SendmeDigest,
-                    )
-                    .into());
-                }
-            }
 
-            self.forward_data_count = self
-                .forward_data_count
-                .checked_add(100)
-                .expect("token bucket overflow");
+                self.forward_data_count = self
+                    .forward_data_count
+                    .checked_add(100)
+                    .expect("token bucket overflow");
+            }
         }
 
         if let Some(cell) = Cached::transpose(cell) {
@@ -619,20 +625,10 @@ impl SteadyState {
     fn handle_stream_cell(
         &mut self,
         cfg: &CfgData,
-        cell: CachedCell,
+        mut cell: CachedCell<Relay>,
     ) -> Result<CellMsgPause, errors::DirControllerError> {
-        let mut cell = Cached::map(cell, Some);
-
-        let mut cell = if let Some(cell) = cast::<Relay>(&mut cell)? {
-            cell
-        } else if let Some(cell) = cast::<RelayEarly>(&mut cell)? {
-            cell.into()
-        } else {
-            let cell = Cached::transpose(cell).unwrap();
-            return Err(errors::InvalidCellHeader::with_cell(&cell).into());
-        };
         cell.circuit = cfg.circ_id;
-        self.out_buffer.push_back(cfg.cache.cache(cell));
+        self.out_buffer.push_back(cell);
 
         Ok(CellMsgPause(self.out_buffer.is_full()))
     }
@@ -721,6 +717,7 @@ fn read_handler(
                     // Pending RELAY_END cell, clear flag
                     flags &= !FLAG_WRITE_EMPTY;
                 }
+                return Ok(());
             }
 
             if stream.meta.last_full > input.time() {
@@ -732,14 +729,12 @@ fn read_handler(
                 return Ok(());
             };
 
-            match stream.send(Cached::map_into(cell)) {
+            match stream.send(cell) {
                 // Success, decrease backoff
                 Ok(()) => stream.meta.backoff_mult = stream.meta.backoff_mult.saturating_sub(1),
                 // Full, return cell and set last full
                 Err(TrySendError::Full(cell)) => {
-                    **p = Some(Cached::map(cell, |c| {
-                        Some(Relay::from_cell(cfg.circ_id, c.into_fixed().unwrap()))
-                    }));
+                    **p = Some(Cached::map(cell, Some));
 
                     let mut mult = stream.meta.backoff_mult;
                     // Multiply backoff

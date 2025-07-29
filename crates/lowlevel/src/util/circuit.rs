@@ -18,7 +18,7 @@ pub struct TestController<C: CircuitController> {
     timeout: Option<Instant>,
     controller: C,
     ctrl_msgs: Vec<C::ControlMsg>,
-    circ_map: CellMap<C::Cell, C::StreamMeta>,
+    stream_map: CellMap<C::StreamCell, C::StreamMeta>,
     parent_cell_msg_pause: bool,
     child_cell_msg_pause: bool,
 }
@@ -35,7 +35,7 @@ impl<C: CircuitController> TestController<C> {
         linkver: u16,
     ) -> Self {
         let cfg = (*config).as_ref();
-        let circ_map = CellMap::new(C::channel_cap(cfg), C::channel_aggregate_cap(cfg));
+        let stream_map = CellMap::new(C::channel_cap(cfg), C::channel_aggregate_cap(cfg));
 
         let mut controller = C::new(config, circ_id);
         controller.set_linkver(linkver);
@@ -50,7 +50,7 @@ impl<C: CircuitController> TestController<C> {
             time: Instant::now(),
             timeout: None,
             ctrl_msgs: Vec::new(),
-            circ_map,
+            stream_map,
             parent_cell_msg_pause: true,
             child_cell_msg_pause: true,
         }
@@ -62,8 +62,8 @@ impl<C: CircuitController> TestController<C> {
     }
 
     /// Get reference to [`CellMap`].
-    pub fn circ_map(&mut self) -> &mut CellMap<C::Cell, C::StreamMeta> {
-        &mut self.circ_map
+    pub fn stream_map(&mut self) -> &mut CellMap<C::StreamCell, C::StreamMeta> {
+        &mut self.stream_map
     }
 
     /// Get current time.
@@ -128,7 +128,7 @@ impl<C: CircuitController> TestController<C> {
 
             let mut cell_msg_block = false;
             while !self.child_cell_msg_pause {
-                let Ok(m) = self.circ_map.try_recv() else {
+                let Ok(m) = self.stream_map.try_recv() else {
                     cell_msg_block = true;
                     break;
                 };
@@ -146,7 +146,7 @@ impl<C: CircuitController> TestController<C> {
                     child_cell_msg_pause,
                 } = self.controller.handle((
                     CircuitInput::new(self.circ_id, self.time, &mut self.pair),
-                    &mut self.circ_map,
+                    &mut self.stream_map,
                 ))?;
                 empty_handle = true;
                 self.parent_cell_msg_pause = parent_cell_msg_pause;

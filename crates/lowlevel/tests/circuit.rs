@@ -290,8 +290,7 @@ fn test_circuit_dir() {
             ret.parent_cell_msg_pause, ret.child_cell_msg_pause
         );
 
-        let cell = assert_cast::<Relay, _>(recv.try_recv().unwrap());
-        let cell = assert_cast_relay::<RelayData, _>(cell);
+        let cell = assert_cast_relay::<RelayData, _>(recv.try_recv().unwrap());
         assert_eq!(cell.stream, stream_id);
         assert_eq!(cell.data(), DATA);
     }

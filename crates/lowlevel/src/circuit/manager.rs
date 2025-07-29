@@ -391,7 +391,7 @@ struct CircuitFutSteady<'a, R: Runtime, C: CircuitController> {
     circ_id: NonZeroU32,
     #[pin]
     ctrl_recv: RecvStream<'a, C::ControlMsg>,
-    stream_map: CellMap<C::Cell, C::StreamMeta>,
+    stream_map: CellMap<C::StreamCell, C::StreamMeta>,
     send: &'a Sender<C::Cell>,
     #[pin]
     recv: RecvStream<'a, C::Cell>,

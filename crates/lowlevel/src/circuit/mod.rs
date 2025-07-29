@@ -137,7 +137,7 @@ pub struct NewStream<Cell> {
 
 impl<Cell> NewStream<Cell> {
     /// Create `NewStream`.
-    pub fn new(handle: NewHandler<Cell>, input: &CircuitInput<'_, Cell>) -> Self {
+    pub fn new<C>(handle: NewHandler<Cell>, input: &CircuitInput<'_, C>) -> Self {
         Self {
             inner: handle,
             circ_id: input.id(),
