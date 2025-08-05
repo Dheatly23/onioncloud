@@ -97,6 +97,7 @@ pub enum DirControlMsg {
 }
 
 impl DirControlMsg {
+    #[allow(clippy::type_complexity)]
     pub fn new_stream() -> (
         Receiver<Result<NewStream<CachedCell<Relay>>, errors::NoFreeCircIDError>>,
         Self,
@@ -691,7 +692,7 @@ fn read_handler(
             if let Some(cell) = cast_r::<RelayEnd>(cell)? {
                 let reason = cell.reason();
                 debug!(id, reason = display(&reason), "peer is closing stream");
-                match stream.send(cfg.cache.cache(cell.into_relay(cfg.circ_id).into())) {
+                match stream.send(cfg.cache.cache(cell.into_relay(cfg.circ_id))) {
                     Ok(()) => (),
                     Err(TrySendError::Full(_)) => warn!(
                         id,
