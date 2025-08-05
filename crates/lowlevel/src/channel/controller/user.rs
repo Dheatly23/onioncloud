@@ -10,12 +10,11 @@ use std::time::{Duration, Instant};
 use digest::Digest;
 use flume::TrySendError;
 use futures_channel::oneshot::{Receiver, Sender, channel};
-use scopeguard::guard;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tracing::{debug, error, info, instrument, trace, warn};
 
-use crate::cache::{Cached, CellCache, CellCacheExt, cast};
+use crate::cache::{Cached, CellCache, CellCacheExt};
 use crate::cell::auth::AuthChallenge;
 use crate::cell::certs::Certs;
 use crate::cell::create::Create2;
@@ -25,7 +24,7 @@ use crate::cell::netinfo::Netinfo;
 use crate::cell::padding::{Padding, VPadding};
 use crate::cell::versions::Versions;
 use crate::cell::writer::CellWriter;
-use crate::cell::{Cell, CellHeader, CellLike, FixedCell};
+use crate::cell::{Cell, CellHeader, CellLike, FixedCell, cast};
 use crate::channel::controller::ChannelController;
 use crate::channel::{ChannelConfig, ChannelInput, ChannelOutput, NewCircuit};
 use crate::crypto::cert::{UnverifiedEdCert, UnverifiedRsaCert, extract_rsa_from_x509};
@@ -155,8 +154,8 @@ struct SteadyState {
     cell_read: Reader,
     cell_write: CellWriter<CachedCell>,
 
-    in_buffer: InBuffer<CachedCell<Option<Cell>>>,
-    out_buffer: OutBuffer<CachedCell>,
+    in_buffer: InBuffer<Cell>,
+    out_buffer: OutBuffer<Cell>,
 
     pending_open: VecDeque<Sender<Result<NewCircuit<CachedCell>, errors::NoFreeCircIDError>>>,
     pending_close: VecDeque<(NonZeroU32, DestroyReason)>,
@@ -180,6 +179,15 @@ pub struct CircuitMeta {
     /// Every time it succeed, reduce backoff by 1.
     /// Backoff is clamped to MAX_BACKOFF.
     backoff_mult: u8,
+}
+
+impl<Cfg> Drop for UserController<Cfg> {
+    fn drop(&mut self) {
+        if let State::Steady(s) = &mut self.state {
+            s.in_buffer.discard_all(&self.link_cfg.cache);
+            s.out_buffer.discard_all(&self.link_cfg.cache);
+        }
+    }
 }
 
 impl<Cfg: 'static + UserConfig + Send + Sync> ChannelController for UserController<Cfg> {
@@ -316,7 +324,7 @@ impl InitState {
                     return Ok(Break(()));
                 };
                 update_last_packet(last_packet, input);
-                let mut cell = link_cfg.cache.cache(Some(cell));
+                let mut cell = link_cfg.cache.cache_b(Some(cell));
 
                 match state {
                     ConfigReadState::Versions => {
@@ -418,7 +426,7 @@ impl InitState {
                     }
                     ConfigReadState::Netinfo => {
                         if let Some(cell) = cast::<Netinfo>(&mut cell)? {
-                            let cell = link_cfg.cache.cache(cell);
+                            let cell = link_cfg.cache.cache_b(cell);
                             let peer_addr = cell.peer_addr();
 
                             let Some(peer_addr) = peer_addr else {
@@ -693,7 +701,7 @@ impl SteadyState {
         &mut self,
         cell: CachedCell,
     ) -> Result<CellMsgPause, errors::UserControllerError> {
-        self.out_buffer.push_back(cell);
+        self.out_buffer.push_back(Cached::into_inner(cell));
         Ok(CellMsgPause(self.out_buffer.is_full()))
     }
 }
@@ -718,14 +726,16 @@ fn read_handler(
         };
         if cell.circuit != 0 {
             update_last_packet(last_packet, input);
-            this.in_buffer.push(cfg.cache.cache(Some(cell)));
+            this.in_buffer.push(cell);
             process_in = true;
             continue;
         }
 
-        let mut cell = cfg.cache.cache(Some(cell));
+        let mut cell = cfg.cache.cache_b(Some(cell));
         // TODO: Handle padding
-        cast::<Padding>(&mut cell)?;
+        if let Some(c) = cast::<Padding>(&mut cell)? {
+            cfg.cache.discard(c);
+        }
         cast::<VPadding>(&mut cell)?;
         cast::<Versions>(&mut cell)?;
 
@@ -741,15 +751,7 @@ fn read_handler(
     // Should only be done if timeout or in buffer has new data.
     if process_in {
         this.in_buffer.scan_pop(|p| {
-            let mut p = guard(p, |p| match p {
-                Some(v) if v.is_none() => *p = None,
-                _ => (),
-            });
-            let Some(cell) = p.as_mut() else {
-                return Ok(());
-            };
-
-            if let Some(cell) = cast::<Create2>(cell)? {
+            if let Some(cell) = cast::<Create2>(p)? {
                 let id = cell.circuit;
                 cfg.cache.cache_cell(cell.into());
                 // User controller cannot create circuit by peer
@@ -759,24 +761,28 @@ fn read_handler(
                 return Ok(());
             }
 
-            let Some(c) = cell.as_ref() else {
+            let Some(cell) = p else {
                 return Ok(());
             };
-            let id = NonZeroU32::new(c.circuit).expect("circuit ID should not be zero");
+            let id = NonZeroU32::new(cell.circuit).expect("circuit ID should not be zero");
             let Some(circ) = circ_map.get(id) else {
                 // Discard all unmapped circuit ID.
-                debug!(id, command = c.command, "discard unmapped circuit ID cell");
-                **p = None;
+                debug!(
+                    id,
+                    command = cell.command,
+                    "discard unmapped circuit ID cell"
+                );
+                *p = None;
                 return Ok(());
             };
             if circ.meta.closing {
                 // Circuit closing, discard cell
-                debug!(id, command = c.command, "discard closing circuit cell");
-                **p = None;
+                debug!(id, command = cell.command, "discard closing circuit cell");
+                *p = None;
                 return Ok(());
             }
 
-            if let Some(cell) = cast::<Destroy>(cell)? {
+            if let Some(cell) = cast::<Destroy>(p)? {
                 let reason = cell.display_reason();
                 debug!(id, reason = display(reason), "peer is closing circuit");
                 match circ.send(cfg.cache.cache(cell.into())) {
@@ -798,16 +804,16 @@ fn read_handler(
                 return Ok(());
             }
 
-            let Some(Some(cell)) = p.take().map(Cached::transpose) else {
+            let Some(cell) = p.take() else {
                 return Ok(());
             };
 
-            match circ.send(cell) {
+            match circ.send(cfg.cache.cache(cell)) {
                 // Success, decrease backoff
                 Ok(()) => circ.meta.backoff_mult = circ.meta.backoff_mult.saturating_sub(1),
                 // Full, return cell and set last full
                 Err(TrySendError::Full(cell)) => {
-                    **p = Some(Cached::map(cell, Some));
+                    *p = Some(Cached::into_inner(cell));
 
                     let mut mult = circ.meta.backoff_mult;
                     // Multiply backoff
@@ -896,7 +902,7 @@ fn write_handler(
                 // Unmapped circuit ID. Probably non-graceful shutdown.
                 continue;
             }
-            let mut cell = Cached::map(cell, Some);
+            let mut cell = cfg.cache.cache(Some(cell));
 
             found = if let Some(cell) = cast::<Destroy>(&mut cell)? {
                 let cell = cfg.cache.cache(cell);

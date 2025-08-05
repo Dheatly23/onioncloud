@@ -1,5 +1,7 @@
 use std::io::{Error as IoError, ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
+use std::mem::take;
 
+use crate::cache::{Cachable, CellCache, CellCacheExt};
 use crate::errors;
 
 /// Helper for read buffers.
@@ -466,6 +468,16 @@ impl<T> InBuffer<T> {
     }
 }
 
+impl<T: Cachable> InBuffer<T> {
+    /// Clears and discards all cells.
+    pub fn discard_all(&mut self, cache: &impl CellCache) {
+        let Self { buffer, .. } = take(self);
+        for v in buffer.into_iter().flatten() {
+            cache.discard(v);
+        }
+    }
+}
+
 /// FIFO and LIFO buffer.
 ///
 /// Data is stored as fixed-size deque with maximum size of 64.
@@ -562,6 +574,16 @@ impl<T> OutBuffer<T> {
         debug_assert!(self.len < 64);
 
         ret
+    }
+}
+
+impl<T: Cachable> OutBuffer<T> {
+    /// Clears and discards all cells.
+    pub fn discard_all(&mut self, cache: &impl CellCache) {
+        let Self { buffer, .. } = take(self);
+        for v in buffer.into_iter().flatten() {
+            cache.discard(v);
+        }
     }
 }
 

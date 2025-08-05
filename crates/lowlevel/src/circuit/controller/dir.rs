@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 
 use flume::TrySendError;
 use futures_channel::oneshot::{Receiver, Sender, channel};
-use scopeguard::guard;
 use tracing::{debug, info, instrument, trace, warn};
 
 use crate::cache::{Cached, CellCache, CellCacheExt, cast};
@@ -127,6 +126,16 @@ pub struct DirStreamMeta {
 
     /// New stream data, will be resolved after receiving RELAY_CONNECTED.
     connect_resolve: Option<(NewStreamSender, NewStream<CachedCell<Relay>>)>,
+}
+
+impl<Cfg> Drop for DirController<Cfg> {
+    fn drop(&mut self) {
+        if let State::Steady(s) = &mut self.state {
+            s.in_buffer.discard_all(&self.cfg.cache);
+            s.out_buffer.discard_all(&self.cfg.cache);
+            self.cfg.cache.discard(s.cell_send.take());
+        }
+    }
 }
 
 impl<Cfg> DirController<Cfg> {
@@ -358,7 +367,7 @@ impl InitState {
 
         if let Some(cell) = cast::<CreatedFast>(&mut cell)? {
             let (client, sendme_ty) = self.data.take().expect("client params must exist");
-            let layer = client.derive_client(&cfg.cache.cache(cell))?;
+            let layer = client.derive_client(&cfg.cache.cache_b(cell))?;
 
             debug!("initialization finished");
 
@@ -402,9 +411,9 @@ struct SteadyState {
     digest: CircuitDigest,
     early_cnt: u8,
 
-    in_buffer: InBuffer<CachedCell<Option<Relay>>>,
-    out_buffer: OutBuffer<CachedCell<Relay>>,
-    cell_send: Option<CachedCell>,
+    in_buffer: InBuffer<Relay>,
+    out_buffer: OutBuffer<Relay>,
+    cell_send: Option<Cell>,
     pause_out_buffer: bool,
 
     pending_close: VecDeque<(NonZeroU16, EndReason)>,
@@ -537,7 +546,7 @@ impl SteadyState {
             let cell = Cached::transpose(cell).unwrap();
             return Err(errors::InvalidCellHeader::with_cell(&cell).into());
         };
-        let mut cell = cfg.cache.cache(cell);
+        let mut cell = cfg.cache.cache_b(cell);
 
         // Decrypt and check digest cell
         self.encrypt.decrypt_backward((*cell).as_mut())?;
@@ -545,7 +554,6 @@ impl SteadyState {
 
         let command = cell.command();
         let stream = cell.stream();
-        let mut cell = Cached::map(cell, Some);
 
         if stream != 0 {
             // Stream cell, queue it for streams.
@@ -570,53 +578,56 @@ impl SteadyState {
                 }
             }
 
-            self.in_buffer.push(cfg.cache.cache(cell.take()));
+            self.in_buffer.push(Cached::into_inner(cell));
             self.has_new_cell = true;
-        } else if let Some(cell) = cast_r::<RelayDrop>(&mut cell)? {
-            // RELAY_DROP is for long-range padding
-            cfg.cache.discard(cell);
-        } else if let Some(cell) = cast_r::<RelaySendme>(&mut cell)? {
-            // RELAY_SENDME, check digest and increment forward data counter.
-            let cell = cfg.cache.cache(cell);
+        } else {
+            let mut cell = Cached::map(cell, Some);
+            if let Some(cell) = cast_r::<RelayDrop>(&mut cell)? {
+                // RELAY_DROP is for long-range padding
+                cfg.cache.discard(cell);
+            } else if let Some(cell) = cast_r::<RelaySendme>(&mut cell)? {
+                // RELAY_SENDME, check digest and increment forward data counter.
+                let cell = cfg.cache.cache_b(cell);
 
-            // Only proceed only if sendme handling is enabled.
-            if self.sendme_ty != SendmeType::Disabled {
-                let digest = match cell.data() {
-                    None | Some(SendmeData::Unauth) => None,
-                    Some(SendmeData::Auth(digest)) => Some(digest),
-                };
-                match (digest, self.backward_sendme_digest.pop_front()) {
-                    (_, None) => {
-                        return Err(errors::CircuitProtocolError(
-                            errors::CircuitProtocolInner::UnexpectedSendme,
-                        )
-                        .into());
+                // Only proceed only if sendme handling is enabled.
+                if self.sendme_ty != SendmeType::Disabled {
+                    let digest = match cell.data() {
+                        None | Some(SendmeData::Unauth) => None,
+                        Some(SendmeData::Auth(digest)) => Some(digest),
+                    };
+                    match (digest, self.backward_sendme_digest.pop_front()) {
+                        (_, None) => {
+                            return Err(errors::CircuitProtocolError(
+                                errors::CircuitProtocolInner::UnexpectedSendme,
+                            )
+                            .into());
+                        }
+                        (None, _) => (),
+                        (Some(a), Some(b)) if a == b => (),
+                        (Some(a), Some(b)) => {
+                            debug!(
+                                expect = display(print_hex(&b)),
+                                sent = display(print_hex(&a)),
+                                "SENDME digest mismatch"
+                            );
+                            return Err(errors::CircuitProtocolError(
+                                errors::CircuitProtocolInner::SendmeDigest,
+                            )
+                            .into());
+                        }
                     }
-                    (None, _) => (),
-                    (Some(a), Some(b)) if a == b => (),
-                    (Some(a), Some(b)) => {
-                        debug!(
-                            expect = display(print_hex(&b)),
-                            sent = display(print_hex(&a)),
-                            "SENDME digest mismatch"
-                        );
-                        return Err(errors::CircuitProtocolError(
-                            errors::CircuitProtocolInner::SendmeDigest,
-                        )
-                        .into());
-                    }
+
+                    self.forward_data_count = self
+                        .forward_data_count
+                        .checked_add(100)
+                        .expect("token bucket overflow");
                 }
-
-                self.forward_data_count = self
-                    .forward_data_count
-                    .checked_add(100)
-                    .expect("token bucket overflow");
             }
-        }
 
-        if let Some(cell) = Cached::transpose(cell) {
-            // NOTE: Potential protocol violation
-            trace!("unhandled cell with command {} received", cell.command());
+            if let Some(cell) = Cached::transpose(cell) {
+                // NOTE: Potential protocol violation
+                trace!("unhandled cell with command {} received", cell.command());
+            }
         }
 
         Ok(CellMsgPause(self.in_buffer.is_full()))
@@ -629,7 +640,7 @@ impl SteadyState {
         mut cell: CachedCell<Relay>,
     ) -> Result<CellMsgPause, errors::DirControllerError> {
         cell.circuit = cfg.circ_id;
-        self.out_buffer.push_back(cell);
+        self.out_buffer.push_back(Cached::into_inner(cell));
 
         Ok(CellMsgPause(self.out_buffer.is_full()))
     }
@@ -649,18 +660,10 @@ fn read_handler(
     // Should only be done if timeout or in buffer has new data.
     if take(&mut this.is_timeout) | take(&mut this.has_new_cell) {
         this.in_buffer.scan_pop(|p| {
-            let mut p = guard(p, |p| match p {
-                Some(v) if v.is_none() => *p = None,
-                _ => (),
-            });
-            let Some(cell) = p.as_mut() else {
-                return Ok(());
-            };
-
-            let is_begin = if let Some(cell) = cast_r::<RelayBegin>(cell)? {
+            let is_begin = if let Some(cell) = cast_r::<RelayBegin>(p)? {
                 cfg.cache.discard(cell);
                 true
-            } else if let Some(cell) = cast_r::<RelayBeginDir>(cell)? {
+            } else if let Some(cell) = cast_r::<RelayBeginDir>(p)? {
                 cfg.cache.discard(cell);
                 true
             } else {
@@ -672,24 +675,28 @@ fn read_handler(
                 );
             }
 
-            let Some(c) = cell.as_ref() else {
+            let Some(cell) = p else {
                 return Ok(());
             };
-            let id = NonZeroU16::new(c.stream()).expect("stream ID should not be zero");
+            let id = NonZeroU16::new(cell.stream()).expect("stream ID should not be zero");
             let Some(stream) = stream_map.get(id.into()) else {
                 // Discard all unmapped stream ID.
-                debug!(id, command = c.command(), "discard unmapped stream ID cell");
-                **p = None;
+                debug!(
+                    id,
+                    command = cell.command(),
+                    "discard unmapped stream ID cell"
+                );
+                *p = None;
                 return Ok(());
             };
             if stream.meta.closing {
                 // Stream closing, discard cell
-                debug!(id, command = c.command(), "discard closing stream cell");
-                **p = None;
+                debug!(id, command = cell.command(), "discard closing stream cell");
+                *p = None;
                 return Ok(());
             }
 
-            if let Some(cell) = cast_r::<RelayEnd>(cell)? {
+            if let Some(cell) = cast_r::<RelayEnd>(p)? {
                 let reason = cell.reason();
                 debug!(id, reason = display(&reason), "peer is closing stream");
                 match stream.send(cfg.cache.cache(cell.into_relay(cfg.circ_id))) {
@@ -705,7 +712,7 @@ fn read_handler(
                 stream_map.remove(id.into());
                 return Ok(());
             }
-            if let Some(cell) = cast_r::<RelayConnected>(cell)? {
+            if let Some(cell) = cast_r::<RelayConnected>(p)? {
                 cfg.cache.discard(cell);
                 trace!(id, "directory stream connected");
 
@@ -726,16 +733,16 @@ fn read_handler(
                 return Ok(());
             }
 
-            let Some(Some(cell)) = p.take().map(Cached::transpose) else {
+            let Some(cell) = p.take() else {
                 return Ok(());
             };
 
-            match stream.send(cell) {
+            match stream.send(cfg.cache.cache(cell)) {
                 // Success, decrease backoff
                 Ok(()) => stream.meta.backoff_mult = stream.meta.backoff_mult.saturating_sub(1),
                 // Full, return cell and set last full
                 Err(TrySendError::Full(cell)) => {
-                    **p = Some(Cached::map(cell, Some));
+                    *p = Some(Cached::into_inner(cell));
 
                     let mut mult = stream.meta.backoff_mult;
                     // Multiply backoff
@@ -784,10 +791,10 @@ fn write_handler(
     flags: u8,
 ) -> Result<u8, errors::DirControllerError> {
     if let Some(cell) = this.cell_send.take() {
-        match input.try_send(cell) {
+        match input.try_send(cfg.cache.cache(cell)) {
             Ok(()) => update_last_packet(&mut this.time_data.as_mut().unwrap().last_packet, input),
             Err(TrySendError::Full(cell)) => {
-                this.cell_send = Some(cell);
+                this.cell_send = Some(Cached::into_inner(cell));
                 return Ok(flags | FLAG_WRITE);
             }
             Err(TrySendError::Disconnected(_)) => {
@@ -797,7 +804,7 @@ fn write_handler(
         }
     }
 
-    let mut found: Option<CachedCell<Relay>> = None;
+    let mut found: Option<Relay> = None;
 
     if let Some((id, reason)) = this.pending_close.pop_front()
         && let Some(meta) = stream_map.remove(id.into())
@@ -805,10 +812,7 @@ fn write_handler(
         debug_assert!(meta.closing);
 
         // Prepend RELAY_END cell
-        found = Some(
-            cfg.cache
-                .cache(RelayEnd::new(cfg.cache.get_cached(), id, reason).into_relay(cfg.circ_id)),
-        );
+        found = Some(RelayEnd::new(cfg.cache.get_cached(), id, reason).into_relay(cfg.circ_id));
     }
 
     if found.is_none()
@@ -827,10 +831,8 @@ fn write_handler(
                 info!(stream_id = m.id, "opening new directory stream");
 
                 found = Some(
-                    cfg.cache.cache(
-                        RelayBeginDir::new(cfg.cache.get_cached(), m.id.try_into().unwrap())
-                            .into_relay(cfg.circ_id),
-                    ),
+                    RelayBeginDir::new(cfg.cache.get_cached(), m.id.try_into().unwrap())
+                        .into_relay(cfg.circ_id),
                 );
 
                 // Store handle to be resolved later.
@@ -852,10 +854,7 @@ fn write_handler(
         }
     {
         // Prepend RELAY_SENDME cell
-        found =
-            Some(cfg.cache.cache(
-                RelaySendme::from_data(cfg.cache.get_cached(), data).into_relay(cfg.circ_id),
-            ));
+        found = Some(RelaySendme::from_data(cfg.cache.get_cached(), data).into_relay(cfg.circ_id));
 
         this.backward_data_count = this
             .backward_data_count
@@ -876,17 +875,16 @@ fn write_handler(
             // Unmapped stream ID. Probably non-graceful shutdown.
             continue;
         }
-        let mut cell = Cached::map(cell, Some);
+        let mut cell = Some(cell);
 
         found = if let Some(cell) = cast_r::<RelayEnd>(&mut cell)? {
-            let cell = cfg.cache.cache(cell);
             if stream_map.remove(id.into()).is_none() {
                 continue;
             }
 
-            Some(Cached::map(cell, |cell| cell.into_relay(cfg.circ_id)))
+            Some(cell.into_relay(cfg.circ_id))
         } else {
-            Cached::transpose(cell)
+            cell
         };
     }
 
@@ -920,8 +918,8 @@ fn write_handler(
     cell.circuit = cfg.circ_id;
 
     // Encrypt and set digest,
-    let digest = this.digest.wrap_digest_forward((*cell).as_mut());
-    this.encrypt.encrypt_forward((*cell).as_mut())?;
+    let digest = this.digest.wrap_digest_forward(cell.as_mut());
+    this.encrypt.encrypt_forward(cell.as_mut())?;
 
     if is_data && this.forward_data_modulo == 0 {
         // Every 100 decrement, send a SENDME cell.
@@ -929,8 +927,8 @@ fn write_handler(
     }
 
     this.cell_send = Some(match this.early_cnt {
-        1.. => Cached::map_into(Cached::map_into::<RelayEarly>(cell)),
-        0 => Cached::map_into(cell),
+        1.. => RelayEarly::from(cell).into(),
+        0 => cell.into(),
     });
     this.early_cnt = this.early_cnt.saturating_sub(1);
 

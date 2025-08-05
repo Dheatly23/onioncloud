@@ -114,8 +114,7 @@ impl DirStream {
         cell: RelayEnd,
         n: usize,
     ) -> Poll<IoResult<()>> {
-        let cache: &(dyn Send + Sync + CellCache) = &self.cache;
-        let cell = (&cache).cache(cell);
+        let cell = self.cache.cache_b(cell);
         let reason = cell.reason();
         drop(cell);
         info!(reason = display(reason), "stream closed");
@@ -190,7 +189,7 @@ impl AsyncRead for DirStream {
 
             if let Some(cell) = cast::<RelayData>(&mut cell).map_err(map_io_err)? {
                 // RELAY_DATA cell
-                let cell = (&cache).cache(cell);
+                let cell = cache.cache_b(cell);
                 let data = cell.data();
 
                 n += if buf.len() >= data.len() {
@@ -264,7 +263,7 @@ impl AsyncBufRead for DirStream {
 
             if let Some(cell) = cast::<RelayData>(&mut cell).map_err(map_io_err)? {
                 // RELAY_DATA cell
-                let cell = (&cache).cache(cell);
+                let cell = cache.cache_b(cell);
                 let data = cell.data();
 
                 // Copy data into buffer

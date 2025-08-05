@@ -50,7 +50,7 @@ where
 pub trait CellCacheExt: CellCache {
     /// Helper function to cache a cell.
     ///
-    /// Note that it requires [`Self`] to be [`Clone`], which is **not recommended** to be implemented.
+    /// Note that it requires `Self` to be [`Clone`], which is **not recommended** to be implemented.
     /// In effect, only [`Arc`](`std::sync::Arc`) wrapped cache can use it.
     ///
     /// # Example
@@ -70,6 +70,28 @@ pub trait CellCacheExt: CellCache {
         Self: Clone,
     {
         Cached::new(self.clone(), cell)
+    }
+
+    /// Helper function to cache a cell.
+    ///
+    /// Unlike [`CellCacheExt::cache`], it did not require `Self` to be [`Clone`].
+    /// Great if you don't want overhead of cloning.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::cell::FixedCell;
+    /// use onioncloud_lowlevel::cell::padding::Padding;
+    /// use onioncloud_lowlevel::cache::{CellCache, CellCacheExt, StandardCellCache};
+    ///
+    /// let cache = StandardCellCache::default();
+    /// let cell = cache.cache_b(FixedCell::default());
+    /// ```
+    fn cache_b<T>(&self, cell: T) -> Cached<T, &Self>
+    where
+        T: Cachable,
+    {
+        Cached::new(self, cell)
     }
 
     /// Discard any value that implements [`Cachable`].
