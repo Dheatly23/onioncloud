@@ -888,9 +888,12 @@ fn write_handler(
 
         let mut found: Option<CachedCell> = None;
 
-        if let Some((id, reason)) = this.pending_close.pop_front()
-            && let Some(meta) = circ_map.remove(id)
+        while found.is_none()
+            && let Some((id, reason)) = this.pending_close.pop_front()
         {
+            let Some(meta) = circ_map.remove(id) else {
+                continue;
+            };
             debug_assert!(meta.closing);
 
             // Prepend DESTROY cell
@@ -914,6 +917,7 @@ fn write_handler(
             found = if let Some(cell) = cast::<Destroy>(&mut cell)? {
                 let cell = cfg.cache.cache(cell);
                 if circ_map.remove(cell.circuit).is_none() {
+                    // No need to scan pending close because it should be empty by now.
                     continue;
                 }
 

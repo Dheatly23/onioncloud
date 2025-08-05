@@ -813,16 +813,20 @@ fn write_handler(
 
     let mut found: Option<Relay> = None;
 
-    if let Some((id, reason)) = this.pending_close.pop_front()
-        && let Some(meta) = stream_map.remove(id.into())
+    while found.is_none()
+        && let Some((id, reason)) = this.pending_close.pop_front()
     {
+        let Some(meta) = stream_map.remove(id.into()) else {
+            continue;
+        };
         debug_assert!(meta.closing);
 
         // Prepend RELAY_END cell
         found = Some(RelayEnd::new(cfg.cache.get_cached(), id, reason).into_relay(cfg.circ_id));
+        break;
     }
 
-    if found.is_none()
+    while found.is_none()
         && let Some(send) = this.pending_open.pop_front()
     {
         // Open stream and prepend RELAY_BEGIN_DIR cell
@@ -852,7 +856,7 @@ fn write_handler(
         }
     }
 
-    if found.is_none()
+    while found.is_none()
         && let Some(digest) = this.forward_sendme_digest.pop_front()
         && let Some(data) = match this.sendme_ty {
             SendmeType::Disabled => None,
@@ -886,6 +890,7 @@ fn write_handler(
 
         found = if let Some(cell) = cast_r::<RelayEnd>(&mut cell)? {
             if stream_map.remove(id.into()).is_none() {
+                // No need to scan pending close because it should be empty by now.
                 continue;
             }
 
