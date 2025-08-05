@@ -6,9 +6,9 @@ use std::task::{Context, Poll, Waker};
 
 use futures_channel::oneshot::Receiver;
 
-use onioncloud_lowlevel::cache::{Cachable, Cached, CellCache, CellCacheExt, cast};
+use onioncloud_lowlevel::cache::{Cachable, Cached, CellCache, CellCacheExt};
 use onioncloud_lowlevel::cell::relay::{Relay, RelayLike, TryFromRelay, cast as cast_relay};
-use onioncloud_lowlevel::cell::{Cell, TryFromCell};
+use onioncloud_lowlevel::cell::{Cell, TryFromCell, cast};
 use onioncloud_lowlevel::crypto::relay::{RelayId, from_str as relay_from_str};
 
 pub(crate) fn get_relay_data() -> (RelayId, Vec<SocketAddr>) {

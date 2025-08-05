@@ -9,8 +9,7 @@ use flume::TrySendError;
 use futures_channel::oneshot::{Receiver, Sender, channel};
 use tracing::{debug, info, instrument, trace, warn};
 
-use crate::cache::{Cached, CellCache, CellCacheExt, cast};
-use crate::cell::Cell;
+use crate::cache::{Cached, CellCache, CellCacheExt};
 use crate::cell::create::CreatedFast;
 use crate::cell::destroy::{Destroy, DestroyReason};
 use crate::cell::relay::begin::RelayBegin;
@@ -21,6 +20,7 @@ use crate::cell::relay::drop::RelayDrop;
 use crate::cell::relay::end::{EndReason, RelayEnd};
 use crate::cell::relay::sendme::{RelaySendme, SendmeData};
 use crate::cell::relay::{IntoRelay, Relay, RelayEarly, RelayLike, cast as cast_r};
+use crate::cell::{Cell, cast};
 use crate::circuit::controller::CircuitController;
 use crate::circuit::{CircuitInput, CircuitOutput, NewStream};
 use crate::crypto::onion::{CircuitDigest, OnionLayer, OnionLayer128, OnionLayerFast, RelayDigest};
@@ -697,9 +697,11 @@ fn read_handler(
             }
 
             if let Some(cell) = cast_r::<RelayEnd>(p)? {
+                // RELAY_END cell received, force closing stream.
+                let cell = cfg.cache.cache(cell);
                 let reason = cell.reason();
                 debug!(id, reason = display(&reason), "peer is closing stream");
-                match stream.send(cfg.cache.cache(cell.into_relay(cfg.circ_id))) {
+                match stream.send(Cached::map(cell, |c| c.into_relay(cfg.circ_id))) {
                     Ok(()) => (),
                     Err(TrySendError::Full(_)) => warn!(
                         id,
@@ -709,7 +711,12 @@ fn read_handler(
                     // Stream is closing while peer is closing.
                     Err(TrySendError::Disconnected(_)) => (),
                 }
+
                 stream_map.remove(id.into());
+
+                // Scan pending close to ensure we don't double close.
+                this.pending_close.retain(|(id_, _)| *id_ != id);
+
                 return Ok(());
             }
             if let Some(cell) = cast_r::<RelayConnected>(p)? {

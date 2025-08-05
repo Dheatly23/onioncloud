@@ -9,8 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering::*};
 
 use crossbeam_queue::ArrayQueue;
 
-use crate::cell::{Cell, FixedCell, TryFromCell};
-use crate::errors;
+use crate::cell::FixedCell;
 
 /// Cell cache provider.
 ///
@@ -480,13 +479,6 @@ where
         let (cell, cache) = Self::decompose(this);
         Some(Cached::new(cache, cell?))
     }
-}
-
-/// Similiar to [`crate::cell::cast`], but cached version.
-pub fn cast<T: TryFromCell>(
-    cell: &mut Cached<Option<Cell>, impl CellCache>,
-) -> Result<Option<T>, errors::CellFormatError> {
-    T::try_from_cell(&mut cell.cell)
 }
 
 #[cfg(test)]

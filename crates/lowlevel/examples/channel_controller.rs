@@ -11,14 +11,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Error as AnyError, Result as AnyResult, bail};
 use digest::Digest;
-use onioncloud_lowlevel::cache::{Cached, CellCache, CellCacheExt, StandardCellCache, cast};
+use onioncloud_lowlevel::cache::{Cached, CellCache, CellCacheExt, StandardCellCache};
 use onioncloud_lowlevel::cell::auth::AuthChallenge;
 use onioncloud_lowlevel::cell::certs::Certs;
 use onioncloud_lowlevel::cell::dispatch::{CellReader, CellType, WithCellConfig};
 use onioncloud_lowlevel::cell::netinfo::Netinfo;
 use onioncloud_lowlevel::cell::versions::Versions;
 use onioncloud_lowlevel::cell::writer::CellWriter;
-use onioncloud_lowlevel::cell::{Cell, CellHeader, CellLike, FixedCell};
+use onioncloud_lowlevel::cell::{Cell, CellHeader, CellLike, FixedCell, cast};
 use onioncloud_lowlevel::channel::controller::ChannelController;
 use onioncloud_lowlevel::channel::manager::ChannelManager;
 use onioncloud_lowlevel::channel::{ChannelConfig, ChannelInput, ChannelOutput};

@@ -783,9 +783,11 @@ fn read_handler(
             }
 
             if let Some(cell) = cast::<Destroy>(p)? {
+                // DESTROY cell received, force closing circuit.
+                let cell = cfg.cache.cache(cell);
                 let reason = cell.display_reason();
                 debug!(id, reason = display(reason), "peer is closing circuit");
-                match circ.send(cfg.cache.cache(cell.into())) {
+                match circ.send(Cached::map_into(cell)) {
                     Ok(()) => (),
                     Err(TrySendError::Full(_)) => warn!(
                         id,
@@ -795,7 +797,12 @@ fn read_handler(
                     // Circuit is closing while peer is closing.
                     Err(TrySendError::Disconnected(_)) => (),
                 }
+
                 circ_map.remove(id);
+
+                // Scan pending close to ensure we don't double close.
+                this.pending_close.retain(|(id_, _)| *id_ != id);
+
                 return Ok(());
             }
 
