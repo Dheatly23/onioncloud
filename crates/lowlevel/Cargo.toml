@@ -18,7 +18,6 @@ futures-channel.workspace = true
 futures-core.workspace = true
 futures-io.workspace = true
 futures-sink.workspace = true
-futures-util.workspace = true
 hkdf.workspace = true
 hmac.workspace = true
 memchr.workspace = true
@@ -41,6 +40,12 @@ x25519-dalek.workspace = true
 workspace = true
 features = [
   "async",
+]
+
+[dependencies.futures-util]
+workspace = true
+features = [
+  "io",
 ]
 
 [dependencies.tokio]

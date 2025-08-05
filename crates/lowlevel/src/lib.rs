@@ -6,6 +6,7 @@ pub mod crypto;
 pub mod errors;
 pub mod linkver;
 pub mod runtime;
+pub mod stream;
 pub mod util;
 
 pub(crate) mod private {
