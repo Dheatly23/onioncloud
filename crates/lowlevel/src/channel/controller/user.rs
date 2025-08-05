@@ -324,7 +324,7 @@ impl InitState {
                     return Ok(Break(()));
                 };
                 update_last_packet(last_packet, input);
-                let mut cell = link_cfg.cache.cache_b(Some(cell));
+                let mut cell = (*link_cfg.cache).cache_b(Some(cell));
 
                 match state {
                     ConfigReadState::Versions => {
@@ -426,7 +426,7 @@ impl InitState {
                     }
                     ConfigReadState::Netinfo => {
                         if let Some(cell) = cast::<Netinfo>(&mut cell)? {
-                            let cell = link_cfg.cache.cache_b(cell);
+                            let cell = (*link_cfg.cache).cache_b(cell);
                             let peer_addr = cell.peer_addr();
 
                             let Some(peer_addr) = peer_addr else {
@@ -731,7 +731,7 @@ fn read_handler(
             continue;
         }
 
-        let mut cell = cfg.cache.cache_b(Some(cell));
+        let mut cell = (*cfg.cache).cache_b(Some(cell));
         // TODO: Handle padding
         if let Some(c) = cast::<Padding>(&mut cell)? {
             cfg.cache.discard(c);

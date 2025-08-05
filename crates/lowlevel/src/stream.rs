@@ -114,9 +114,7 @@ impl DirStream {
         cell: RelayEnd,
         n: usize,
     ) -> Poll<IoResult<()>> {
-        let cell = self.cache.cache_b(cell);
-        let reason = cell.reason();
-        drop(cell);
+        let reason = (*self.cache).cache_b(cell).reason();
         info!(reason = display(reason), "stream closed");
         *self.as_mut().project().state = State::Shutdown;
         match self.poll_close(cx) {

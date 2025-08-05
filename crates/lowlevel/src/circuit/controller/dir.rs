@@ -367,7 +367,7 @@ impl InitState {
 
         if let Some(cell) = cast::<CreatedFast>(&mut cell)? {
             let (client, sendme_ty) = self.data.take().expect("client params must exist");
-            let layer = client.derive_client(&cfg.cache.cache_b(cell))?;
+            let layer = client.derive_client(&(*cfg.cache).cache_b(cell))?;
 
             debug!("initialization finished");
 
@@ -536,17 +536,17 @@ impl SteadyState {
         cfg: &CfgData,
         cell: CachedCell,
     ) -> Result<CellMsgPause, errors::DirControllerError> {
-        let mut cell = Cached::map(cell, Some);
-
-        let cell = if let Some(cell) = cast::<Relay>(&mut cell)? {
-            cell
-        } else if let Some(cell) = cast::<RelayEarly>(&mut cell)? {
-            cell.into()
-        } else {
-            let cell = Cached::transpose(cell).unwrap();
-            return Err(errors::InvalidCellHeader::with_cell(&cell).into());
-        };
-        let mut cell = cfg.cache.cache_b(cell);
+        let mut cell = (*cfg.cache).cache_b({
+            let mut cell = Cached::map(cell, Some);
+            if let Some(cell) = cast::<Relay>(&mut cell)? {
+                cell
+            } else if let Some(cell) = cast::<RelayEarly>(&mut cell)? {
+                cell.into()
+            } else {
+                let cell = Cached::transpose(cell).unwrap();
+                return Err(errors::InvalidCellHeader::with_cell(&cell).into());
+            }
+        });
 
         // Decrypt and check digest cell
         self.encrypt.decrypt_backward((*cell).as_mut())?;
@@ -587,7 +587,7 @@ impl SteadyState {
                 cfg.cache.discard(cell);
             } else if let Some(cell) = cast_r::<RelaySendme>(&mut cell)? {
                 // RELAY_SENDME, check digest and increment forward data counter.
-                let cell = cfg.cache.cache_b(cell);
+                let cell = (*cfg.cache).cache_b(cell);
 
                 // Only proceed only if sendme handling is enabled.
                 if self.sendme_ty != SendmeType::Disabled {
@@ -888,10 +888,11 @@ fn write_handler(
         };
     }
 
-    let Some(mut cell) = found else {
+    let Some(cell) = found else {
         // Nothing to write
         return Ok(flags | FLAG_WRITE_EMPTY);
     };
+    let mut cell = (*cfg.cache).cache_b(cell);
     let command = cell.command();
     let is_data = this.sendme_ty != SendmeType::Disabled && command == RelayData::ID;
 
@@ -901,7 +902,7 @@ fn write_handler(
             Some(v) => v,
             None => {
                 // Token bucket is empty, repush cell and pause out buffer.
-                this.out_buffer.push_front(cell);
+                this.out_buffer.push_front(Cached::into_inner(cell));
                 this.pause_out_buffer = true;
                 return Ok(flags);
             }
@@ -918,14 +919,15 @@ fn write_handler(
     cell.circuit = cfg.circ_id;
 
     // Encrypt and set digest,
-    let digest = this.digest.wrap_digest_forward(cell.as_mut());
-    this.encrypt.encrypt_forward(cell.as_mut())?;
+    let digest = this.digest.wrap_digest_forward((*cell).as_mut());
+    this.encrypt.encrypt_forward((*cell).as_mut())?;
 
     if is_data && this.forward_data_modulo == 0 {
         // Every 100 decrement, send a SENDME cell.
         this.forward_sendme_digest.push_back(digest);
     }
 
+    let cell = Cached::into_inner(cell);
     this.cell_send = Some(match this.early_cnt {
         1.. => RelayEarly::from(cell).into(),
         0 => cell.into(),
