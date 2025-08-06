@@ -191,7 +191,8 @@ impl AsyncRead for DirStream {
             n = buf.len().min(*recv_buf_len);
             let b;
             (b, buf) = buf.split_at_mut(n);
-            b.copy_from_slice(&recv_buf[RELAY_DATA_LENGTH - n..]);
+            let s = RELAY_DATA_LENGTH - *recv_buf_len;
+            b.copy_from_slice(&recv_buf[s..s + n]);
             *recv_buf_len -= n;
         }
         debug_assert!(buf.is_empty() || *recv_buf_len == 0);
