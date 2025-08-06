@@ -59,7 +59,7 @@ impl CellLike for Destroy {
 
 impl Destroy {
     /// DESTROY command ID.
-    pub const ID: u8 = 10;
+    pub const ID: u8 = 4;
 
     /// Creates new DESTROY cell from existing [`FixedCell`].
     ///

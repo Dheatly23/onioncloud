@@ -366,8 +366,9 @@ impl InitState {
         let mut cell = Cached::map(cell, Some);
 
         if let Some(cell) = cast::<CreatedFast>(&mut cell)? {
+            let cell = (*cfg.cache).cache_b(cell);
             let (client, sendme_ty) = self.data.take().expect("client params must exist");
-            let layer = client.derive_client(&(*cfg.cache).cache_b(cell))?;
+            let layer = client.derive_client(&cell)?;
 
             debug!("initialization finished");
 
@@ -397,6 +398,7 @@ impl InitState {
                 time_data: None,
             });
         } else if let Some(cell) = cast::<Destroy>(&mut cell)? {
+            let cell = (*cfg.cache).cache_b(cell);
             warn!(reason = display(cell.display_reason()), "circuit destroyed");
             return Err(errors::ChannelClosedError.into());
         }
@@ -542,6 +544,10 @@ impl SteadyState {
                 cell
             } else if let Some(cell) = cast::<RelayEarly>(&mut cell)? {
                 cell.into()
+            } else if let Some(cell) = cast::<Destroy>(&mut cell)? {
+                let cell = (*cfg.cache).cache_b(cell);
+                warn!(reason = display(cell.display_reason()), "circuit destroyed");
+                return Err(errors::ChannelClosedError.into());
             } else {
                 let cell = Cached::transpose(cell).unwrap();
                 return Err(errors::InvalidCellHeader::with_cell(&cell).into());
