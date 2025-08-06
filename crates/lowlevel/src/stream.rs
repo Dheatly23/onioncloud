@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::io::{Error as IoError, Result as IoResult};
+use std::io::{Error as IoError, ErrorKind, Result as IoResult};
 use std::mem::{take, transmute};
 use std::num::{NonZeroU16, NonZeroU32};
 use std::pin::Pin;
@@ -30,6 +30,11 @@ type CachedCell<C = Relay> = Cached<C, CacheTy>;
 
 /// Directory stream type.
 ///
+/// # Buffering
+///
+/// Both reads and writes are buffered to [`RELAY_DATA_LENGTH`].
+/// Use [`AsyncWrite::poll_flush`] to flush write buffer.
+///
 /// # Note on closing
 ///
 /// Don't forget to close stream to ensure proper closing sequence.
@@ -47,6 +52,8 @@ pub struct DirStream {
 
     recv_buf: [u8; RELAY_DATA_LENGTH],
     recv_buf_len: usize,
+    send_buf: [u8; RELAY_DATA_LENGTH],
+    send_buf_len: usize,
 
     state: State,
 }
@@ -80,6 +87,8 @@ impl DirStream {
             stream_id: stream_id.try_into().expect("invalid stream ID"),
             recv_buf: [0; RELAY_DATA_LENGTH],
             recv_buf_len: 0,
+            send_buf: [0; RELAY_DATA_LENGTH],
+            send_buf_len: 0,
             state: State::Normal,
 
             send: send.into_sink(),
@@ -122,6 +131,42 @@ impl DirStream {
             r => r,
         }
     }
+
+    fn poll_flush_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
+        let DirStreamProj {
+            circ_id: &mut circ_id,
+            stream_id: &mut stream_id,
+            cache: &mut ref cache,
+            state,
+            send_buf,
+            send_buf_len,
+            mut send,
+            ..
+        } = self.project();
+
+        if *send_buf_len == 0 {
+            return Ready(Ok(()));
+        }
+
+        // Flush write buffer.
+        if !handle_write_err(ready!(send.as_mut().poll_ready(cx))) {
+            let cell = RelayData::new(
+                cache.get_cached(),
+                stream_id,
+                &send_buf[..take(send_buf_len)],
+            )
+            .into_relay(circ_id);
+            if !handle_write_err(send.as_mut().start_send(cache.cache(cell))) {
+                return Ready(Ok(()));
+            }
+        }
+
+        *state = State::Shutdown;
+        Ready(Err(IoError::new(
+            ErrorKind::WriteZero,
+            "failed to flush buffer",
+        )))
+    }
 }
 
 fn map_io_err(e: impl 'static + Error + Send + Sync) -> IoError {
@@ -136,7 +181,6 @@ impl AsyncRead for DirStream {
         mut buf: &mut [u8],
     ) -> Poll<IoResult<usize>> {
         let DirStreamProj {
-            state: &mut ref state,
             recv_buf,
             recv_buf_len,
             ..
@@ -152,7 +196,7 @@ impl AsyncRead for DirStream {
         }
         debug_assert!(buf.is_empty() || *recv_buf_len == 0);
 
-        if !matches!(state, State::Normal) {
+        if !matches!(self.state, State::Normal) {
             return if self.poll_close(cx)?.is_pending() && n == 0 {
                 Pending
             } else {
@@ -315,18 +359,9 @@ impl AsyncWrite for DirStream {
         cx: &mut Context<'_>,
         mut buf: &[u8],
     ) -> Poll<IoResult<usize>> {
-        let DirStreamProj {
-            circ_id: &mut circ_id,
-            stream_id: &mut stream_id,
-            cache: &mut ref cache,
-            state,
-            mut send,
-            ..
-        } = self.as_mut().project();
-
         let mut n = 0;
         while !buf.is_empty() {
-            if !matches!(state, State::Normal) {
+            if !matches!(self.state, State::Normal) {
                 // Stream is closed. Reuse poll_close
                 if self.poll_close(cx)?.is_pending() && n == 0 {
                     return Pending;
@@ -335,21 +370,53 @@ impl AsyncWrite for DirStream {
                 }
             }
 
+            let DirStreamProj {
+                circ_id: &mut circ_id,
+                stream_id: &mut stream_id,
+                cache: &mut ref cache,
+                state,
+                send_buf,
+                send_buf_len,
+                mut send,
+                ..
+            } = self.as_mut().project();
+
             // Wait until sender is ready to send.
             match send.as_mut().poll_ready(cx) {
-                Ready(Err(_)) => {
-                    debug!("circuit disconnected");
-                    break;
+                Ready(r) => {
+                    if handle_write_err(r) {
+                        *state = State::Shutdown;
+                        break;
+                    }
                 }
-                Ready(Ok(())) => (),
                 Pending if n != 0 => break,
                 Pending => return Pending,
             }
 
-            let i = buf.len().min(RELAY_DATA_LENGTH);
-            n += i;
             let b;
-            (b, buf) = buf.split_at(i);
+            if *send_buf_len == 0 && buf.len() >= RELAY_DATA_LENGTH {
+                // Use buffer directly.
+                (b, buf) = buf.split_at(RELAY_DATA_LENGTH);
+                n += RELAY_DATA_LENGTH;
+            } else if buf.len().saturating_add(*send_buf_len) >= RELAY_DATA_LENGTH {
+                // Join buffer and send_buf and use it.
+                let d = &mut send_buf[*send_buf_len..];
+                let s;
+                (s, buf) = buf.split_at(d.len());
+                d.copy_from_slice(s);
+                *send_buf_len = 0;
+                b = &*send_buf;
+                n += s.len();
+            } else {
+                // Buffer bytes.
+                let l = buf.len();
+                send_buf[*send_buf_len..*send_buf_len + l].copy_from_slice(buf);
+                *send_buf_len += l;
+                n += l;
+                buf = &mut [];
+                continue;
+            };
+
             let cell = RelayData::new(cache.get_cached(), stream_id, b).into_relay(circ_id);
             if handle_write_err(send.as_mut().start_send(cache.cache(cell))) {
                 *state = State::Shutdown;
@@ -362,7 +429,12 @@ impl AsyncWrite for DirStream {
     }
 
     #[instrument(level = "trace", skip_all, fields(circ_id = self.circ_id, stream_id = self.stream_id))]
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
+        if !matches!(self.state, State::Shutdown) && self.send_buf_len > 0 {
+            // Requesting closing, but there are data in write buffer.
+            ready!(self.as_mut().poll_flush_buf(cx)?);
+        }
+
         let DirStreamProj {
             circ_id: &mut circ_id,
             stream_id: &mut stream_id,
@@ -405,12 +477,14 @@ impl AsyncWrite for DirStream {
 
     #[instrument(level = "trace", skip_all, fields(circ_id = self.circ_id, stream_id = self.stream_id))]
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
-        let DirStreamProj { state, send, .. } = self.as_mut().project();
-
-        if !matches!(state, State::Normal) {
+        if !matches!(self.state, State::Normal) {
             // Stream is closed
             return self.poll_close(cx);
         }
+
+        ready!(self.as_mut().poll_flush_buf(cx)?);
+
+        let DirStreamProj { state, send, .. } = self.project();
 
         if handle_write_err(ready!(send.poll_flush(cx))) {
             *state = State::Shutdown;
