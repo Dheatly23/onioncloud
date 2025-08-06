@@ -128,7 +128,8 @@ async fn main() {
     {
         warn!("timed out");
     }
-    info!("read response: {}", String::from_utf8(s).unwrap());
+    info!("read response: {}", String::from_utf8_lossy(&s));
+    drop(s);
 
     info!("starting graceful shutdown");
 
