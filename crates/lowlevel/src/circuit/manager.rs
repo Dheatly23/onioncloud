@@ -331,7 +331,7 @@ async fn handle_create_circuit<
     handle_circuit(rt, cfg, linkver, id, sender, receiver).await
 }
 
-#[instrument(skip_all, fields(circ_id, linkver))]
+#[instrument(skip_all, fields(circ_id = circ_id, linkver = linkver))]
 async fn handle_circuit<R: Runtime, C: 'static + CircuitController>(
     rt: R,
     cfg: Arc<CircuitInner<C>>,

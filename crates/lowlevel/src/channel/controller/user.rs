@@ -552,7 +552,7 @@ fn read_cell(
     }
 }
 
-#[instrument(level = "debug", skip_all, fields(cert_ty, key_ty, pk = %print_ed(pk), needs_signed_by))]
+#[instrument(level = "debug", skip_all, fields(cert_ty = cert_ty, key_ty = key_ty, pk = %print_ed(pk), needs_signed_by = needs_signed_by))]
 fn check_cert(
     mut unverified: UnverifiedEdCert<'_>,
     cert_ty: u8,

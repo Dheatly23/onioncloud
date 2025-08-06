@@ -336,7 +336,7 @@ impl AsyncBufRead for DirStream {
         Ready(Ok(&[]))
     }
 
-    #[instrument(level = "trace", skip_all, fields(circ_id = self.circ_id, stream_id = self.stream_id, amount))]
+    #[instrument(level = "trace", skip_all, fields(circ_id = self.circ_id, stream_id = self.stream_id, amount = amount))]
     fn consume(self: Pin<&mut Self>, amount: usize) {
         let p = self.project().recv_buf_len;
         *p = match (*p).checked_sub(amount) {

@@ -88,7 +88,6 @@ enum State {
     Shutdown,
 }
 
-#[derive(Debug)]
 pub enum DirControlMsg {
     Shutdown,
     /// Create new stream.
@@ -247,7 +246,7 @@ impl<Cfg> Handle<Timeout> for DirController<Cfg> {
 impl<Cfg> Handle<ControlMsg<DirControlMsg>> for DirController<Cfg> {
     type Return = Result<(), errors::DirControllerError>;
 
-    #[instrument(level = "trace", skip_all, fields(msg))]
+    #[instrument(level = "trace", skip_all)]
     fn handle(&mut self, msg: ControlMsg<DirControlMsg>) -> Result<(), errors::DirControllerError> {
         match msg.0 {
             DirControlMsg::Shutdown => {
@@ -324,7 +323,7 @@ impl InitState {
         }
     }
 
-    #[instrument(level = "debug", skip_all, err)]
+    #[instrument(level = "debug", skip_all)]
     fn handle<'a>(
         &mut self,
         _cfg: &CfgData,
@@ -357,7 +356,7 @@ impl InitState {
         Ok(output)
     }
 
-    #[instrument(level = "debug", skip_all, err)]
+    #[instrument(level = "debug", skip_all)]
     fn handle_cell(
         &mut self,
         cfg: &CfgData,
@@ -453,7 +452,7 @@ const FLAG_WRITE: u8 = 1 << 1;
 const FLAG_WRITE_EMPTY: u8 = 1 << 2;
 
 impl SteadyState {
-    #[instrument(level = "debug", skip_all, err)]
+    #[instrument(level = "debug", skip_all)]
     fn handle<'a>(
         &mut self,
         cfg: &CfgData,
@@ -532,7 +531,7 @@ impl SteadyState {
         Ok((out, false))
     }
 
-    #[instrument(level = "debug", skip_all, err)]
+    #[instrument(level = "debug", skip_all)]
     fn handle_cell(
         &mut self,
         cfg: &CfgData,
@@ -639,7 +638,7 @@ impl SteadyState {
         Ok(CellMsgPause(self.in_buffer.is_full()))
     }
 
-    #[instrument(level = "debug", skip_all, err)]
+    #[instrument(level = "debug", skip_all)]
     fn handle_stream_cell(
         &mut self,
         cfg: &CfgData,
