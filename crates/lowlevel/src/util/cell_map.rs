@@ -355,9 +355,9 @@ impl InitiatorIDGenerator {
 impl IDGenerator for InitiatorIDGenerator {
     fn generate_id<R: RngCore + CryptoRng>(&self, rng: &mut R) -> NonZeroU32 {
         NonZeroU32::new(rng.gen_range(if self.id_32bit {
-            0x8000..=0xffff
-        } else {
             0x8000_0000..=0xffff_ffff
+        } else {
+            0x8000..=0xffff
         }))
         .expect("ID must be nonzero")
     }
@@ -406,9 +406,9 @@ impl ResponderIDGenerator {
 impl IDGenerator for ResponderIDGenerator {
     fn generate_id<R: RngCore + CryptoRng>(&self, rng: &mut R) -> NonZeroU32 {
         NonZeroU32::new(rng.gen_range(if self.id_32bit {
-            1..=0x7fff
-        } else {
             1..=0x7fff_ffff
+        } else {
+            1..=0x7fff
         }))
         .expect("ID must be nonzero")
     }

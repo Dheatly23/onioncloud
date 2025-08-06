@@ -31,7 +31,7 @@ use crate::crypto::cert::{UnverifiedEdCert, UnverifiedRsaCert, extract_rsa_from_
 use crate::crypto::{EdPublicKey, Sha256Output};
 use crate::errors;
 use crate::linkver::StandardLinkver;
-use crate::util::cell_map::{AnyIDGenerator, CellMap, NewHandler};
+use crate::util::cell_map::{CellMap, InitiatorIDGenerator, NewHandler};
 use crate::util::sans_io::event::{ChildCellMsg, ControlMsg, Timeout};
 use crate::util::sans_io::{CellMsgPause, Handle};
 use crate::util::{InBuffer, OutBuffer, option_ord_min, print_ed, print_hex};
@@ -636,8 +636,9 @@ impl SteadyState {
 
         // Process pending open
         for send in self.pending_open.drain(..) {
+            let id_gen = InitiatorIDGenerator::from_config(cfg);
             let m = circ_map
-                .open_with(&AnyIDGenerator::from_config(cfg), 64, |_| CircuitMeta {
+                .open_with(&id_gen, 64, |_| CircuitMeta {
                     closing: false,
 
                     last_full: input.time(),
