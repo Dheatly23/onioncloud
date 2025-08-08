@@ -884,7 +884,7 @@ impl OnionLayerNtor3 {
             cell,
             circuit,
             3,
-            &[
+            [
                 ret.client_header().as_ref(),
                 client_msg,
                 &ret.client_msg_mac(),
@@ -961,7 +961,7 @@ impl OnionLayerNtor3 {
             Created2::new_multipart(
                 cache.get_cached(),
                 circuit,
-                &[data.as_ref(), server_msg.as_ref()],
+                [data.as_ref(), server_msg.as_ref()],
             ),
         ))
     }

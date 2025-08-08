@@ -54,6 +54,17 @@ struct Created2Cell {
     data: [u8; const { FIXED_CELL_SIZE - size_of::<Created2Header>() }],
 }
 
+fn fill_data_multipart<'a>(in_: impl IntoIterator<Item = &'a [u8]>, out: &mut [u8], len: &mut U16) {
+    let (mut l, mut out) = (0, out);
+    for s in in_ {
+        let d;
+        (d, out) = out.split_at_mut(s.len());
+        d.copy_from_slice(s);
+        l += s.len();
+    }
+    len.set(l.try_into().expect("data must fit cell"));
+}
+
 /// Represents a CREATE2 cell.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Create2 {
@@ -170,24 +181,15 @@ impl Create2 {
     /// # Panics
     ///
     /// Panics if data does not fit the cell.
-    pub fn new_multipart(
+    pub fn new_multipart<'a>(
         mut cell: FixedCell,
         circuit: NonZeroU32,
         ty: u16,
-        data: &[&[u8]],
+        data: impl IntoIterator<Item = &'a [u8]>,
     ) -> Self {
         let Create2Cell { header, data: out } = transmute_mut!(cell.data_mut());
-
-        let mut len = 0;
-        let mut out = &mut out[..];
-        for v in data {
-            let (a, b) = out.split_at_mut(v.len());
-            a.copy_from_slice(v);
-            out = b;
-            len += v.len();
-        }
         header.ty.set(ty);
-        header.len.set(len.try_into().expect("data must fit cell"));
+        fill_data_multipart(data, out, &mut header.len);
 
         // SAFETY: Data is valid
         unsafe { Self::from_cell(circuit, cell) }
@@ -378,17 +380,13 @@ impl Created2 {
     /// # Panics
     ///
     /// Panics if data does not fit the cell.
-    pub fn new_multipart(mut cell: FixedCell, circuit: NonZeroU32, data: &[&[u8]]) -> Self {
+    pub fn new_multipart<'a>(
+        mut cell: FixedCell,
+        circuit: NonZeroU32,
+        data: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Self {
         let Created2Cell { header, data: out } = transmute_mut!(cell.data_mut());
-        let mut len = 0;
-        let mut out = &mut out[..];
-        for v in data {
-            let (a, b) = out.split_at_mut(v.len());
-            a.copy_from_slice(v);
-            out = b;
-            len += v.len();
-        }
-        header.len.set(len.try_into().expect("data must fit cell"));
+        fill_data_multipart(data, out, &mut header.len);
 
         // SAFETY: Data is valid
         unsafe { Self::from_cell(circuit, cell) }
