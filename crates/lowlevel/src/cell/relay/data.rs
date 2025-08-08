@@ -4,6 +4,7 @@ use super::{IntoRelay, Relay, RelayLike, RelayWrapper, TryFromRelay, with_cmd_st
 use crate::cache::Cachable;
 use crate::cell::FixedCell;
 use crate::errors;
+use crate::util::fill_data_multipart;
 
 /// Represents a RELAY_DATA cell.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -97,6 +98,49 @@ impl RelayData {
     pub fn new(cell: FixedCell, stream: NonZeroU16, data: &[u8]) -> Self {
         let mut cell = RelayWrapper::from(cell);
         cell.set_data(data);
+
+        Self { stream, data: cell }
+    }
+
+    /// Creates new RELAY_DATA cell with multipart data.
+    ///
+    /// # Parameters
+    ///
+    /// - `cell` : Cached [`FixedCell`].
+    /// - `stream` : Stream ID.
+    /// - `data` : Cell data in multiple byte slices.
+    ///
+    /// # Panics
+    ///
+    /// Panics if data is longer than [`RELAY_DATA_LENGTH`](`super::RELAY_DATA_LENGTH`).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::num::NonZeroU16;
+    ///
+    /// use onioncloud_lowlevel::cell::relay::data::RelayData;
+    ///
+    /// let cell = RelayData::new_multipart(
+    ///     Default::default(),
+    ///     NonZeroU16::new(1).unwrap(),
+    ///     [&b"123"[..], &b"456"[..]],
+    /// );
+    ///
+    /// assert_eq!(cell.data(), b"123456");
+    /// ```
+    pub fn new_multipart<'a>(
+        cell: FixedCell,
+        stream: NonZeroU16,
+        data: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Self {
+        let mut cell = RelayWrapper::from(cell);
+
+        let l = fill_data_multipart(data, cell.data_padding_mut());
+        // SAFETY: Data is filled to length.
+        unsafe {
+            cell.set_len(l as _);
+        }
 
         Self { stream, data: cell }
     }

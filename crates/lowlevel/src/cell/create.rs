@@ -12,6 +12,7 @@ use super::{
 };
 use crate::crypto::Sha1Output;
 use crate::errors;
+use crate::util::fill_data_multipart;
 
 /// CREATE2 cell header.
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -52,17 +53,6 @@ struct Created2Cell {
 
     /// Handshake data + trailing bytes.
     data: [u8; const { FIXED_CELL_SIZE - size_of::<Created2Header>() }],
-}
-
-fn fill_data_multipart<'a>(in_: impl IntoIterator<Item = &'a [u8]>, out: &mut [u8], len: &mut U16) {
-    let (mut l, mut out) = (0, out);
-    for s in in_ {
-        let d;
-        (d, out) = out.split_at_mut(s.len());
-        d.copy_from_slice(s);
-        l += s.len();
-    }
-    len.set(l.try_into().expect("data must fit cell"));
 }
 
 /// Represents a CREATE2 cell.
@@ -189,7 +179,8 @@ impl Create2 {
     ) -> Self {
         let Create2Cell { header, data: out } = transmute_mut!(cell.data_mut());
         header.ty.set(ty);
-        fill_data_multipart(data, out, &mut header.len);
+        let l = fill_data_multipart(data, out);
+        header.len.set(l.try_into().expect("data must fit cell"));
 
         // SAFETY: Data is valid
         unsafe { Self::from_cell(circuit, cell) }
@@ -386,7 +377,8 @@ impl Created2 {
         data: impl IntoIterator<Item = &'a [u8]>,
     ) -> Self {
         let Created2Cell { header, data: out } = transmute_mut!(cell.data_mut());
-        fill_data_multipart(data, out, &mut header.len);
+        let l = fill_data_multipart(data, out);
+        header.len.set(l.try_into().expect("data must fit cell"));
 
         // SAFETY: Data is valid
         unsafe { Self::from_cell(circuit, cell) }

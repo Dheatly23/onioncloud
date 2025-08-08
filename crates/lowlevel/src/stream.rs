@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::io::{Error as IoError, ErrorKind, Result as IoResult};
-use std::mem::{take, transmute};
+use std::mem::take;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -117,19 +117,54 @@ impl DirStream {
         !matches!(self.state, State::Normal)
     }
 
-    fn process_relay_end(
+    fn poll_read_until_data(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        cell: RelayEnd,
-        n: usize,
-    ) -> Poll<IoResult<()>> {
-        let reason = (*self.cache).cache_b(cell).reason();
-        info!(reason = display(reason), "stream closed");
-        *self.as_mut().project().state = State::Shutdown;
-        match self.poll_close(cx) {
-            Pending if n != 0 => Ready(Ok(())),
-            r => r,
+    ) -> Poll<IoResult<Option<RelayData>>> {
+        let DirStreamProj {
+            circ_id: &mut circ_id,
+            stream_id: &mut stream_id,
+            cache,
+            state,
+            mut recv,
+            ..
+        } = self.as_mut().project();
+        let cache: &(dyn Send + Sync + CellCache) = &cache;
+
+        if !matches!(state, State::Normal) {
+            // Stream closing
+            ready!(self.poll_close(cx))?;
+            return Ready(Ok(None));
         }
+
+        while let Some(cell) = ready!(recv.as_mut().poll_next(cx)) {
+            debug_assert_eq!(cell.circuit, circ_id);
+            debug_assert_eq!(cell.stream(), stream_id.into());
+            let mut cell = Cached::map(cell, Some);
+
+            if let Some(cell) = cast::<RelayData>(&mut cell).map_err(map_io_err)? {
+                // RELAY_DATA cell
+                return Ready(Ok(Some(cell)));
+            } else if let Some(cell) = cast::<RelayEnd>(&mut cell).map_err(map_io_err)? {
+                // RELAY_END cell
+                let reason = cache.cache_b(cell).reason();
+                info!(reason = display(reason), "stream closed");
+                *state = State::Shutdown;
+                ready!(self.poll_close(cx))?;
+                break;
+            } else if let Some(cell) = cast::<RelayDrop>(&mut cell).map_err(map_io_err)? {
+                // RELAY_DROP cell
+                cache.discard(cell);
+            } else if let Some(cell) = cast::<RelaySendme>(&mut cell).map_err(map_io_err)? {
+                // RELAY_SENDME cell
+                cache.discard(cell);
+            } else if let Some(cell) = Cached::transpose(cell) {
+                // NOTE: Potential protocol violation
+                trace!("unhandled cell with command {} received", cell.command());
+            }
+        }
+
+        Ready(Ok(None))
     }
 
     fn poll_flush_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
@@ -178,7 +213,7 @@ impl AsyncRead for DirStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        mut buf: &mut [u8],
+        buf: &mut [u8],
     ) -> Poll<IoResult<usize>> {
         let DirStreamProj {
             recv_buf,
@@ -186,85 +221,39 @@ impl AsyncRead for DirStream {
             ..
         } = self.as_mut().project();
 
-        let mut n = 0;
-        if *recv_buf_len > 0 {
-            n = buf.len().min(*recv_buf_len);
-            let b;
-            (b, buf) = buf.split_at_mut(n);
+        let n = if *recv_buf_len > 0 {
+            let n = buf.len().min(*recv_buf_len);
             let s = RELAY_DATA_LENGTH - *recv_buf_len;
-            b.copy_from_slice(&recv_buf[s..s + n]);
+            buf[..n].copy_from_slice(&recv_buf[s..s + n]);
             *recv_buf_len -= n;
-        }
-        debug_assert!(buf.is_empty() || *recv_buf_len == 0);
-
-        if !matches!(self.state, State::Normal) {
-            return if self.poll_close(cx)?.is_pending() && n == 0 {
-                Pending
-            } else {
-                trace!("read {n} bytes");
-                Ready(Ok(n))
-            };
-        }
-
-        while !buf.is_empty() {
+            return Ready(Ok(n));
+        } else if let Some(cell) = ready!(self.as_mut().poll_read_until_data(cx))? {
             let DirStreamProj {
-                circ_id: &mut circ_id,
-                stream_id: &mut stream_id,
-                cache,
+                cache: &mut ref cache,
                 recv_buf,
                 recv_buf_len,
-                recv,
                 ..
-            } = self.as_mut().project();
-            let cache: &(dyn Send + Sync + CellCache) = &cache;
+            } = self.project();
+            let cell = (**cache).cache_b(cell);
+            let data = cell.data();
 
-            let cell = match recv.poll_next(cx) {
-                Ready(None) => break,
-                Ready(Some(cell)) => cell,
-                // Ensure read bytes aren't dropped.
-                Pending if n != 0 => break,
-                Pending => return Pending,
-            };
+            debug_assert_eq!(*recv_buf_len, 0);
 
-            debug_assert_eq!(cell.circuit, circ_id);
-            debug_assert_eq!(cell.stream(), stream_id.into());
-            let mut cell = Cached::map(cell, Some);
-
-            if let Some(cell) = cast::<RelayData>(&mut cell).map_err(map_io_err)? {
-                // RELAY_DATA cell
-                let cell = cache.cache_b(cell);
-                let data = cell.data();
-
-                n += if buf.len() >= data.len() {
-                    // Buffer can read all cell data.
-                    let b;
-                    (b, buf) = buf.split_at_mut(data.len());
-                    b.copy_from_slice(data);
-                    data.len()
-                } else {
-                    // Some data must be moved to recv_buf.
-                    let l = buf.len();
-                    let (a, b) = data.split_at(l);
-                    take(&mut buf).copy_from_slice(a);
-                    *recv_buf_len = b.len();
-                    recv_buf[RELAY_DATA_LENGTH - b.len()..].copy_from_slice(b);
-                    l
-                };
-            } else if let Some(cell) = cast::<RelayEnd>(&mut cell).map_err(map_io_err)? {
-                // RELAY_END cell
-                ready!(self.process_relay_end(cx, cell, n)?);
-                break;
-            } else if let Some(cell) = cast::<RelayDrop>(&mut cell).map_err(map_io_err)? {
-                // RELAY_DROP cell
-                cache.discard(cell);
-            } else if let Some(cell) = cast::<RelaySendme>(&mut cell).map_err(map_io_err)? {
-                // RELAY_SENDME cell
-                cache.discard(cell);
-            } else if let Some(cell) = Cached::transpose(cell) {
-                // NOTE: Potential protocol violation
-                trace!("unhandled cell with command {} received", cell.command());
+            if buf.len() >= data.len() {
+                // Buffer can read all cell data.
+                buf[..data.len()].copy_from_slice(data);
+                data.len()
+            } else {
+                // Some data must be moved to recv_buf.
+                let (a, b) = data.split_at(buf.len());
+                buf.copy_from_slice(a);
+                *recv_buf_len = b.len();
+                recv_buf[RELAY_DATA_LENGTH - b.len()..].copy_from_slice(b);
+                buf.len()
             }
-        }
+        } else {
+            0
+        };
 
         trace!("read {n} bytes");
         Ready(Ok(n))
@@ -274,67 +263,33 @@ impl AsyncRead for DirStream {
 impl AsyncBufRead for DirStream {
     #[instrument(level = "trace", skip_all, fields(circ_id = self.circ_id, stream_id = self.stream_id))]
     fn poll_fill_buf(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<&[u8]>> {
-        let DirStreamProj {
-            circ_id: &mut circ_id,
-            stream_id: &mut stream_id,
-            state: &mut ref state,
-            cache,
-            recv_buf,
-            recv_buf_len,
-            mut recv,
-            ..
-        } = self.as_mut().project();
-        let cache: &(dyn Send + Sync + CellCache) = &cache;
-
-        if *recv_buf_len > 0 {
-            // Use existing buffer.
-            let b = &recv_buf[RELAY_DATA_LENGTH - *recv_buf_len..];
-            // SAFETY: Lifetime extension is valid because self lifetime is captured.
-            return Ready(Ok(unsafe { transmute::<&[u8], &[u8]>(b) }));
-        }
-
-        if !matches!(state, State::Normal) {
-            ready!(self.poll_close(cx)?);
-            return Ready(Ok(&[]));
-        }
-
-        // Otherwise receive cells and fill buffer.
-        while let Some(cell) = ready!(recv.as_mut().poll_next(cx)) {
-            debug_assert_eq!(cell.circuit, circ_id);
-            debug_assert_eq!(cell.stream(), stream_id.into());
-            let mut cell = Cached::map(cell, Some);
-
-            if let Some(cell) = cast::<RelayData>(&mut cell).map_err(map_io_err)? {
-                // RELAY_DATA cell
-                let cell = cache.cache_b(cell);
+        if self.recv_buf_len == 0 {
+            // Fill buffer
+            if !matches!(self.state, State::Normal) {
+                // Stream closing
+                ready!(self.as_mut().poll_close(cx))?;
+            } else if let Some(cell) = ready!(self.as_mut().poll_read_until_data(cx))? {
+                let DirStreamProj {
+                    cache,
+                    recv_buf,
+                    recv_buf_len,
+                    ..
+                } = self.as_mut().project();
+                let cell = (**cache).cache_b(cell);
                 let data = cell.data();
 
                 // Copy data into buffer
                 *recv_buf_len = data.len();
-                let b = &mut recv_buf[RELAY_DATA_LENGTH - data.len()..];
-                b.copy_from_slice(data);
-
-                // Return buffer
-                // SAFETY: Lifetime extension is valid because self lifetime is captured.
-                return Ready(Ok(unsafe { transmute::<&[u8], &[u8]>(b) }));
-            } else if let Some(cell) = cast::<RelayEnd>(&mut cell).map_err(map_io_err)? {
-                // RELAY_END cell
-                ready!(self.process_relay_end(cx, cell, 0)?);
-                break;
-            } else if let Some(cell) = cast::<RelayDrop>(&mut cell).map_err(map_io_err)? {
-                // RELAY_DROP cell
-                cache.discard(cell);
-            } else if let Some(cell) = cast::<RelaySendme>(&mut cell).map_err(map_io_err)? {
-                // RELAY_SENDME cell
-                cache.discard(cell);
-            } else if let Some(cell) = Cached::transpose(cell) {
-                // NOTE: Potential protocol violation
-                trace!("unhandled cell with command {} received", cell.command());
+                recv_buf[RELAY_DATA_LENGTH - data.len()..].copy_from_slice(data);
             }
         }
 
-        // Receiver is finished.
-        Ready(Ok(&[]))
+        let Self {
+            recv_buf,
+            recv_buf_len,
+            ..
+        } = self.into_ref().get_ref();
+        Ready(Ok(&recv_buf[RELAY_DATA_LENGTH - *recv_buf_len..]))
     }
 
     #[instrument(level = "trace", skip_all, fields(circ_id = self.circ_id, stream_id = self.stream_id, amount = amount))]
@@ -355,22 +310,13 @@ fn handle_write_err(ret: Result<(), SendError<CachedCell>>) -> bool {
 
 impl AsyncWrite for DirStream {
     #[instrument(level = "trace", skip_all, fields(circ_id = self.circ_id, stream_id = self.stream_id))]
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        mut buf: &[u8],
-    ) -> Poll<IoResult<usize>> {
-        let mut n = 0;
-        while !buf.is_empty() {
-            if !matches!(self.state, State::Normal) {
-                // Stream is closed. Reuse poll_close
-                if self.poll_close(cx)?.is_pending() && n == 0 {
-                    return Pending;
-                } else {
-                    break;
-                }
-            }
-
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<IoResult<usize>> {
+        let n = if !matches!(self.state, State::Normal) {
+            // Stream is closed. Reuse poll_close
+            ready!(self.poll_close(cx))?;
+            0
+        } else if self.send_buf_len.saturating_add(buf.len()) >= RELAY_DATA_LENGTH {
+            // Avoids copying to buffer
             let DirStreamProj {
                 circ_id: &mut circ_id,
                 stream_id: &mut stream_id,
@@ -380,50 +326,44 @@ impl AsyncWrite for DirStream {
                 send_buf_len,
                 mut send,
                 ..
-            } = self.as_mut().project();
+            } = self.project();
 
-            // Wait until sender is ready to send.
-            match send.as_mut().poll_ready(cx) {
-                Ready(r) => {
-                    if handle_write_err(r) {
-                        *state = State::Shutdown;
-                        break;
-                    }
-                }
-                Pending if n != 0 => break,
-                Pending => return Pending,
+            let mut ok = !handle_write_err(ready!(send.as_mut().poll_ready(cx)));
+            let mut n = 0;
+
+            if ok {
+                n = RELAY_DATA_LENGTH - *send_buf_len;
+                let cell = RelayData::new_multipart(
+                    cache.get_cached(),
+                    stream_id,
+                    [&send_buf[..take(send_buf_len)], &buf[..n]],
+                )
+                .into_relay(circ_id);
+                ok = !handle_write_err(send.as_mut().start_send(cache.cache(cell)));
             }
 
-            let b;
-            if *send_buf_len == 0 && buf.len() >= RELAY_DATA_LENGTH {
-                // Use buffer directly.
-                (b, buf) = buf.split_at(RELAY_DATA_LENGTH);
-                n += RELAY_DATA_LENGTH;
-            } else if buf.len().saturating_add(*send_buf_len) >= RELAY_DATA_LENGTH {
-                // Join buffer and send_buf and use it.
-                let d = &mut send_buf[*send_buf_len..];
-                let s;
-                (s, buf) = buf.split_at(d.len());
-                d.copy_from_slice(s);
-                *send_buf_len = 0;
-                b = &*send_buf;
-                n += s.len();
+            if ok {
+                n
             } else {
-                // Buffer bytes.
-                let l = buf.len();
-                send_buf[*send_buf_len..*send_buf_len + l].copy_from_slice(buf);
-                *send_buf_len += l;
-                n += l;
-                buf = &mut [];
-                continue;
-            };
-
-            let cell = RelayData::new(cache.get_cached(), stream_id, b).into_relay(circ_id);
-            if handle_write_err(send.as_mut().start_send(cache.cache(cell))) {
+                // EOF
+                // XXX: Should it be WriteZero error instead?
                 *state = State::Shutdown;
-                break;
+                0
             }
-        }
+        } else {
+            // Copy bytes to buffer
+            let DirStreamProj {
+                send_buf,
+                send_buf_len,
+                ..
+            } = self.project();
+            debug_assert!(*send_buf_len < RELAY_DATA_LENGTH);
+
+            let n = buf.len().min(RELAY_DATA_LENGTH - *send_buf_len);
+            send_buf[*send_buf_len..*send_buf_len + n].copy_from_slice(&buf[..n]);
+            *send_buf_len += n;
+            n
+        };
 
         trace!("write {n} bytes");
         Ready(Ok(n))
