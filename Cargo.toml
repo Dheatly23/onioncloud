@@ -99,6 +99,7 @@ features = [
 version = "0.1"
 features = [
   "attributes",
+  "valuable",
 ]
 
 [workspace.dependencies.x25519-dalek]
