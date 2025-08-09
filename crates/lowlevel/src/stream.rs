@@ -496,11 +496,10 @@ impl AsyncWrite for DirStream {
                     // Copy bytes to buffer
                     let mut d = &mut send_buf[*send_buf_len..];
                     for buf in bufs {
-                        let i = buf.len().min(d.len());
                         let b;
-                        (b, d) = d.split_at_mut(i);
-                        b.copy_from_slice(&buf[..i]);
-                        n += i;
+                        (b, d) = d.split_at_mut(buf.len().min(d.len()));
+                        b.copy_from_slice(&buf[..b.len()]);
+                        n += b.len();
                         if d.is_empty() {
                             break;
                         }
@@ -652,7 +651,7 @@ mod tests {
         });
     }
 
-    fn get_id() -> u64 {
+    fn id() -> u64 {
         static ID: AtomicU64 = AtomicU64::new(0);
         ID.fetch_add(1, Relaxed)
     }
@@ -693,100 +692,91 @@ mod tests {
         let rt = make_rt();
         let cache: CacheTy = Arc::new(StandardCellCache::default());
 
-        fn f(rt: &Runtime, cache: &CacheTy, data: (Vec<u8>, Vec<usize>)) {
-            let cache = cache.clone();
-
+        #[instrument(name = "test_read", skip_all, fields(id = id))]
+        async fn f(id: u64, cache: CacheTy, data: (Vec<u8>, Vec<usize>)) {
             let data = Arc::new(data);
-            let f = async move {
-                let (stream, send, recv) = new_stream(cache.clone());
+            let (stream, send, recv) = new_stream(cache.clone());
 
-                let handle = spawn({
-                    let span = info_span!("send_data");
-                    span.follows_from(Span::current());
+            let handle = spawn({
+                let span = info_span!("send_data");
+                span.follows_from(Span::current());
 
-                    let data = data.clone();
-                    async move {
-                        info!("sending data");
-                        let mut send = send.into_sink();
-                        let mut s = &data.0[..];
-                        for &i in &data.1 {
-                            let b;
-                            if i >= s.len() {
-                                b = take(&mut s);
-                            } else {
-                                (b, s) = s.split_at(i);
-                            };
-                            if b.is_empty() {
-                                continue;
-                            }
-
-                            info!("sending {} bytes", b.len());
-                            let cell = RelayData::new(cache.get_cached(), STREAM_ID, b)
-                                .into_relay(CIRC_ID);
-                            send.feed(cache.cache(cell)).await.unwrap();
-                            if s.is_empty() {
-                                break;
-                            }
+                let data = data.clone();
+                async move {
+                    info!("sending data");
+                    let mut send = send.into_sink();
+                    let mut s = &data.0[..];
+                    for &i in &data.1 {
+                        let b;
+                        (b, s) = s.split_at(i.min(s.len()));
+                        if b.is_empty() {
+                            continue;
                         }
 
-                        while !s.is_empty() {
-                            let b;
-                            (b, s) = s.split_at(RELAY_DATA_LENGTH.min(s.len()));
-                            info!("sending {} bytes", b.len());
-                            let cell = RelayData::new(cache.get_cached(), STREAM_ID, b)
-                                .into_relay(CIRC_ID);
-                            send.feed(cache.cache(cell)).await.unwrap();
+                        info!("sending {} bytes", b.len());
+                        let cell =
+                            RelayData::new(cache.get_cached(), STREAM_ID, b).into_relay(CIRC_ID);
+                        send.feed(cache.cache(cell)).await.unwrap();
+                        if s.is_empty() {
+                            break;
                         }
-                        send.flush().await.unwrap();
-                        debug!("send done");
+                    }
 
-                        let mut recv = recv.into_stream();
-                        let mut cell = Cached::map(
-                            recv.next().await.expect("should be sending closing cell"),
-                            Some,
+                    while !s.is_empty() {
+                        let b;
+                        (b, s) = s.split_at(RELAY_DATA_LENGTH.min(s.len()));
+                        info!("sending {} bytes", b.len());
+                        let cell =
+                            RelayData::new(cache.get_cached(), STREAM_ID, b).into_relay(CIRC_ID);
+                        send.feed(cache.cache(cell)).await.unwrap();
+                    }
+                    send.flush().await.unwrap();
+                    debug!("send done");
+
+                    let mut recv = recv.into_stream();
+                    let mut cell = Cached::map(
+                        recv.next().await.expect("should be sending closing cell"),
+                        Some,
+                    );
+                    let Some(cell) = cast::<RelayEnd>(&mut cell).unwrap() else {
+                        panic!(
+                            "unknown cell with command {}",
+                            Cached::transpose(cell).unwrap().command()
                         );
-                        let Some(cell) = cast::<RelayEnd>(&mut cell).unwrap() else {
-                            panic!(
-                                "unknown cell with command {}",
-                                Cached::transpose(cell).unwrap().command()
-                            );
-                        };
-                        cache.discard(cell);
-                        info!("received end cell");
-                    }
-                    .instrument(span)
-                });
-
-                info!("reading data");
-                let mut stream = pin!(stream);
-                let mut v = vec![0; data.0.len()];
-                let mut n = 0;
-                for &i in &data.1 {
-                    let e = v.len().min(n + i);
-                    let b = &mut v[n..e];
-                    stream.as_mut().read_exact(b).await.unwrap();
-                    n += b.len();
-                    if n == v.len() {
-                        break;
-                    }
+                    };
+                    cache.discard(cell);
+                    info!("received end cell");
                 }
-                if n < v.len() {
-                    stream.as_mut().read_exact(&mut v[n..]).await.unwrap();
+                .instrument(span)
+            });
+
+            info!("reading data");
+            let mut stream = pin!(stream);
+            let mut v = vec![0; data.0.len()];
+            let mut n = 0;
+            for &i in &data.1 {
+                let e = v.len().min(n + i);
+                let b = &mut v[n..e];
+                stream.as_mut().read_exact(b).await.unwrap();
+                n += b.len();
+                if n == v.len() {
+                    break;
                 }
-                debug!("read success");
-
-                assert_eq!(v, data.0);
-                info!("closing");
-                stream.close().await.unwrap();
-                debug!("close success");
-
-                handle.await.unwrap();
             }
-            .instrument(info_span!("test_read", id = get_id()));
-            run_test(&rt, f);
+            if n < v.len() {
+                stream.as_mut().read_exact(&mut v[n..]).await.unwrap();
+            }
+            debug!("read success");
+
+            assert_eq!(v, data.0);
+            info!("closing");
+            stream.close().await.unwrap();
+            debug!("close success");
+
+            handle.await.unwrap();
         }
 
-        proptest!(move |(data in data_strat())| f(&rt, &cache, data));
+        proptest!(move |(data in data_strat())| run_test(&rt, f(id(), cache.clone(), data)));
     }
 
     #[test]
@@ -794,110 +784,101 @@ mod tests {
         let rt = make_rt();
         let cache: CacheTy = Arc::new(StandardCellCache::default());
 
-        fn f(rt: &Runtime, cache: &CacheTy, data: (Vec<u8>, Vec<usize>)) {
-            let cache = cache.clone();
-
+        #[instrument(name = "test_read_vectored", skip_all, fields(id = id))]
+        async fn f(id: u64, cache: CacheTy, data: (Vec<u8>, Vec<usize>)) {
             let data = Arc::new(data);
-            let f = async move {
-                let (stream, send, recv) = new_stream(cache.clone());
+            let (stream, send, recv) = new_stream(cache.clone());
 
-                let handle = spawn({
-                    let span = info_span!("send_data");
-                    span.follows_from(Span::current());
+            let handle = spawn({
+                let span = info_span!("send_data");
+                span.follows_from(Span::current());
 
-                    let data = data.clone();
-                    async move {
-                        info!("sending data");
-                        let mut send = send.into_sink();
-                        let mut s = &data.0[..];
-                        for &i in &data.1 {
-                            let b;
-                            if i >= s.len() {
-                                b = take(&mut s);
-                            } else {
-                                (b, s) = s.split_at(i);
-                            };
-                            if b.is_empty() {
-                                continue;
-                            }
-
-                            info!("sending {} bytes", b.len());
-                            let cell = RelayData::new(cache.get_cached(), STREAM_ID, b)
-                                .into_relay(CIRC_ID);
-                            send.feed(cache.cache(cell)).await.unwrap();
-                            if s.is_empty() {
-                                break;
-                            }
-                        }
-
-                        while !s.is_empty() {
-                            let b;
-                            (b, s) = s.split_at(RELAY_DATA_LENGTH.min(s.len()));
-                            info!("sending {} bytes", b.len());
-                            let cell = RelayData::new(cache.get_cached(), STREAM_ID, b)
-                                .into_relay(CIRC_ID);
-                            send.feed(cache.cache(cell)).await.unwrap();
-                        }
-                        send.flush().await.unwrap();
-                        debug!("send done");
-
-                        let mut recv = recv.into_stream();
-                        let mut cell = Cached::map(
-                            recv.next().await.expect("should be sending closing cell"),
-                            Some,
-                        );
-                        let Some(cell) = cast::<RelayEnd>(&mut cell).unwrap() else {
-                            panic!(
-                                "unknown cell with command {}",
-                                Cached::transpose(cell).unwrap().command()
-                            );
-                        };
-                        cache.discard(cell);
-                        info!("received end cell");
-                    }
-                    .instrument(span)
-                });
-
-                info!("reading data");
-                let mut stream = pin!(stream);
-                let mut v = vec![0; data.0.len()];
-                {
-                    let mut s = &mut v[..];
-                    let mut v = Vec::with_capacity(data.1.len() + 1);
+                let data = data.clone();
+                async move {
+                    info!("sending data");
+                    let mut send = send.into_sink();
+                    let mut s = &data.0[..];
                     for &i in &data.1 {
                         let b;
-                        (b, s) = s.split_at_mut(i.min(s.len()));
-                        v.push(IoSliceMut::new(b));
-                    }
-                    v.push(IoSliceMut::new(s));
+                        (b, s) = s.split_at(i.min(s.len()));
+                        if b.is_empty() {
+                            continue;
+                        }
 
-                    let mut s = &mut v[..];
-                    while s.iter().any(|s| !s.is_empty()) {
-                        // SAFETY: We have to transmute, otherwise the slice lifetime is kinda get swallowed.
-                        let n = stream
-                            .as_mut()
-                            .read_vectored(unsafe {
-                                transmute::<&mut [IoSliceMut<'_>], &mut [IoSliceMut<'_>]>(s)
-                            })
-                            .await
-                            .unwrap();
-                        IoSliceMut::advance_slices(&mut s, n);
+                        info!("sending {} bytes", b.len());
+                        let cell =
+                            RelayData::new(cache.get_cached(), STREAM_ID, b).into_relay(CIRC_ID);
+                        send.feed(cache.cache(cell)).await.unwrap();
+                        if s.is_empty() {
+                            break;
+                        }
                     }
+
+                    while !s.is_empty() {
+                        let b;
+                        (b, s) = s.split_at(RELAY_DATA_LENGTH.min(s.len()));
+                        info!("sending {} bytes", b.len());
+                        let cell =
+                            RelayData::new(cache.get_cached(), STREAM_ID, b).into_relay(CIRC_ID);
+                        send.feed(cache.cache(cell)).await.unwrap();
+                    }
+                    send.flush().await.unwrap();
+                    debug!("send done");
+
+                    let mut recv = recv.into_stream();
+                    let mut cell = Cached::map(
+                        recv.next().await.expect("should be sending closing cell"),
+                        Some,
+                    );
+                    let Some(cell) = cast::<RelayEnd>(&mut cell).unwrap() else {
+                        panic!(
+                            "unknown cell with command {}",
+                            Cached::transpose(cell).unwrap().command()
+                        );
+                    };
+                    cache.discard(cell);
+                    info!("received end cell");
                 }
-                debug!("read success");
+                .instrument(span)
+            });
 
-                assert_eq!(v, data.0);
-                info!("closing");
-                stream.close().await.unwrap();
-                debug!("close success");
+            info!("reading data");
+            let mut stream = pin!(stream);
+            let mut v = vec![0; data.0.len()];
+            {
+                let mut s = &mut v[..];
+                let mut v = Vec::with_capacity(data.1.len() + 1);
+                for &i in &data.1 {
+                    let b;
+                    (b, s) = s.split_at_mut(i.min(s.len()));
+                    v.push(IoSliceMut::new(b));
+                }
+                v.push(IoSliceMut::new(s));
 
-                handle.await.unwrap();
+                let mut s = &mut v[..];
+                while s.iter().any(|s| !s.is_empty()) {
+                    // SAFETY: We have to transmute, otherwise the slice lifetime is kinda get swallowed.
+                    let n = stream
+                        .as_mut()
+                        .read_vectored(unsafe {
+                            transmute::<&mut [IoSliceMut<'_>], &mut [IoSliceMut<'_>]>(s)
+                        })
+                        .await
+                        .unwrap();
+                    IoSliceMut::advance_slices(&mut s, n);
+                }
             }
-            .instrument(info_span!("test_read_vectored", id = get_id()));
-            run_test(&rt, f);
+            debug!("read success");
+
+            assert_eq!(v, data.0);
+            info!("closing");
+            stream.close().await.unwrap();
+            debug!("close success");
+
+            handle.await.unwrap();
         }
 
-        proptest!(move |(data in data_strat())| f(&rt, &cache, data));
+        proptest!(move |(data in data_strat())| run_test(&rt, f(id(), cache.clone(), data)));
     }
 
     #[test]
@@ -905,93 +886,84 @@ mod tests {
         let rt = make_rt();
         let cache: CacheTy = Arc::new(StandardCellCache::default());
 
-        fn f(rt: &Runtime, cache: &CacheTy, data: (Vec<u8>, Vec<usize>)) {
-            let cache = cache.clone();
-
+        #[instrument(name = "test_write", skip_all, fields(id = id))]
+        async fn f(id: u64, cache: CacheTy, data: (Vec<u8>, Vec<usize>)) {
             let data = Arc::new(data);
-            let f = async move {
-                let (stream, send, recv) = new_stream(cache.clone());
+            let (stream, send, recv) = new_stream(cache.clone());
 
-                let handle = spawn({
-                    let span = info_span!("send_data");
-                    span.follows_from(Span::current());
+            let handle = spawn({
+                let span = info_span!("send_data");
+                span.follows_from(Span::current());
 
-                    let data = data.clone();
-                    async move {
-                        let mut stream = pin!(stream);
+                let data = data.clone();
+                async move {
+                    let mut stream = pin!(stream);
 
-                        info!("sending data");
-                        let mut s = &data.0[..];
-                        for &i in &data.1 {
-                            let b;
-                            if i >= s.len() {
-                                b = take(&mut s);
-                            } else {
-                                (b, s) = s.split_at(i);
-                            }
+                    info!("sending data");
+                    let mut s = &data.0[..];
+                    for &i in &data.1 {
+                        let b;
+                        (b, s) = s.split_at(i.min(s.len()));
 
-                            info!("sending {} bytes", b.len());
-                            stream.as_mut().write_all(b).await.unwrap();
-                            if s.is_empty() {
-                                break;
-                            }
+                        info!("sending {} bytes", b.len());
+                        stream.as_mut().write_all(b).await.unwrap();
+                        if s.is_empty() {
+                            break;
                         }
-
-                        if !s.is_empty() {
-                            info!("sending {} bytes", s.len());
-                            stream.as_mut().write_all(s).await.unwrap();
-                        }
-                        stream.as_mut().flush().await.unwrap();
-                        debug!("send done");
-
-                        info!("closing");
-                        let mut a = [0; RELAY_DATA_LENGTH];
-                        while stream.as_mut().read(&mut a).await.unwrap() > 0 {}
-                        stream.as_mut().close().await.unwrap();
-                        debug!("close done");
                     }
-                    .instrument(span)
-                });
 
-                info!("reading data");
-                let mut recv = recv.into_stream();
-                let mut v = vec![0; data.0.len()];
-                let mut n = 0;
-                while n < v.len() {
-                    let cell = {
-                        let mut cell = Cached::map(
-                            recv.next().await.expect("stream should not be dropped"),
-                            Some,
-                        );
-                        let Some(cell) = cast::<RelayData>(&mut cell).unwrap() else {
-                            panic!(
-                                "unknown cell with command {}",
-                                Cached::transpose(cell).unwrap().command()
-                            );
-                        };
-                        (*cache).cache_b(cell)
-                    };
-                    let data = cell.data();
-                    v[n..n + data.len()].copy_from_slice(data);
-                    n += data.len();
+                    if !s.is_empty() {
+                        info!("sending {} bytes", s.len());
+                        stream.as_mut().write_all(s).await.unwrap();
+                    }
+                    stream.as_mut().flush().await.unwrap();
+                    debug!("send done");
+
+                    info!("closing");
+                    let mut a = [0; RELAY_DATA_LENGTH];
+                    while stream.as_mut().read(&mut a).await.unwrap() > 0 {}
+                    stream.as_mut().close().await.unwrap();
+                    debug!("close done");
                 }
-                debug!("read success");
+                .instrument(span)
+            });
 
-                assert_eq!(v, data.0);
-                info!("closing");
-                let mut send = send.into_sink();
-                let cell = RelayEnd::new(cache.get_cached(), STREAM_ID, EndReason::default())
-                    .into_relay(CIRC_ID);
-                send.send(cache.cache(cell)).await.unwrap();
-                debug!("close success");
-
-                handle.await.unwrap();
+            info!("reading data");
+            let mut recv = recv.into_stream();
+            let mut v = vec![0; data.0.len()];
+            let mut n = 0;
+            while n < v.len() {
+                let cell = {
+                    let mut cell = Cached::map(
+                        recv.next().await.expect("stream should not be dropped"),
+                        Some,
+                    );
+                    let Some(cell) = cast::<RelayData>(&mut cell).unwrap() else {
+                        panic!(
+                            "unknown cell with command {}",
+                            Cached::transpose(cell).unwrap().command()
+                        );
+                    };
+                    (*cache).cache_b(cell)
+                };
+                let data = cell.data();
+                v[n..n + data.len()].copy_from_slice(data);
+                n += data.len();
             }
-            .instrument(info_span!("test_write", id = get_id()));
-            run_test(&rt, f);
+            debug!("read success");
+
+            assert_eq!(v, data.0);
+            info!("closing");
+            let mut send = send.into_sink();
+            let cell = RelayEnd::new(cache.get_cached(), STREAM_ID, EndReason::default())
+                .into_relay(CIRC_ID);
+            send.send(cache.cache(cell)).await.unwrap();
+            debug!("close success");
+
+            handle.await.unwrap();
         }
 
-        proptest!(move |(data in data_strat())| f(&rt, &cache, data));
+        proptest!(move |(data in data_strat())| run_test(&rt, f(id(), cache.clone(), data)));
     }
 
     #[test]
@@ -999,89 +971,84 @@ mod tests {
         let rt = make_rt();
         let cache: CacheTy = Arc::new(StandardCellCache::default());
 
-        fn f(rt: &Runtime, cache: &CacheTy, data: (Vec<u8>, Vec<usize>)) {
-            let cache = cache.clone();
-
+        #[instrument(name = "test_write_vectored", skip_all, fields(id = id))]
+        async fn f(id: u64, cache: CacheTy, data: (Vec<u8>, Vec<usize>)) {
             let data = Arc::new(data);
-            let f = async move {
-                let (stream, send, recv) = new_stream(cache.clone());
+            let (stream, send, recv) = new_stream(cache.clone());
 
-                let handle = spawn({
-                    let span = info_span!("send_data");
-                    span.follows_from(Span::current());
+            let handle = spawn({
+                let span = info_span!("send_data");
+                span.follows_from(Span::current());
 
-                    let data = data.clone();
-                    async move {
-                        let mut stream = pin!(stream);
+                let data = data.clone();
+                async move {
+                    let mut stream = pin!(stream);
 
-                        info!("sending data");
-                        {
-                            let mut s = &data.0[..];
-                            let mut v = Vec::with_capacity(data.1.len() + 1);
-                            for &i in &data.1 {
-                                let b;
-                                (b, s) = s.split_at(i.min(s.len()));
-                                v.push(IoSlice::new(b));
-                            }
-                            v.push(IoSlice::new(s));
-
-                            let mut s = &mut v[..];
-                            while s.iter().any(|s| !s.is_empty()) {
-                                let n = stream.as_mut().write_vectored(s).await.unwrap();
-                                IoSlice::advance_slices(&mut s, n);
-                            }
+                    info!("sending data");
+                    {
+                        let mut s = &data.0[..];
+                        let mut v = Vec::with_capacity(data.1.len() + 1);
+                        for &i in &data.1 {
+                            let b;
+                            (b, s) = s.split_at(i.min(s.len()));
+                            v.push(IoSlice::new(b));
                         }
-                        stream.as_mut().flush().await.unwrap();
-                        debug!("send done");
+                        v.push(IoSlice::new(s));
 
-                        info!("closing");
-                        let mut a = [0; RELAY_DATA_LENGTH];
-                        while stream.as_mut().read(&mut a).await.unwrap() > 0 {}
-                        debug!("close done");
-                        stream.as_mut().close().await.unwrap();
+                        let mut s = &mut v[..];
+                        while s.iter().any(|s| !s.is_empty()) {
+                            let n = stream.as_mut().write_vectored(s).await.unwrap();
+                            IoSlice::advance_slices(&mut s, n);
+                        }
                     }
-                    .instrument(span)
-                });
+                    stream.as_mut().flush().await.unwrap();
+                    debug!("send done");
 
-                info!("reading data");
-                let mut recv = recv.into_stream();
-                let mut v = vec![0; data.0.len()];
-                let mut n = 0;
-                while n < v.len() {
-                    let cell = {
-                        let mut cell = Cached::map(
-                            recv.next().await.expect("stream should not be dropped"),
-                            Some,
-                        );
-                        let Some(cell) = cast::<RelayData>(&mut cell).unwrap() else {
-                            panic!(
-                                "unknown cell with command {}",
-                                Cached::transpose(cell).unwrap().command()
-                            );
-                        };
-                        (*cache).cache_b(cell)
-                    };
-                    let data = cell.data();
-                    v[n..n + data.len()].copy_from_slice(data);
-                    n += data.len();
-                    debug!("read {} bytes", data.len());
+                    info!("closing");
+                    let mut a = [0; RELAY_DATA_LENGTH];
+                    while stream.as_mut().read(&mut a).await.unwrap() > 0 {}
+                    debug!("close done");
+                    stream.as_mut().close().await.unwrap();
                 }
-                debug!("read success");
+                .instrument(span)
+            });
 
-                assert_eq!(v, data.0);
-                info!("closing");
-                let mut send = send.into_sink();
-                let cell = RelayEnd::new(cache.get_cached(), STREAM_ID, EndReason::default())
-                    .into_relay(CIRC_ID);
-                send.send(cache.cache(cell)).await.unwrap();
-                debug!("close success");
-
-                handle.await.unwrap();
+            info!("reading data");
+            let mut recv = recv.into_stream();
+            let mut v = vec![0; data.0.len()];
+            let mut n = 0;
+            while n < v.len() {
+                let cell = {
+                    let mut cell = Cached::map(
+                        recv.next().await.expect("stream should not be dropped"),
+                        Some,
+                    );
+                    let Some(cell) = cast::<RelayData>(&mut cell).unwrap() else {
+                        panic!(
+                            "unknown cell with command {}",
+                            Cached::transpose(cell).unwrap().command()
+                        );
+                    };
+                    (*cache).cache_b(cell)
+                };
+                let data = cell.data();
+                v[n..n + data.len()].copy_from_slice(data);
+                n += data.len();
+                debug!("read {} bytes", data.len());
             }
-            .instrument(info_span!("test_write_vectored", id = get_id()));
-            run_test(&rt, f);
+            debug!("read success");
+
+            assert_eq!(v, data.0);
+            info!("closing");
+            let mut send = send.into_sink();
+            let cell = RelayEnd::new(cache.get_cached(), STREAM_ID, EndReason::default())
+                .into_relay(CIRC_ID);
+            send.send(cache.cache(cell)).await.unwrap();
+            debug!("close success");
+
+            handle.await.unwrap();
         }
 
-        proptest!(move |(data in data_strat())| f(&rt, &cache, data));
+        proptest!(move |(data in data_strat())| run_test(&rt, f(id(), cache.clone(), data)));
     }
 }
