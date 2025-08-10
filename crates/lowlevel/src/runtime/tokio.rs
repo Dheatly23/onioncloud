@@ -11,6 +11,7 @@ use tokio::net::TcpStream;
 use tokio::task::{JoinHandle, spawn};
 use tokio::time::{Instant as TokioInstant, Sleep, sleep_until};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
+use tracing::{Instrument, Span, trace_span};
 
 use super::{Runtime, Stream, Timer};
 use crate::private::{SealWrap, Sealed};
@@ -33,7 +34,9 @@ impl Runtime for TokioRuntime {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        SealWrap(spawn(fut))
+        let span = trace_span!("spawn");
+        span.follows_from(Span::current());
+        SealWrap(spawn(fut.instrument(span)))
     }
 
     fn timer(&self, timeout: Instant) -> Self::Timer {
