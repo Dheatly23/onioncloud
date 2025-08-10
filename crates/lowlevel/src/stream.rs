@@ -145,7 +145,7 @@ impl DirStream {
 
             if let Some(cell) = cast::<RelayData>(&mut cell).map_err(map_io_err)? {
                 // RELAY_DATA cell
-                if cell.data().len() > 0 {
+                if !cell.data().is_empty() {
                     return Ready(Ok(Some(cell)));
                 }
                 cache.discard(cell);

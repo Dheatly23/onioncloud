@@ -380,15 +380,15 @@ impl InitState {
                             };
                             let pk_id = UnverifiedRsaCert::new(data)?.verify(&pk_rsa)?.key;
 
-                            if let Some(relay_id) = cfg.peer_id_ed() {
-                                if id.ct_ne(relay_id).into() {
-                                    error!(
-                                        "relay ED25519 ID mismatch (expect {}, got {})",
-                                        print_ed(relay_id),
-                                        print_ed(&pk_id),
-                                    );
-                                    return Err(errors::CertVerifyError.into());
-                                }
+                            if let Some(relay_id) = cfg.peer_id_ed()
+                                && id.ct_ne(relay_id).into()
+                            {
+                                error!(
+                                    "relay ED25519 ID mismatch (expect {}, got {})",
+                                    print_ed(relay_id),
+                                    print_ed(&pk_id),
+                                );
+                                return Err(errors::CertVerifyError.into());
                             }
 
                             let Some(data) = cert_4 else {
@@ -588,11 +588,11 @@ fn check_cert(
 
     unverified.verify(pk)?;
 
-    if let Some(k) = signed_with {
-        if k != pk {
-            error!("signed-by key does not match signing key");
-            return Err(errors::CertVerifyError.into());
-        }
+    if let Some(k) = signed_with
+        && k != pk
+    {
+        error!("signed-by key does not match signing key");
+        return Err(errors::CertVerifyError.into());
     }
 
     Ok(())
