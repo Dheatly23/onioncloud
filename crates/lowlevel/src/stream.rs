@@ -152,7 +152,7 @@ impl DirStream {
             } else if let Some(cell) = cast::<RelayEnd>(&mut cell).map_err(map_io_err)? {
                 // RELAY_END cell
                 let reason = cache.cache_b(cell).reason();
-                info!(reason = display(reason), "stream closed");
+                info!(%reason, "stream closed");
                 *state = State::Shutdown;
                 ready!(self.poll_close(cx))?;
                 break;

@@ -787,12 +787,12 @@ fn read_handler(
                 // DESTROY cell received, force closing circuit.
                 let cell = cfg.cache.cache(cell);
                 let reason = cell.display_reason();
-                debug!(id, reason = display(reason), "peer is closing circuit");
+                debug!(id, %reason, "peer is closing circuit");
                 match circ.send(Cached::map_into(cell)) {
                     Ok(()) => (),
                     Err(TrySendError::Full(_)) => warn!(
                         id,
-                        reason = display(reason),
+                        %reason,
                         "cannot send DESTROY cell to handler because channel is full"
                     ),
                     // Circuit is closing while peer is closing.
@@ -837,7 +837,7 @@ fn read_handler(
                     debug!(
                         id,
                         mult,
-                        time = debug(t),
+                        time = ?t,
                         "cannot send cell, circuit is full"
                     );
                 }

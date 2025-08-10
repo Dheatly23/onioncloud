@@ -398,7 +398,7 @@ impl InitState {
             });
         } else if let Some(cell) = cast::<Destroy>(&mut cell)? {
             let cell = (*cfg.cache).cache_b(cell);
-            warn!(reason = display(cell.display_reason()), "circuit destroyed");
+            warn!(reason = %cell.display_reason(), "circuit destroyed");
             return Err(errors::ChannelClosedError.into());
         }
 
@@ -545,7 +545,7 @@ impl SteadyState {
                 cell.into()
             } else if let Some(cell) = cast::<Destroy>(&mut cell)? {
                 let cell = (*cfg.cache).cache_b(cell);
-                warn!(reason = display(cell.display_reason()), "circuit destroyed");
+                warn!(reason = %cell.display_reason(), "circuit destroyed");
                 return Err(errors::ChannelClosedError.into());
             } else {
                 let cell = Cached::transpose(cell).unwrap();
@@ -611,8 +611,8 @@ impl SteadyState {
                         (Some(a), Some(b)) if a == b => (),
                         (Some(a), Some(b)) => {
                             debug!(
-                                expect = display(print_hex(&b)),
-                                sent = display(print_hex(&a)),
+                                expect = %print_hex(&b),
+                                sent = %print_hex(&a),
                                 "SENDME digest mismatch"
                             );
                             return Err(errors::CircuitProtocolError(
@@ -705,12 +705,12 @@ fn read_handler(
                 // RELAY_END cell received, force closing stream.
                 let cell = cfg.cache.cache(cell);
                 let reason = cell.reason();
-                debug!(id, reason = display(&reason), "peer is closing stream");
+                debug!(id, %reason, "peer is closing stream");
                 match stream.send(Cached::map(cell, |c| c.into_relay(cfg.circ_id))) {
                     Ok(()) => (),
                     Err(TrySendError::Full(_)) => warn!(
                         id,
-                        reason = display(&reason),
+                        %reason,
                         "cannot send RELAY_END cell to handler because channel is full"
                     ),
                     // Stream is closing while peer is closing.
@@ -770,7 +770,7 @@ fn read_handler(
                     debug!(
                         id,
                         mult,
-                        time = debug(t),
+                        time = ?t,
                         "cannot send cell, stream is full"
                     );
                 }

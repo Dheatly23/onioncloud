@@ -286,7 +286,7 @@ impl<R: Runtime, C: ChannelController, M> Channel<R, C, M> {
         let peer_addr = match stream.peer_addr() {
             Ok(v) => v,
             Err(e) => {
-                error!(error = display(e), "cannot get peer address");
+                error!(error = %e, "cannot get peer address");
                 return false;
             }
         };
@@ -598,7 +598,7 @@ async fn handle_channel<R: Runtime, C: ChannelController + 'static>(
     let stream = match stream {
         Ok(v) => v,
         Err(e) => {
-            error!(error = display(e), "cannot connect to peer");
+            error!(error = %e, "cannot connect to peer");
             return false;
         }
     };
@@ -606,7 +606,7 @@ async fn handle_channel<R: Runtime, C: ChannelController + 'static>(
     let peer_addr = match stream.peer_addr() {
         Ok(v) => v,
         Err(e) => {
-            error!(error = display(e), "cannot get peer address");
+            error!(error = %e, "cannot get peer address");
             return false;
         }
     };
@@ -625,7 +625,7 @@ async fn handle_stream<R: Runtime, C: ChannelController + 'static>(
     let tls = match setup_client(peer_addr.ip()) {
         Ok(v) => v,
         Err(e) => {
-            error!(error = display(e), "rustls setup");
+            error!(error = %e, "rustls setup");
             return false;
         }
     };
@@ -653,7 +653,7 @@ async fn handle_stream<R: Runtime, C: ChannelController + 'static>(
     match fut.await {
         Ok(()) => true,
         Err(e) => {
-            error!(error = display(e), "channel error");
+            error!(error = %e, "channel error");
             false
         }
     }
@@ -827,7 +827,7 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                     continue;
                 }
                 if let Some(time) = ret.timeout {
-                    debug!(timeout = debug(time), "resetting timer");
+                    debug!(timeout = ?time, "resetting timer");
                     timer.as_mut().set(this.runtime, time);
                     pending &= !FLAG_TIMEOUT;
                 } else {

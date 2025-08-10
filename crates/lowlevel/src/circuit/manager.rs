@@ -323,7 +323,7 @@ async fn handle_create_circuit<
             return false;
         }
         Ok(Err(e)) => {
-            error!(error = display(e), "error in circuit creation");
+            error!(error = %e, "error in circuit creation");
             return false;
         }
     };
@@ -366,7 +366,7 @@ async fn handle_circuit<R: Runtime, C: 'static + CircuitController>(
         Ok(Some(reason)) => (reason, true),
         Ok(None) => return false,
         Err(e) => {
-            error!(error = display(&e), "circuit error");
+            error!(error = %&e, "circuit error");
             (C::error_reason(e), false)
         }
     };
@@ -511,7 +511,7 @@ impl<R: Runtime, C: CircuitController> Future for CircuitFutSteady<'_, R, C> {
                 }
 
                 if let Some(time) = timeout {
-                    debug!(timeout = debug(time), "resetting timer");
+                    debug!(timeout = ?time, "resetting timer");
                     this.timer.as_mut().set(this.runtime, time);
                     pending &= !FLAG_TIMEOUT;
                 } else {
