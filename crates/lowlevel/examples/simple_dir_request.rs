@@ -6,9 +6,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::{sleep, timeout};
 use tracing::{info, warn};
 
 use onioncloud_lowlevel::cache::{CellCache, StandardCellCache};
+use onioncloud_lowlevel::cell::padding::{NegotiateCommand, NegotiateCommandV0};
 use onioncloud_lowlevel::channel::ChannelConfig;
 use onioncloud_lowlevel::channel::controller::{UserConfig, UserControlMsg, UserController};
 use onioncloud_lowlevel::channel::manager::ChannelManager;
@@ -62,6 +64,13 @@ async fn main() {
         fn get_cache(&self) -> Arc<dyn Send + Sync + CellCache> {
             self.cache.clone()
         }
+
+        fn get_padding_param(&self, _: u16) -> NegotiateCommand {
+            NegotiateCommand::V0(NegotiateCommandV0::Start {
+                low: 1500,
+                high: 2000,
+            })
+        }
     }
 
     let cache = Arc::<StandardCellCache>::default();
@@ -108,6 +117,9 @@ async fn main() {
     };
     let mut stream = pin!(DirStream::new(cache.clone(), new_stream));
 
+    info!("sleeping for 5 seconds");
+    sleep(Duration::from_secs(5)).await;
+
     info!("sending request");
 
     // NOTE: Change request here.
@@ -117,10 +129,13 @@ async fn main() {
         .unwrap();
     stream.flush().await.unwrap();
 
+    info!("sleeping for 5 seconds");
+    sleep(Duration::from_secs(5)).await;
+
     info!("reading response");
 
     let mut s = Vec::new();
-    if tokio::time::timeout(Duration::from_secs(5), async {
+    if timeout(Duration::from_secs(5), async {
         stream.read_to_end(&mut s).await.unwrap();
     })
     .await
@@ -130,6 +145,9 @@ async fn main() {
     }
     info!("read response: {}", String::from_utf8_lossy(&s));
     drop(s);
+
+    info!("sleeping for 5 seconds");
+    sleep(Duration::from_secs(5)).await;
 
     info!("starting graceful shutdown");
 

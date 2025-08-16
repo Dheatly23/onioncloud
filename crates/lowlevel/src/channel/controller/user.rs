@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use digest::Digest;
 use flume::TrySendError;
 use futures_channel::oneshot::{Receiver, Sender, channel};
+use rand::distributions::uniform::{UniformInt, UniformSampler};
+use rand::prelude::*;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tracing::{debug, error, info, instrument, trace, warn};
@@ -21,7 +23,9 @@ use crate::cell::create::Create2;
 use crate::cell::destroy::{Destroy, DestroyReason};
 use crate::cell::dispatch::{CellReader, CellType, WithCellConfig};
 use crate::cell::netinfo::Netinfo;
-use crate::cell::padding::{Padding, VPadding};
+use crate::cell::padding::{
+    NegotiateCommand, NegotiateCommandV0, Padding, PaddingNegotiate, VPadding,
+};
 use crate::cell::versions::Versions;
 use crate::cell::writer::CellWriter;
 use crate::cell::{Cell, CellHeader, CellLike, FixedCell, cast};
@@ -44,6 +48,16 @@ pub trait UserConfig: ChannelConfig {
     ///
     /// To maximize cache utilization, cache should be as global as possible.
     fn get_cache(&self) -> Arc<dyn Send + Sync + CellCache>;
+
+    /// Get padding parameter.
+    ///
+    /// By default padding is disabled.
+    ///
+    /// **NOTE: Only at link version 5 or higher do PADDING_NEGOTIATE cell is sent.
+    fn get_padding_param(&self, linkver: u16) -> NegotiateCommand {
+        let _ = linkver;
+        NegotiateCommand::V0(NegotiateCommandV0::Stop)
+    }
 }
 
 #[derive(Clone)]
@@ -103,11 +117,14 @@ pub struct UserController<Cfg> {
 }
 
 /// [`UserController`] control messages.
+#[non_exhaustive]
 pub enum UserControlMsg {
     /// Force shutdown of channel.
     Shutdown,
     /// Create new circuit.
     NewCircuit(Sender<Result<NewCircuit<CachedCell>, errors::NoFreeCircIDError>>),
+    /// Set padding configuration.
+    SetPadding(NegotiateCommand),
 }
 
 impl UserControlMsg {
@@ -130,7 +147,10 @@ enum State<Cfg> {
     Init {
         state: InitState,
         cfg: Arc<dyn Send + Sync + AsRef<Cfg>>,
+
         pending_open: VecDeque<Sender<Result<NewCircuit<CachedCell>, errors::NoFreeCircIDError>>>,
+
+        padding_type: Option<NegotiateCommand>,
     },
     Steady(SteadyState),
     Shutdown,
@@ -153,6 +173,7 @@ enum ConfigReadState {
 struct SteadyState {
     cell_read: Reader,
     cell_write: CellWriter<CachedCell>,
+    is_write_padding: bool,
 
     in_buffer: InBuffer<Cell>,
     out_buffer: OutBuffer<Cell>,
@@ -161,6 +182,15 @@ struct SteadyState {
     pending_close: VecDeque<(NonZeroU32, DestroyReason)>,
 
     close_scan: Instant,
+
+    padding_type: NegotiateCommand,
+    padding_time: PaddingTime,
+}
+
+enum PaddingTime {
+    Unnegotiated,
+    Time(Instant),
+    Stop,
 }
 
 /// [`UserController`] circuit metadata type.
@@ -208,6 +238,7 @@ impl<Cfg: 'static + UserConfig + Send + Sync> ChannelController for UserControll
                 state: InitState::Init,
                 cfg: config,
                 pending_open: VecDeque::new(),
+                padding_type: None,
             },
 
             last_packet: None,
@@ -240,6 +271,7 @@ impl<'a, Cfg: 'static + UserConfig + Send + Sync>
                     ref mut state,
                     ref cfg,
                     ref mut pending_open,
+                    ref mut padding_type,
                 } => match state.handle(&self.link_cfg, last_packet, cfg, &mut input)? {
                     Break(()) => break,
                     Continue(false) => (),
@@ -249,6 +281,7 @@ impl<'a, Cfg: 'static + UserConfig + Send + Sync>
                         self.state = State::Steady(SteadyState {
                             cell_read: Reader::new(self.link_cfg.clone()),
                             cell_write: CellWriter::new_finished(),
+                            is_write_padding: false,
 
                             in_buffer: InBuffer::new(),
                             out_buffer: OutBuffer::new(),
@@ -257,6 +290,13 @@ impl<'a, Cfg: 'static + UserConfig + Send + Sync>
                             pending_close: VecDeque::new(),
 
                             close_scan: input.time() + CLOSE_SCAN_TIMEOUT,
+
+                            padding_type: padding_type.take().unwrap_or_else(|| {
+                                (**cfg)
+                                    .as_ref()
+                                    .get_padding_param(self.link_cfg.linkver.inner.version())
+                            }),
+                            padding_time: PaddingTime::Unnegotiated,
                         })
                     }
                 },
@@ -507,6 +547,17 @@ impl<Cfg: 'static + UserConfig + Send + Sync> Handle<ControlMsg<UserControlMsg>>
                 State::Steady(ref mut s) => s.pending_open.push_back(msg),
                 State::Shutdown => (),
             },
+            UserControlMsg::SetPadding(data) => match self.state {
+                State::Init {
+                    ref mut padding_type,
+                    ..
+                } => *padding_type = Some(data),
+                State::Steady(ref mut s) => {
+                    s.padding_type = data;
+                    s.padding_time = PaddingTime::Unnegotiated;
+                }
+                State::Shutdown => (),
+            },
         }
 
         Ok(())
@@ -687,6 +738,12 @@ impl SteadyState {
         timeout = timeout.min(self.close_scan);
         if let Some(t) = full_timeout {
             // Full timeout
+            timeout = timeout.min(t);
+        }
+        if flags & FLAG_WRITE_EMPTY != 0
+            && let PaddingTime::Time(t) = self.padding_time
+        {
+            // Padding timeout
             timeout = timeout.min(t);
         }
 
@@ -884,7 +941,23 @@ fn write_handler(
         }
         if !finished {
             // Writer just finished writing
-            update_last_packet(last_packet, input);
+            if !take(&mut this.is_write_padding) {
+                update_last_packet(last_packet, input);
+            }
+            if !matches!(this.padding_time, PaddingTime::Unnegotiated) {
+                this.padding_time = match this.padding_type {
+                    NegotiateCommand::V0(NegotiateCommandV0::Start { low, high })
+                        if high >= low =>
+                    {
+                        let mut rng = ThreadRng::default();
+                        let sampler = UniformInt::<u16>::new_inclusive(low, high);
+                        let n = sampler.sample(&mut rng).max(sampler.sample(&mut rng));
+                        trace!(time_ms = n, "resetting padding timeout");
+                        PaddingTime::Time(input.time() + Duration::from_millis(n.into()))
+                    }
+                    _ => PaddingTime::Stop,
+                };
+            }
         }
 
         let mut found: Option<CachedCell> = None;
@@ -902,6 +975,20 @@ fn write_handler(
                 cfg.cache
                     .cache(Destroy::new(cfg.cache.get_cached(), id, reason).into()),
             );
+        }
+
+        if found.is_none()
+            && let PaddingTime::Unnegotiated = this.padding_time
+        {
+            this.padding_time = PaddingTime::Stop;
+
+            // Prepend PADDING_NEGOTIATE cell.
+            if cfg.linkver.inner.version() >= 5 {
+                debug!(padding = ?this.padding_type, "negotiate padding");
+                found = Some(cfg.cache.cache(
+                    PaddingNegotiate::new(cfg.cache.get_cached(), this.padding_type.clone()).into(),
+                ));
+            }
         }
 
         while found.is_none() {
@@ -928,10 +1015,22 @@ fn write_handler(
             };
         }
 
+        if found.is_none()
+            && let PaddingTime::Time(time) = this.padding_time
+            && time <= input.time()
+        {
+            // Append PADDING cell.
+            let mut cell = cfg.cache.cache(Padding::new(cfg.cache.get_cached()));
+            cell.fill();
+            found = Some(Cached::map_into(cell));
+            trace!("sending padding");
+        }
+
         let Some(cell) = found else {
             flags |= FLAG_WRITE_EMPTY;
             break;
         };
+        this.is_write_padding = matches!(cell.command, Padding::ID | VPadding::ID);
         this.cell_write = CellWriter::with_cell_config(cell, &cfg)?;
     }
 
