@@ -216,15 +216,17 @@ impl<T> Inner<T> {
     #[cfg_attr(any(test, feature = "tracing"), instrument(level = "trace"))]
     unsafe fn drop(ptr: *const Self, send: bool) {
         let this = &*ptr;
-        assert_data_state(this.state.data.fetch_or(FLAG_DISCONNECTED, Relaxed));
+        let state = assert_data_state(this.state.data.fetch_or(FLAG_DISCONNECTED, Release));
 
-        this.wake_waker(!send);
+        if state & FLAG_DISCONNECTED == 0 {
+            this.wake_waker(!send);
+        }
 
-        let refcnt = this.state.refcnt.fetch_sub(1, Release);
+        let refcnt = this.state.refcnt.fetch_sub(1, AcqRel);
         debug_assert!(refcnt <= 2);
         if refcnt == 1 {
             // Last reference holder, dropping inner
-            if assert_data_state(this.state.data.load(Relaxed)) & FLAG_DATA_READY != 0 {
+            if assert_data_state(this.state.data.load(Acquire)) & FLAG_DATA_READY != 0 {
                 // SAFETY: Data is initialized
                 #[cfg(any(test, feature = "tracing"))]
                 debug!("dropping data");
@@ -248,9 +250,9 @@ impl<T> Inner<T> {
 
     unsafe fn register_waker(&self, cx: &mut Context<'_>, send: bool) {
         let (waker, state) = if send {
-            (&mut *self.send_waker.get(), &self.state.send_waker)
+            (&self.send_waker, &self.state.send_waker)
         } else {
-            (&mut *self.recv_waker.get(), &self.state.recv_waker)
+            (&self.recv_waker, &self.state.recv_waker)
         };
 
         // Copy atomic waker register()
@@ -260,8 +262,8 @@ impl<T> Inner<T> {
                 .unwrap_or_else(|x| x),
         ) {
             0 => {
-                // SAFETY: Waker is initialized and we are registering
-                if let Some(w) = waker {
+                // SAFETY: Waker is initialized and we're registering
+                if let Some(w) = &mut *waker.get() {
                     #[cfg(any(test, feature = "tracing"))]
                     debug!("swapping {} waker", if send { "send" } else { "recv" });
 
@@ -270,23 +272,29 @@ impl<T> Inner<T> {
                     #[cfg(any(test, feature = "tracing"))]
                     debug!("setting {} waker", if send { "send" } else { "recv" });
 
-                    *waker = Some(cx.waker().clone());
+                    *waker.get() = Some(cx.waker().clone());
                 }
 
                 match state.compare_exchange(FLAG_REGISTERING, 0, AcqRel, Acquire) {
                     Err(s) => {
+                        // Must be partner waking us up while we're registering
                         assert_waker_state(s);
                         assert_eq!(s, FLAG_REGISTERING | FLAG_WAKING);
-                        state.swap(0, AcqRel);
+                        state.store(0, Release);
                     }
                     Ok(s) => {
                         assert_waker_state(s);
                     }
                 }
             }
-            FLAG_WAKING => cx.waker().wake_by_ref(),
-            _ => (),
-        };
+            s => {
+                debug_assert_eq!(
+                    s & FLAG_REGISTERING,
+                    0,
+                    "there should only be one registerer"
+                );
+            }
+        }
     }
 
     unsafe fn wake_waker(&self, send: bool) {
@@ -297,7 +305,7 @@ impl<T> Inner<T> {
         };
 
         // Copy atomic waker take()
-        if assert_waker_state(state.fetch_or(FLAG_WAKING, AcqRel)) == 0 {
+        if assert_waker_state(state.fetch_or(FLAG_WAKING, Acquire)) == 0 {
             // SAFETY: Waker is initialized and neither registering nor waking from other thread
             #[cfg(any(test, feature = "tracing"))]
             debug!("waking {} waker", send_frag(send));
@@ -352,7 +360,7 @@ impl<T> Inner<T> {
 
     #[cfg_attr(any(test, feature = "tracing"), instrument(level = "trace", skip_all, fields(?self = self as *const Self)))]
     unsafe fn poll_send(&self, cx: &mut Context<'_>) -> Poll<Result<(), TrySendError<T>>> {
-        let mut has_registered = false;
+        let mut needs_repoll = true;
 
         loop {
             let state = assert_data_state(self.state.data.load(Acquire));
@@ -374,20 +382,20 @@ impl<T> Inner<T> {
                 #[cfg(any(test, feature = "tracing"))]
                 debug!("item sent");
                 return Poll::Ready(Ok(()));
-            } else if has_registered {
+            } else if !needs_repoll {
                 #[cfg(any(test, feature = "tracing"))]
-                tracing::info!("pending");
+                tracing::debug!("pending");
                 return Poll::Pending;
             }
 
             self.register_waker(cx, true);
-            has_registered = true;
+            needs_repoll = false;
         }
     }
 
     #[cfg_attr(any(test, feature = "tracing"), instrument(level = "trace", skip_all, fields(?self = self as *const Self)))]
     unsafe fn poll_close(&self, cx: &mut Context<'_>) -> Poll<Result<(), TrySendError<T>>> {
-        let mut has_registered = false;
+        let mut needs_repoll = true;
 
         loop {
             let state = assert_data_state(self.state.data.fetch_or(FLAG_CLOSING, Acquire));
@@ -411,20 +419,20 @@ impl<T> Inner<T> {
                 #[cfg(any(test, feature = "tracing"))]
                 debug!("sender closed");
                 return Poll::Ready(Ok(()));
-            } else if has_registered {
+            } else if !needs_repoll {
                 #[cfg(any(test, feature = "tracing"))]
-                tracing::info!("pending");
+                tracing::debug!("pending");
                 return Poll::Pending;
             }
 
             self.register_waker(cx, true);
-            has_registered = true;
+            needs_repoll = false;
         }
     }
 
     #[cfg_attr(any(test, feature = "tracing"), instrument(level = "trace", skip_all, fields(?self = self as *const Self)))]
     unsafe fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        let mut has_registered = false;
+        let mut needs_repoll = true;
 
         loop {
             let state = assert_data_state(self.state.data.load(Acquire));
@@ -449,14 +457,14 @@ impl<T> Inner<T> {
                 #[cfg(any(test, feature = "tracing"))]
                 debug!("sender closed");
                 return Poll::Ready(None);
-            } else if has_registered {
+            } else if !needs_repoll {
                 #[cfg(any(test, feature = "tracing"))]
-                tracing::info!("pending");
+                tracing::debug!("pending");
                 return Poll::Pending;
             }
 
             self.register_waker(cx, false);
-            has_registered = true;
+            needs_repoll = false;
         }
     }
 }
