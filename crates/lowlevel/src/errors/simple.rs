@@ -335,3 +335,38 @@ impl CircuitHandshakeError {
 pub struct ChannelClosedError;
 
 display2debug! {ChannelClosedError}
+
+pub(crate) enum NetdocParseErrorType {
+    InvalidKeywordChar,
+    InvalidArgumentChar,
+    InvalidObjectFormat,
+    InvalidObjectContent,
+    NoNewline,
+    OptKeyword,
+    Null,
+}
+
+impl Display for NetdocParseErrorType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::InvalidKeywordChar => write!(f, "invalid keyword character"),
+            Self::InvalidArgumentChar => write!(f, "invalid argument character"),
+            Self::InvalidObjectFormat => write!(f, "invalid object format"),
+            Self::InvalidObjectContent => write!(f, "invalid object content"),
+            Self::NoNewline => write!(f, "no newline found"),
+            Self::OptKeyword => write!(f, "optional keyword"),
+            Self::Null => write!(f, "null character"),
+        }
+    }
+}
+
+/// Netdoc parsing error.
+#[derive(Error)]
+#[error("error parsing netdoc at line {line} byte {pos}: {reason}")]
+pub struct NetdocParseError {
+    pub(crate) line: usize,
+    pub(crate) pos: usize,
+    pub(crate) reason: NetdocParseErrorType,
+}
+
+display2debug! {NetdocParseError}

@@ -5,6 +5,7 @@ pub mod circuit;
 pub mod crypto;
 pub mod errors;
 pub mod linkver;
+pub mod parse;
 pub mod runtime;
 pub mod stream;
 pub mod util;
