@@ -342,7 +342,6 @@ pub(crate) enum NetdocParseErrorType {
     InvalidObjectFormat,
     InvalidObjectContent,
     NoNewline,
-    OptKeyword,
     Null,
 }
 
@@ -354,7 +353,6 @@ impl Display for NetdocParseErrorType {
             Self::InvalidObjectFormat => write!(f, "invalid object format"),
             Self::InvalidObjectContent => write!(f, "invalid object content"),
             Self::NoNewline => write!(f, "no newline found"),
-            Self::OptKeyword => write!(f, "optional keyword"),
             Self::Null => write!(f, "null character"),
         }
     }

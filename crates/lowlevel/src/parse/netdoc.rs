@@ -18,6 +18,7 @@ pub struct NetdocParser<'a> {
 pub struct Item<'a> {
     s: &'a str,
     byte_off: usize,
+    is_opt: bool,
     kw_len: usize,
     line_len: usize,
     object_len: usize,
@@ -45,28 +46,26 @@ impl<'a> Iterator for NetdocParser<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         while self.s.len() != self.off {
             // SAFETY: Offset will always be less than string length
-            let s = unsafe { self.s.get_unchecked(self.off..) };
+            let mut s = unsafe { self.s.get_unchecked(self.off..) };
+            let is_opt = matches!(s.as_bytes(), [b'o', b'p', b't', b' ' | b'\t', ..]);
 
-            if matches!(s.as_bytes(), b"opt " | b"opt\t") {
-                return Some(Err(NetdocParseError {
-                    line: self.line,
-                    pos: 0,
-                    reason: ErrType::OptKeyword,
-                }));
-            }
+            let mut n = if is_opt {
+                // SAFETY: String is prefixed with opt
+                s = unsafe { s.get_unchecked(4..) };
+                4
+            } else {
+                0
+            };
 
-            let mut ki = s.len();
-            let mut li = ki;
+            let mut t: Option<(usize, bool)> = None;
             for (i, c) in s.bytes().enumerate() {
                 match c {
                     b' ' | b'\t' if i != 0 => {
-                        ki = i;
-                        li = i + 1;
+                        t = Some((i, false));
                         break;
                     }
                     b'\n' if i != 0 => {
-                        ki = i;
-                        li = i;
+                        t = Some((i, true));
                         break;
                     }
                     b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' => (),
@@ -75,16 +74,14 @@ impl<'a> Iterator for NetdocParser<'a> {
                         self.off = self.s.len();
                         return Some(Err(NetdocParseError {
                             line: self.line,
-                            pos: i,
+                            pos: n + i,
                             reason: ErrType::InvalidKeywordChar,
                         }));
                     }
                 }
             }
 
-            // SAFETY: Index is within or at the end of string
-            let s = unsafe { s.get_unchecked(li..) };
-            let Some(bi) = s.find('\n') else {
+            let Some((ki, is_endl)) = t else {
                 self.off = self.s.len();
                 return Some(Err(NetdocParseError {
                     line: self.line,
@@ -93,8 +90,30 @@ impl<'a> Iterator for NetdocParser<'a> {
                 }));
             };
 
-            // SAFETY: Index is at newline within string
-            let (a, s) = unsafe { (s.get_unchecked(..bi), s.get_unchecked(bi + 1..)) };
+            let a;
+            let li = n + if is_endl {
+                a = "";
+                // SAFETY: Index is at newline within string
+                s = unsafe { s.get_unchecked(ki + 1..) };
+                n += ki + 1;
+                ki
+            } else {
+                // SAFETY: Index is within or at the end of string
+                s = unsafe { s.get_unchecked(ki + 1..) };
+                let Some(i) = s.find('\n') else {
+                    self.off = self.s.len();
+                    return Some(Err(NetdocParseError {
+                        line: self.line,
+                        pos: 0,
+                        reason: ErrType::NoNewline,
+                    }));
+                };
+
+                // SAFETY: Index is at newline within string
+                (a, s) = unsafe { (s.get_unchecked(..i), s.get_unchecked(i + 1..)) };
+                n += ki + i + 2;
+                ki + i + 1
+            };
 
             enum AState {
                 NonSpace,
@@ -108,7 +127,7 @@ impl<'a> Iterator for NetdocParser<'a> {
                         self.off = self.s.len();
                         return Some(Err(NetdocParseError {
                             line: self.line,
-                            pos: li + i,
+                            pos: ki + 1 + i,
                             reason: ErrType::Null,
                         }));
                     }
@@ -118,7 +137,7 @@ impl<'a> Iterator for NetdocParser<'a> {
                         self.off = self.s.len();
                         return Some(Err(NetdocParseError {
                             line: self.line,
-                            pos: li + i,
+                            pos: ki + 1 + i,
                             reason: ErrType::InvalidArgumentChar,
                         }));
                     }
@@ -126,193 +145,192 @@ impl<'a> Iterator for NetdocParser<'a> {
                 };
             }
 
-            if s.starts_with(BEGIN) {
-                // Parse object
+            self.line += 1;
+            if !s.starts_with(BEGIN) {
+                // No oject
+                let old_len = self.s.len() - self.off;
+                let new_len = s.len();
+                debug_assert_eq!(new_len + n, old_len, "{new_len} + {n} != {old_len}");
+
+                // SAFETY: Index is within string
+                let s = unsafe { self.s.get_unchecked(self.off..self.off + li) };
+                let byte_off = self.off;
+                self.off += n;
+
+                return Some(Ok(Item {
+                    s,
+                    byte_off,
+                    is_opt,
+                    kw_len: ki,
+                    line_len: li,
+                    object_len: 0,
+                }));
+            }
+
+            // Parse object
+            // SAFETY: String starts with BEGIN
+            s = unsafe { s.get_unchecked(BEGIN.len()..) };
+            let Some(i) = s.find('\n') else {
+                self.off = self.s.len();
+                return Some(Err(NetdocParseError {
+                    line: self.line,
+                    pos: 0,
+                    reason: ErrType::NoNewline,
+                }));
+            };
+
+            let mut r;
+            // SAFETY: Index is at newline within string
+            unsafe {
+                r = s.get_unchecked(i + 1..);
+                s = s.get_unchecked(..i);
+            }
+            n += BEGIN.len() + i + 1;
+
+            if !s.ends_with(ENDL) {
+                self.off = self.s.len();
+                return Some(Err(NetdocParseError {
+                    line: self.line,
+                    pos: BEGIN.len() + s.len(),
+                    reason: ErrType::InvalidObjectFormat,
+                }));
+            }
+
+            enum KState {
+                Start,
+                WordBegin,
+                Word,
+                Space,
+            }
+
+            // SAFETY: String ends with ENDL
+            let obj_s = unsafe { s.get_unchecked(..s.len() - ENDL.len()) };
+            let mut t = KState::Start;
+            for (i, c) in obj_s.bytes().enumerate() {
+                t = match (t, c) {
+                    (
+                        KState::Start | KState::WordBegin | KState::Word,
+                        b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9',
+                    ) => KState::Word,
+                    (KState::Space, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9') => KState::WordBegin,
+                    (KState::Word, b'-') => KState::Word,
+                    (KState::WordBegin | KState::Word, b' ') => KState::Space,
+                    (KState::Space, b' ') => {
+                        self.off = self.s.len();
+                        return Some(Err(NetdocParseError {
+                            line: self.line,
+                            pos: BEGIN.len() + i,
+                            reason: ErrType::InvalidObjectFormat,
+                        }));
+                    }
+                    _ => {
+                        self.off = self.s.len();
+                        return Some(Err(NetdocParseError {
+                            line: self.line,
+                            pos: BEGIN.len() + i,
+                            reason: ErrType::InvalidKeywordChar,
+                        }));
+                    }
+                };
+            }
+            if !matches!(t, KState::Word | KState::WordBegin) {
+                self.off = self.s.len();
+                return Some(Err(NetdocParseError {
+                    line: self.line,
+                    pos: BEGIN.len() + s.len(),
+                    reason: ErrType::InvalidKeywordChar,
+                }));
+            }
+
+            'outer: while !r.starts_with(END) {
                 self.line += 1;
 
-                // SAFETY: String starts with BEGIN
-                let s = unsafe { s.get_unchecked(BEGIN.len()..) };
-                let Some(mut n) = s.find('\n') else {
-                    self.off = self.s.len();
-                    return Some(Err(NetdocParseError {
-                        line: self.line,
-                        pos: 0,
-                        reason: ErrType::NoNewline,
-                    }));
-                };
-
-                // SAFETY: Index is at newline within string
-                let (s, mut r) = unsafe { (s.get_unchecked(..n), s.get_unchecked(n + 1..)) };
-                n += BEGIN.len() + 1;
-
-                if !s.ends_with(ENDL) {
-                    self.off = self.s.len();
-                    return Some(Err(NetdocParseError {
-                        line: self.line,
-                        pos: BEGIN.len() + s.len(),
-                        reason: ErrType::InvalidObjectFormat,
-                    }));
-                }
-
-                enum State {
-                    Start,
-                    WordBegin,
-                    Word,
-                    Space,
-                }
-
-                // SAFETY: String ends with ENDL
-                let obj_s = unsafe { s.get_unchecked(..s.len() - ENDL.len()) };
-                let mut w = State::Start;
-                for (i, c) in obj_s.bytes().enumerate() {
-                    w = match (w, c) {
-                        (
-                            State::Start | State::WordBegin | State::Word,
-                            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9',
-                        ) => State::Word,
-                        (State::Space, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9') => State::WordBegin,
-                        (State::Word, b'-') => State::Word,
-                        (State::WordBegin | State::Word, b' ') => State::Space,
-                        (State::Space, b' ') => {
-                            self.off = self.s.len();
-                            return Some(Err(NetdocParseError {
-                                line: self.line,
-                                pos: BEGIN.len() + i,
-                                reason: ErrType::InvalidObjectFormat,
-                            }));
+                for (i, c) in r.bytes().enumerate() {
+                    match c {
+                        b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'+' | b'/' | b'=' => (),
+                        b'\n' => {
+                            // SAFETY: Index is at newline within string
+                            r = unsafe { r.get_unchecked(i + 1..) };
+                            n += i + 1;
+                            continue 'outer;
                         }
                         _ => {
                             self.off = self.s.len();
                             return Some(Err(NetdocParseError {
                                 line: self.line,
-                                pos: BEGIN.len() + i,
-                                reason: ErrType::InvalidKeywordChar,
+                                pos: i,
+                                reason: ErrType::InvalidObjectContent,
                             }));
                         }
-                    };
-                }
-                if !matches!(w, State::Word | State::WordBegin) {
-                    self.off = self.s.len();
-                    return Some(Err(NetdocParseError {
-                        line: self.line,
-                        pos: BEGIN.len() + s.len(),
-                        reason: ErrType::InvalidKeywordChar,
-                    }));
-                }
-
-                'outer: while !r.starts_with(END) {
-                    self.line += 1;
-
-                    for (i, c) in r.bytes().enumerate() {
-                        match c {
-                            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'+' | b'/' | b'=' => (),
-                            b'\n' => {
-                                // SAFETY: Index is at newline within string
-                                r = unsafe { r.get_unchecked(i + 1..) };
-                                n += i + 1;
-                                continue 'outer;
-                            }
-                            _ => {
-                                self.off = self.s.len();
-                                return Some(Err(NetdocParseError {
-                                    line: self.line,
-                                    pos: i,
-                                    reason: ErrType::InvalidObjectContent,
-                                }));
-                            }
-                        }
                     }
-
-                    self.off = self.s.len();
-                    return Some(Err(NetdocParseError {
-                        line: self.line,
-                        pos: 0,
-                        reason: ErrType::NoNewline,
-                    }));
                 }
 
-                // SAFETY: String starts with END
-                let s = unsafe { r.get_unchecked(END.len()..) };
-                let Some(i) = s.find('\n') else {
-                    self.off = self.s.len();
-                    return Some(Err(NetdocParseError {
-                        line: self.line,
-                        pos: 0,
-                        reason: ErrType::NoNewline,
-                    }));
-                };
-
-                // SAFETY: Index is at newline within string
-                let (s, r) = unsafe { (s.get_unchecked(..i), s.get_unchecked(i + 1..)) };
-                n += END.len() + i;
-
-                if !s.ends_with(ENDL) {
-                    self.off = self.s.len();
-                    return Some(Err(NetdocParseError {
-                        line: self.line,
-                        pos: BEGIN.len() + s.len(),
-                        reason: ErrType::InvalidObjectFormat,
-                    }));
-                }
-
-                // SAFETY: String is suffixed with ENDL
-                let obj2_s = unsafe { s.get_unchecked(..s.len() - ENDL.len()) };
-                if obj_s != obj2_s {
-                    // End keyword did not match begin keyword
-                    self.off = self.s.len();
-                    return Some(Err(NetdocParseError {
-                        line: self.line,
-                        pos: END.len(),
-                        reason: ErrType::InvalidObjectFormat,
-                    }));
-                }
-
-                self.line += 1;
-                let old_len = self.s.len() - self.off;
-                let new_len = r.len();
-                debug_assert_eq!(
-                    new_len + n + li + bi + 2,
-                    old_len,
-                    "{new_len} + {n} + {li} + {bi} + 2 != {old_len}"
-                );
-
-                let l = n + li + bi + 1;
-                // SAFETY: Index is within string
-                let s = unsafe { self.s.get_unchecked(self.off..self.off + l) };
-                let byte_off = self.off;
-                self.off += l + 1;
-
-                return Some(Ok(Item {
-                    s,
-                    byte_off,
-                    kw_len: ki,
-                    line_len: li + bi,
-                    object_len: obj_s.len(),
-                }));
-            } else {
-                self.line += 1;
-                let old_len = self.s.len() - self.off;
-                let new_len = s.len();
-                debug_assert_eq!(
-                    new_len + li + bi + 1,
-                    old_len,
-                    "{new_len} + {li} + {bi} + 1 != {old_len}"
-                );
-
-                let l = li + bi;
-                // SAFETY: Index is within string
-                let s = unsafe { self.s.get_unchecked(self.off..self.off + l) };
-                let byte_off = self.off;
-                self.off += l + 1;
-
-                return Some(Ok(Item {
-                    s,
-                    byte_off,
-                    kw_len: ki,
-                    line_len: li + bi,
-                    object_len: 0,
+                self.off = self.s.len();
+                return Some(Err(NetdocParseError {
+                    line: self.line,
+                    pos: 0,
+                    reason: ErrType::NoNewline,
                 }));
             }
+            self.line += 1;
+
+            // SAFETY: String starts with END
+            s = unsafe { r.get_unchecked(END.len()..) };
+            let Some(i) = s.find('\n') else {
+                self.off = self.s.len();
+                return Some(Err(NetdocParseError {
+                    line: self.line,
+                    pos: 0,
+                    reason: ErrType::NoNewline,
+                }));
+            };
+
+            // SAFETY: Index is at newline within string
+            unsafe {
+                r = s.get_unchecked(i + 1..);
+                s = s.get_unchecked(..i);
+            }
+            n += END.len() + i + 1;
+
+            if !s.ends_with(ENDL) {
+                self.off = self.s.len();
+                return Some(Err(NetdocParseError {
+                    line: self.line,
+                    pos: END.len() + s.len(),
+                    reason: ErrType::InvalidObjectFormat,
+                }));
+            }
+
+            // SAFETY: String is suffixed with ENDL
+            let obj2_s = unsafe { s.get_unchecked(..s.len() - ENDL.len()) };
+            if obj_s != obj2_s {
+                // End keyword did not match begin keyword
+                self.off = self.s.len();
+                return Some(Err(NetdocParseError {
+                    line: self.line,
+                    pos: END.len(),
+                    reason: ErrType::InvalidObjectFormat,
+                }));
+            }
+
+            self.line += 1;
+            let old_len = self.s.len() - self.off;
+            let new_len = r.len();
+            debug_assert_eq!(new_len + n, old_len, "{new_len} + {n} != {old_len}");
+
+            // SAFETY: Index is within string
+            s = unsafe { self.s.get_unchecked(self.off..self.off + n - 1) };
+            let byte_off = self.off;
+            self.off += n;
+
+            return Some(Ok(Item {
+                s,
+                byte_off,
+                is_opt,
+                kw_len: ki,
+                line_len: li,
+                object_len: obj_s.len(),
+            }));
         }
 
         None
@@ -322,19 +340,21 @@ impl<'a> Iterator for NetdocParser<'a> {
 impl<'a> Item<'a> {
     /// Keyword of item.
     pub fn keyword(&self) -> &'a str {
+        let o = if self.is_opt { 4 } else { 0 };
         // SAFETY: kw_len is within string
-        unsafe { self.s.get_unchecked(..self.kw_len) }
+        unsafe { self.s.get_unchecked(o..o + self.kw_len) }
     }
 
     /// Raw arguments.
     ///
     /// It is recommended to use [`Self::arguments()`] instead.
     pub fn arguments_raw(&self) -> &'a str {
-        if self.kw_len == self.line_len {
+        let o = if self.is_opt { 4 } else { 0 };
+        if self.kw_len + o == self.line_len {
             return "";
         }
         // SAFETY: kw_len and line_len is within string
-        unsafe { self.s.get_unchecked(self.kw_len + 1..self.line_len) }
+        unsafe { self.s.get_unchecked(o + self.kw_len + 1..self.line_len) }
     }
 
     /// Iterates over arguments.
@@ -371,6 +391,11 @@ impl<'a> Item<'a> {
     pub fn byte_offset(&self) -> usize {
         self.byte_off
     }
+
+    /// Returns length of item line (excluding object and trailing newline).
+    pub fn line_len(&self) -> usize {
+        self.line_len
+    }
 }
 
 /// Iterator of netdoc item arguments.
@@ -405,9 +430,12 @@ mod tests {
     use proptest::option::of;
     use proptest::prelude::*;
 
-    fn doc_strat() -> impl Strategy<Value = Vec<(String, Vec<String>, Option<(String, String)>)>> {
+    fn doc_strat()
+    -> impl Strategy<Value = Vec<(&'static str, String, Vec<String>, Option<(String, String)>)>>
+    {
         vec(
             (
+                prop_oneof![Just(""), Just("opt "), Just("opt\t"),],
                 "[a-zA-Z0-9][a-zA-Z0-9-]{1,16}".prop_filter("keyword is opt", |s| s != "opt"),
                 vec("[ \t][^ \t\n\0]{1,8}", 0..8),
                 of((
@@ -452,7 +480,8 @@ mod tests {
         #[test]
         fn test_netdoc(doc in doc_strat()) {
             let mut s = String::new();
-            for (k, a, o) in &doc {
+            for (opt, k, a, o) in &doc {
+                s += opt;
                 s += k;
                 s.extend(a.iter().map(|s| &**s));
                 s += "\n";
@@ -472,7 +501,7 @@ mod tests {
             let mut it = doc.into_iter();
             for i in NetdocParser::new(&s) {
                 let i = i.unwrap();
-                let (k, a, o) = it.next().unwrap();
+                let (_, k, a, o) = it.next().unwrap();
                 assert_eq!(i.keyword(), k);
 
                 let a_ = a.iter().map(|s| &**s).collect::<String>();
