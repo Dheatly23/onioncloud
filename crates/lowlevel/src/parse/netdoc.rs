@@ -455,14 +455,22 @@ mod tests {
     use proptest::option::of;
     use proptest::prelude::*;
 
-    fn doc_strat()
-    -> impl Strategy<Value = Vec<(&'static str, String, Vec<String>, Option<(String, String)>)>>
-    {
+    fn doc_strat() -> impl Strategy<
+        Value = Vec<(
+            &'static str,
+            String,
+            Vec<(char, String)>,
+            Option<(String, String)>,
+        )>,
+    > {
         vec(
             (
-                prop_oneof![Just(""), Just("opt "), Just("opt\t"),],
+                prop_oneof![Just(""), Just("opt "), Just("opt\t")],
                 "[a-zA-Z0-9][a-zA-Z0-9-]{1,16}".prop_filter("keyword is opt", |s| s != "opt"),
-                vec("[ \t][^ \t\n\0]{1,8}", 0..8),
+                vec(
+                    (prop_oneof![Just(' '), Just('\t')], "[^ \t\n\0]{1,8}"),
+                    0..8,
+                ),
                 of((
                     vec("[a-zA-Z0-9]{1,8}", 1..8).prop_map(|v| v.join(" ")),
                     "[a-zA-Z0-9+\\\n]{0,32}\n",
@@ -508,7 +516,12 @@ mod tests {
             for (opt, k, a, o) in &doc {
                 s += opt;
                 s += k;
-                s.extend(a.iter().map(|s| &**s));
+
+                for (c, v) in a {
+                    s.push(*c);
+                    s += v;
+                }
+
                 s += "\n";
                 if let Some((k, a)) = o {
                     s += BEGIN;
@@ -529,13 +542,25 @@ mod tests {
                 let (_, k, a, o) = it.next().unwrap();
                 assert_eq!(i.keyword(), k);
 
-                let a_ = a.iter().map(|s| &**s).collect::<String>();
-                assert_eq!(i.arguments_raw(), if a_ == "" { "" } else { &a_[1..] });
+                {
+                    let mut a_ = String::new();
+                    for (i, (c, v)) in a.iter().enumerate() {
+                        if i != 0 {
+                            a_.push(*c);
+                        }
+                        a_ += v;
+                    }
+                    assert_eq!(i.arguments_raw(), a_);
+                }
 
-                assert_eq!(i.arguments().take(a.len() + 1).collect::<Vec<_>>(), a.iter().map(|s| &s[1..]).collect::<Vec<_>>());
+                {
+                    let mut a = a.into_iter().map(|(_, i)| i).collect::<Vec<_>>();
+                    assert_eq!(i.arguments().take(a.len() + 1).collect::<Vec<_>>(), a);
+                    a.reverse();
+                    assert_eq!(i.arguments().rev().take(a.len() + 1).collect::<Vec<_>>(), a);
+                }
 
-                let o_ = i.object();
-                assert_eq!(o_.as_ref().map(|(a, b)| (&**a, &**b)), o.as_ref().map(|(a, b)| (&**a, &**b)));
+                assert_eq!(i.object(), o.as_ref().map(|(a, b)| (&**a, &**b)));
             }
             assert_eq!(it.next(), None);
         }
