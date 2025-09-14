@@ -1,3 +1,4 @@
+use std::iter::FusedIterator;
 use std::mem::replace;
 
 use crate::errors::{NetdocParseError, NetdocParseErrorType as ErrType};
@@ -420,7 +421,33 @@ impl<'a> Iterator for Arguments<'a> {
 
         None
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self.s {
+            "" => (0, Some(0)),
+            _ => (1, None),
+        }
+    }
 }
+
+impl DoubleEndedIterator for Arguments<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        while self.s != "" {
+            let Some(i) = self.s.rfind([' ', '\t']) else {
+                return Some(replace(&mut self.s, ""));
+            };
+
+            // SAFETY: Index is space or tab within string
+            let (a, b) = unsafe { (self.s.get_unchecked(..i), self.s.get_unchecked(i + 1..)) };
+            self.s = a;
+            return Some(b);
+        }
+
+        None
+    }
+}
+
+impl FusedIterator for Arguments<'_> {}
 
 #[cfg(test)]
 mod tests {
