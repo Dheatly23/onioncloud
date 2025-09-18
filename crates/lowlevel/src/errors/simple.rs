@@ -343,6 +343,7 @@ pub(crate) enum NetdocParseErrorType {
     InvalidObjectContent,
     NoNewline,
     Null,
+    Empty,
 }
 
 impl Display for NetdocParseErrorType {
@@ -354,17 +355,60 @@ impl Display for NetdocParseErrorType {
             Self::InvalidObjectContent => write!(f, "invalid object content"),
             Self::NoNewline => write!(f, "no newline found"),
             Self::Null => write!(f, "null character"),
+            Self::Empty => write!(f, "document is empty"),
+        }
+    }
+}
+
+enum NetdocPos {
+    Unknown,
+    LinePos { line: isize, pos: usize },
+    ByteOff { off: usize },
+}
+
+impl Display for NetdocPos {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::LinePos { line, pos } => write!(f, "line {line} byte {pos}"),
+            Self::ByteOff { off } => write!(f, "byte offset {off}"),
+            Self::Unknown => write!(f, "unknown position"),
         }
     }
 }
 
 /// Netdoc parsing error.
 #[derive(Error)]
-#[error("error parsing netdoc at line {line} byte {pos}: {reason}")]
+#[error("error parsing netdoc at {pos}: {reason}")]
 pub struct NetdocParseError {
-    pub(crate) line: usize,
-    pub(crate) pos: usize,
-    pub(crate) reason: NetdocParseErrorType,
+    pos: NetdocPos,
+    reason: NetdocParseErrorType,
 }
 
 display2debug! {NetdocParseError}
+
+impl NetdocParseError {
+    pub(crate) const fn with_line_pos(
+        line: isize,
+        pos: usize,
+        reason: NetdocParseErrorType,
+    ) -> Self {
+        Self {
+            reason,
+            pos: NetdocPos::LinePos { line, pos },
+        }
+    }
+
+    pub(crate) const fn with_byte_off(off: usize, reason: NetdocParseErrorType) -> Self {
+        Self {
+            reason,
+            pos: NetdocPos::ByteOff { off },
+        }
+    }
+
+    pub(crate) const fn with_unknown_pos(reason: NetdocParseErrorType) -> Self {
+        Self {
+            reason,
+            pos: NetdocPos::Unknown,
+        }
+    }
+}

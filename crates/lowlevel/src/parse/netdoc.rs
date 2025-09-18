@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::iter::FusedIterator;
 use std::mem::take;
 
@@ -10,7 +11,7 @@ use crate::errors::{NetdocParseError, NetdocParseErrorType as ErrType};
 pub struct NetdocParser<'a> {
     s: &'a str,
     off: usize,
-    line: usize,
+    line: isize,
 }
 
 /// Single netdoc item.
@@ -76,27 +77,27 @@ impl<'a> Iterator for NetdocParser<'a> {
                 b'-' if i != 0 => (),
                 _ => {
                     self.off = self.s.len();
-                    return Some(Err(NetdocParseError {
-                        line: self.line,
-                        pos: n + i,
-                        reason: ErrType::InvalidKeywordChar,
-                    }));
+                    return Some(Err(NetdocParseError::with_line_pos(
+                        self.line,
+                        n + i,
+                        ErrType::InvalidKeywordChar,
+                    )));
                 }
             }
         }
 
         let Some((ki, is_endl)) = t else {
             self.off = self.s.len();
-            return Some(Err(NetdocParseError {
-                line: self.line,
-                pos: 0,
-                reason: ErrType::NoNewline,
-            }));
+            return Some(Err(NetdocParseError::with_line_pos(
+                self.line,
+                0,
+                ErrType::NoNewline,
+            )));
         };
 
         let a;
         let li = n + if is_endl {
-            a = "";
+            a = None;
             // SAFETY: Index is at newline within string
             s = unsafe { s.get_unchecked(ki + 1..) };
             n += ki + 1;
@@ -106,47 +107,27 @@ impl<'a> Iterator for NetdocParser<'a> {
             s = unsafe { s.get_unchecked(ki + 1..) };
             let Some(i) = s.find('\n') else {
                 self.off = self.s.len();
-                return Some(Err(NetdocParseError {
-                    line: self.line,
-                    pos: 0,
-                    reason: ErrType::NoNewline,
-                }));
+                return Some(Err(NetdocParseError::with_line_pos(
+                    self.line,
+                    0,
+                    ErrType::NoNewline,
+                )));
             };
 
             // SAFETY: Index is at newline within string
-            (a, s) = unsafe { (s.get_unchecked(..i), s.get_unchecked(i + 1..)) };
+            unsafe {
+                a = Some(s.get_unchecked(..i));
+                s = s.get_unchecked(i + 1..);
+            }
             n += ki + i + 2;
             ki + i + 1
         };
 
-        enum AState {
-            NonSpace,
-            Space,
-        }
-
-        let mut t = AState::Space;
-        for (i, c) in a.bytes().enumerate() {
-            t = match (t, c) {
-                (_, b'\0') => {
-                    self.off = self.s.len();
-                    return Some(Err(NetdocParseError {
-                        line: self.line,
-                        pos: ki + 1 + i,
-                        reason: ErrType::Null,
-                    }));
-                }
-                (AState::NonSpace, b' ' | b'\t') => AState::Space,
-                (AState::NonSpace, _) => AState::NonSpace,
-                (AState::Space, b' ' | b'\t') => {
-                    self.off = self.s.len();
-                    return Some(Err(NetdocParseError {
-                        line: self.line,
-                        pos: ki + 1 + i,
-                        reason: ErrType::InvalidArgumentChar,
-                    }));
-                }
-                (AState::Space, _) => AState::NonSpace,
-            };
+        if let Some(a) = a
+            && let Some(e) = check_argument(a, self.line, ki + 1)
+        {
+            self.off = self.s.len();
+            return Some(Err(e));
         }
 
         self.line += 1;
@@ -176,11 +157,11 @@ impl<'a> Iterator for NetdocParser<'a> {
         s = unsafe { s.get_unchecked(BEGIN.len()..) };
         let Some(i) = s.find('\n') else {
             self.off = self.s.len();
-            return Some(Err(NetdocParseError {
-                line: self.line,
-                pos: 0,
-                reason: ErrType::NoNewline,
-            }));
+            return Some(Err(NetdocParseError::with_line_pos(
+                self.line,
+                0,
+                ErrType::NoNewline,
+            )));
         };
 
         let mut r;
@@ -193,57 +174,18 @@ impl<'a> Iterator for NetdocParser<'a> {
 
         if !s.ends_with(ENDL) {
             self.off = self.s.len();
-            return Some(Err(NetdocParseError {
-                line: self.line,
-                pos: BEGIN.len() + s.len(),
-                reason: ErrType::InvalidObjectFormat,
-            }));
-        }
-
-        enum KState {
-            Start,
-            WordBegin,
-            Word,
-            Space,
+            return Some(Err(NetdocParseError::with_line_pos(
+                self.line,
+                BEGIN.len() + s.len() - 1,
+                ErrType::InvalidObjectFormat,
+            )));
         }
 
         // SAFETY: String ends with ENDL
         let obj_s = unsafe { s.get_unchecked(..s.len() - ENDL.len()) };
-        let mut t = KState::Start;
-        for (i, c) in obj_s.bytes().enumerate() {
-            t = match (t, c) {
-                (
-                    KState::Start | KState::WordBegin | KState::Word,
-                    b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9',
-                ) => KState::Word,
-                (KState::Space, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9') => KState::WordBegin,
-                (KState::Word, b'-') => KState::Word,
-                (KState::WordBegin | KState::Word, b' ') => KState::Space,
-                (KState::Space, b' ') => {
-                    self.off = self.s.len();
-                    return Some(Err(NetdocParseError {
-                        line: self.line,
-                        pos: BEGIN.len() + i,
-                        reason: ErrType::InvalidObjectFormat,
-                    }));
-                }
-                _ => {
-                    self.off = self.s.len();
-                    return Some(Err(NetdocParseError {
-                        line: self.line,
-                        pos: BEGIN.len() + i,
-                        reason: ErrType::InvalidKeywordChar,
-                    }));
-                }
-            };
-        }
-        if !matches!(t, KState::Word | KState::WordBegin) {
+        if let Some(e) = check_object_keyword(obj_s, self.line, BEGIN.len()) {
             self.off = self.s.len();
-            return Some(Err(NetdocParseError {
-                line: self.line,
-                pos: BEGIN.len() + s.len(),
-                reason: ErrType::InvalidKeywordChar,
-            }));
+            return Some(Err(e));
         }
 
         'outer: while !r.starts_with(END) {
@@ -260,21 +202,21 @@ impl<'a> Iterator for NetdocParser<'a> {
                     }
                     _ => {
                         self.off = self.s.len();
-                        return Some(Err(NetdocParseError {
-                            line: self.line,
-                            pos: i,
-                            reason: ErrType::InvalidObjectContent,
-                        }));
+                        return Some(Err(NetdocParseError::with_line_pos(
+                            self.line,
+                            i,
+                            ErrType::InvalidObjectContent,
+                        )));
                     }
                 }
             }
 
             self.off = self.s.len();
-            return Some(Err(NetdocParseError {
-                line: self.line,
-                pos: 0,
-                reason: ErrType::NoNewline,
-            }));
+            return Some(Err(NetdocParseError::with_line_pos(
+                self.line,
+                0,
+                ErrType::NoNewline,
+            )));
         }
         self.line += 1;
 
@@ -282,11 +224,11 @@ impl<'a> Iterator for NetdocParser<'a> {
         s = unsafe { r.get_unchecked(END.len()..) };
         let Some(i) = s.find('\n') else {
             self.off = self.s.len();
-            return Some(Err(NetdocParseError {
-                line: self.line,
-                pos: 0,
-                reason: ErrType::NoNewline,
-            }));
+            return Some(Err(NetdocParseError::with_line_pos(
+                self.line,
+                0,
+                ErrType::NoNewline,
+            )));
         };
 
         // SAFETY: Index is at newline within string
@@ -298,11 +240,11 @@ impl<'a> Iterator for NetdocParser<'a> {
 
         if !s.ends_with(ENDL) {
             self.off = self.s.len();
-            return Some(Err(NetdocParseError {
-                line: self.line,
-                pos: END.len() + s.len(),
-                reason: ErrType::InvalidObjectFormat,
-            }));
+            return Some(Err(NetdocParseError::with_line_pos(
+                self.line,
+                END.len() + s.len() - 1,
+                ErrType::InvalidObjectFormat,
+            )));
         }
 
         // SAFETY: String is suffixed with ENDL
@@ -310,11 +252,11 @@ impl<'a> Iterator for NetdocParser<'a> {
         if obj_s != obj2_s {
             // End keyword did not match begin keyword
             self.off = self.s.len();
-            return Some(Err(NetdocParseError {
-                line: self.line,
-                pos: END.len(),
-                reason: ErrType::InvalidObjectFormat,
-            }));
+            return Some(Err(NetdocParseError::with_line_pos(
+                self.line,
+                END.len(),
+                ErrType::InvalidObjectFormat,
+            )));
         }
 
         self.line += 1;
@@ -447,6 +389,244 @@ impl DoubleEndedIterator for Arguments<'_> {
 
 impl FusedIterator for Arguments<'_> {}
 
+/// Return value of [`get_signature`].
+#[non_exhaustive]
+pub struct SignatureResult<'a> {
+    /// Signature item.
+    pub item: Item<'a>,
+    /// Rest of the document.
+    pub document: &'a str,
+}
+
+/// Get signature from document.
+///
+/// Signature is defined as last item in document with object.
+/// If succeed, returns [`SignatureResult`]. Otherwise it returns error.
+pub fn get_signature(document: &str) -> Result<SignatureResult<'_>, NetdocParseError> {
+    if document.is_empty() {
+        return Err(NetdocParseError::with_unknown_pos(ErrType::Empty));
+    } else if !document.ends_with('\n') {
+        return Err(NetdocParseError::with_byte_off(
+            document.len() - 1,
+            ErrType::NoNewline,
+        ));
+    }
+
+    // SAFETY: Document is suffixed with newline
+    let s = unsafe { document.get_unchecked(..document.len() - 1) };
+
+    let l = Cell::new(0isize);
+    let n = Cell::new(document.len());
+    let mut it = s.split('\n').rev().inspect(|s| {
+        l.update(|l| l - 1);
+        n.update(|n| n - s.len() - 1);
+
+        let i = n.get();
+        debug_assert_eq!(&document[i..i + s.len()], *s);
+    });
+
+    let Some(s) = it.next() else {
+        return Err(NetdocParseError::with_line_pos(-1, 0, ErrType::NoNewline));
+    };
+
+    if !s.ends_with(ENDL) || !s.starts_with(END) {
+        return Err(NetdocParseError::with_line_pos(
+            l.get(),
+            0,
+            ErrType::InvalidObjectFormat,
+        ));
+    }
+
+    // SAFETY: String is prefixed with END and suffixed with ENDL
+    let obj_s = unsafe { s.get_unchecked(END.len()..s.len() - ENDL.len()) };
+    check_object_keyword(obj_s, l.get(), END.len()).map_or(Ok(()), Err)?;
+
+    let s = loop {
+        let Some(s) = it.next() else {
+            return Err(NetdocParseError::with_line_pos(
+                l.get(),
+                0,
+                ErrType::NoNewline,
+            ));
+        };
+
+        if s.starts_with(BEGIN) {
+            break s;
+        }
+
+        for (i, c) in s.as_bytes().iter().enumerate() {
+            if !matches!(c, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'+' | b'/' | b'=') {
+                return Err(NetdocParseError::with_line_pos(
+                    l.get(),
+                    i,
+                    ErrType::InvalidObjectContent,
+                ));
+            }
+        }
+    };
+
+    if !s.ends_with(ENDL) {
+        return Err(NetdocParseError::with_line_pos(
+            l.get(),
+            s.len() - 1,
+            ErrType::InvalidObjectFormat,
+        ));
+    }
+
+    // SAFETY: String is prefixed with BEGIN and suffixed with ENDL
+    let obj2_s = unsafe { s.get_unchecked(BEGIN.len()..s.len() - ENDL.len()) };
+    if obj_s != obj2_s {
+        return Err(NetdocParseError::with_line_pos(
+            l.get(),
+            BEGIN.len(),
+            ErrType::InvalidObjectFormat,
+        ));
+    }
+
+    let Some(mut s) = it.next() else {
+        return Err(NetdocParseError::with_line_pos(
+            l.get(),
+            0,
+            ErrType::NoNewline,
+        ));
+    };
+
+    let line_len = s.len();
+    let is_opt = matches!(s.as_bytes(), [b'o', b'p', b't', b' ' | b'\t', ..]);
+    if is_opt {
+        // SAFETY: String is prefixed with opt
+        s = unsafe { s.get_unchecked(4..) };
+    }
+
+    let k;
+    if let Some(i) = s.find([' ', '\t']) {
+        let a;
+
+        // SAFETY: Index points to space or tab character within string
+        unsafe {
+            k = s.get_unchecked(..i);
+            a = s.get_unchecked(i + 1..);
+        }
+
+        check_argument(a, l.get(), if is_opt { 4 } else { 0 } + i + 1).map_or(Ok(()), Err)?;
+    } else {
+        k = s;
+    }
+
+    for (i, c) in k.bytes().enumerate() {
+        if !matches!((i, c), (_, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9') | (1.., b'-')) {
+            return Err(NetdocParseError::with_line_pos(
+                l.get(),
+                if is_opt { 4 } else { 0 } + i,
+                ErrType::InvalidKeywordChar,
+            ));
+        }
+    }
+
+    let i = n.get();
+    // SAFETY: Index points to character right after newline within string
+    let (s, r) = unsafe {
+        (
+            document.get_unchecked(i..document.len() - 1),
+            document.get_unchecked(..i),
+        )
+    };
+    Ok(SignatureResult {
+        document: r,
+        item: Item {
+            s,
+            byte_off: i,
+            is_opt,
+            kw_len: k.len(),
+            line_len,
+            object_len: obj_s.len(),
+        },
+    })
+}
+
+fn check_argument(s: &str, line: isize, off: usize) -> Option<NetdocParseError> {
+    enum AState {
+        NonSpace,
+        Space,
+    }
+
+    let mut t = AState::Space;
+    for (i, c) in s.bytes().enumerate() {
+        t = match (t, c) {
+            (_, b'\0') => {
+                return Some(NetdocParseError::with_line_pos(
+                    line,
+                    off + i,
+                    ErrType::Null,
+                ));
+            }
+            (AState::NonSpace, b' ' | b'\t') => AState::Space,
+            (AState::NonSpace, _) => AState::NonSpace,
+            (AState::Space, b' ' | b'\t') => {
+                return Some(NetdocParseError::with_line_pos(
+                    line,
+                    off + i,
+                    ErrType::InvalidArgumentChar,
+                ));
+            }
+            (AState::Space, _) => AState::NonSpace,
+        };
+    }
+
+    if matches!(t, AState::Space) {
+        return Some(NetdocParseError::with_line_pos(
+            line,
+            off + s.len() - 1,
+            ErrType::InvalidArgumentChar,
+        ));
+    }
+
+    None
+}
+
+fn check_object_keyword(s: &str, line: isize, off: usize) -> Option<NetdocParseError> {
+    enum KState {
+        WordBegin,
+        Word,
+        Space,
+    }
+
+    let mut t = KState::Space;
+    for (i, c) in s.bytes().enumerate() {
+        t = match (t, c) {
+            (KState::WordBegin | KState::Word, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9') => {
+                KState::Word
+            }
+            (KState::Space, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9') => KState::WordBegin,
+            (KState::Word, b'-') => KState::Word,
+            (KState::WordBegin | KState::Word, b' ') => KState::Space,
+            (KState::Space, b' ') => {
+                return Some(NetdocParseError::with_line_pos(
+                    line,
+                    off + i,
+                    ErrType::InvalidObjectFormat,
+                ));
+            }
+            _ => {
+                return Some(NetdocParseError::with_line_pos(
+                    line,
+                    off + i,
+                    ErrType::InvalidKeywordChar,
+                ));
+            }
+        };
+    }
+    if !matches!(t, KState::Word | KState::WordBegin) {
+        return Some(NetdocParseError::with_line_pos(
+            line,
+            off + s.len(),
+            ErrType::InvalidKeywordChar,
+        ));
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +634,24 @@ mod tests {
     use proptest::collection::vec;
     use proptest::option::of;
     use proptest::prelude::*;
+
+    fn item_strat() -> impl Strategy<Value = (&'static str, String, Vec<(char, String)>)> {
+        (
+            prop_oneof![Just(""), Just("opt "), Just("opt\t")],
+            "[a-zA-Z0-9][a-zA-Z0-9-]{1,16}".prop_filter("keyword is opt", |s| s != "opt"),
+            vec(
+                (prop_oneof![Just(' '), Just('\t')], "[^ \t\n\0]{1,8}"),
+                0..8,
+            ),
+        )
+    }
+
+    fn sig_strat() -> impl Strategy<Value = (String, String)> {
+        (
+            vec("[a-zA-Z0-9]{1,8}", 1..8).prop_map(|v| v.join(" ")),
+            "([a-zA-Z0-9+\\\n]{1,32}\n)?",
+        )
+    }
 
     fn doc_strat() -> impl Strategy<
         Value = Vec<(
@@ -464,20 +662,20 @@ mod tests {
         )>,
     > {
         vec(
-            (
-                prop_oneof![Just(""), Just("opt "), Just("opt\t")],
-                "[a-zA-Z0-9][a-zA-Z0-9-]{1,16}".prop_filter("keyword is opt", |s| s != "opt"),
-                vec(
-                    (prop_oneof![Just(' '), Just('\t')], "[^ \t\n\0]{1,8}"),
-                    0..8,
-                ),
-                of((
-                    vec("[a-zA-Z0-9]{1,8}", 1..8).prop_map(|v| v.join(" ")),
-                    "[a-zA-Z0-9+\\\n]{0,32}\n",
-                )),
-            ),
+            (item_strat(), of(sig_strat())).prop_map(|((a, b, c), d)| (a, b, c, d)),
             0..32,
         )
+    }
+
+    fn to_argument_raw(a: &[(char, String)]) -> String {
+        let mut a_ = String::new();
+        for (i, (c, v)) in a.iter().enumerate() {
+            if i != 0 {
+                a_.push(*c);
+            }
+            a_ += v;
+        }
+        a_
     }
 
     fn ignore_parse(s: &str) {
@@ -511,7 +709,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn test_netdoc(doc in doc_strat()) {
+        fn test_netdoc_proptest(doc in doc_strat()) {
             let mut s = String::new();
             for (opt, k, a, o) in &doc {
                 s += opt;
@@ -542,23 +740,58 @@ mod tests {
                 let (_, k, a, o) = it.next().unwrap();
                 assert_eq!(i.keyword(), k);
 
-                {
-                    let mut a_ = String::new();
-                    for (i, (c, v)) in a.iter().enumerate() {
-                        if i != 0 {
-                            a_.push(*c);
-                        }
-                        a_ += v;
-                    }
-                    assert_eq!(i.arguments_raw(), a_);
-                }
-
+                assert_eq!(i.arguments_raw(), to_argument_raw(&a));
                 {
                     let mut a = a.into_iter().map(|(_, i)| i).collect::<Vec<_>>();
                     assert_eq!(i.arguments().take(a.len() + 1).collect::<Vec<_>>(), a);
                     a.reverse();
                     assert_eq!(i.arguments().rev().take(a.len() + 1).collect::<Vec<_>>(), a);
                 }
+
+                assert_eq!(i.object(), o.as_ref().map(|(a, b)| (&**a, &**b)));
+            }
+            assert_eq!(it.next(), None);
+        }
+
+        #[test]
+        fn test_netdoc_get_signature_proptest(doc in doc_strat(), (opt, k, a) in item_strat(), sig in sig_strat()) {
+            let mut s = String::new();
+            for (opt, k, a, o) in doc.iter().map(|(a, b, c, d)| (a, b, c, d.as_ref())).chain([(&opt, &k, &a, Some(&sig))]) {
+                s += opt;
+                s += k;
+
+                for (c, v) in a {
+                    s.push(*c);
+                    s += v;
+                }
+
+                s += "\n";
+                if let Some((k, a)) = o {
+                    s += BEGIN;
+                    s += k;
+                    s += ENDL;
+                    s += "\n";
+                    s += a;
+                    s += END;
+                    s += k;
+                    s += ENDL;
+                    s += "\n";
+                }
+            }
+
+            let SignatureResult{document: rest, item} = get_signature(&s).unwrap();
+            assert_eq!(item.keyword(), k);
+            assert_eq!(item.arguments_raw(), to_argument_raw(&a));
+            assert_eq!(item.object(), Some((&*sig.0, &*sig.1)));
+
+            let mut it = doc.into_iter();
+            for i in NetdocParser::new(&rest) {
+                let i = i.unwrap();
+                let (_, k, a, o) = it.next().unwrap();
+                assert_eq!(i.keyword(), k);
+
+                assert_eq!(i.arguments_raw(), to_argument_raw(&a));
+                assert_eq!(i.arguments().take(a.len() + 1).collect::<Vec<_>>(), a.into_iter().map(|(_, i)| i).collect::<Vec<_>>());
 
                 assert_eq!(i.object(), o.as_ref().map(|(a, b)| (&**a, &**b)));
             }
