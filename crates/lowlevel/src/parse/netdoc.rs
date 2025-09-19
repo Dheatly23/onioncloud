@@ -1,6 +1,8 @@
 use std::cell::Cell;
-use std::iter::FusedIterator;
-use std::mem::take;
+use std::iter::{FusedIterator, from_fn};
+use std::mem::{replace, take};
+
+use memchr::{memchr_iter, memchr2, memrchr2};
 
 use crate::errors::{NetdocParseError, NetdocParseErrorType as ErrType};
 
@@ -52,8 +54,8 @@ impl<'a> NetdocParser<'a> {
             s,
             off: Cell::new(0),
             end: Cell::new(s.len()),
-            line: Cell::new(1),
-            endl: Cell::new(-1),
+            line: Cell::new(0),
+            endl: Cell::new(0),
         }
     }
 
@@ -83,20 +85,27 @@ impl<'a> Iterator for NetdocParser<'a> {
         );
         // SAFETY: Offset will always be less than end.
         // Both will always be less than or equal to string length
-        let s = unsafe { self.s.get_unchecked(start..self.end.get()) };
+        let ori_s = unsafe { self.s.get_unchecked(start..self.end.get()) };
 
-        let mut it = s.split('\n');
-        let f = |s: &str| {
+        let last = Cell::new(0usize);
+        let mut it = memchr_iter(b'\n', ori_s.as_bytes()).map(|i| {
+            let s = last.get();
+            debug_assert!(s <= i);
+            last.set(i + 1);
+            // SAFETY: Indices is within string
+            let s = unsafe { ori_s.get_unchecked(s..i) };
+
             let i = self.off.get();
             debug_assert_eq!(&self.s[i..i + s.len()], s);
             self.line.update(|l| l + 1);
             self.off.update(|o| o + s.len() + 1);
-        };
+            s
+        });
 
         let Some(s) = it.next() else {
             self.end.set(0);
             return Some(Err(NetdocParseError::with_line_pos(
-                self.line.get(),
+                self.line.get() + 1,
                 0,
                 ErrType::NoNewline,
             )));
@@ -111,16 +120,8 @@ impl<'a> Iterator for NetdocParser<'a> {
             }
         };
 
-        f(s);
-        let Some(s) = it.next() else {
-            self.end.set(0);
-            return Some(Err(NetdocParseError::with_line_pos(
-                self.line.get() - 1,
-                0,
-                ErrType::NoNewline,
-            )));
-        };
-
+        // SAFETY: Index is within string
+        let s = unsafe { ori_s.get_unchecked(last.get()..) };
         if !s.starts_with(BEGIN) {
             // No oject
             let end = self.off.get();
@@ -141,6 +142,15 @@ impl<'a> Iterator for NetdocParser<'a> {
         }
 
         // Parse object
+        let Some(s) = it.next() else {
+            self.end.set(0);
+            return Some(Err(NetdocParseError::with_line_pos(
+                self.line.get() + 1,
+                0,
+                ErrType::NoNewline,
+            )));
+        };
+
         if !s.ends_with(ENDL) {
             self.end.set(0);
             return Some(Err(NetdocParseError::with_line_pos(
@@ -156,12 +166,11 @@ impl<'a> Iterator for NetdocParser<'a> {
             return Some(Err(e));
         }
 
-        f(s);
         let s = loop {
             let Some(s) = it.next() else {
                 self.end.set(0);
                 return Some(Err(NetdocParseError::with_line_pos(
-                    self.line.get() - 1,
+                    self.line.get() + 1,
                     0,
                     ErrType::NoNewline,
                 )));
@@ -175,7 +184,6 @@ impl<'a> Iterator for NetdocParser<'a> {
                 self.end.set(0);
                 return Some(Err(e));
             }
-            f(s);
         };
 
         if !s.ends_with(ENDL) {
@@ -196,16 +204,6 @@ impl<'a> Iterator for NetdocParser<'a> {
                 self.line.get(),
                 END.len(),
                 ErrType::InvalidObjectFormat,
-            )));
-        }
-
-        f(s);
-        if it.next().is_none() {
-            self.end.set(0);
-            return Some(Err(NetdocParseError::with_line_pos(
-                self.line.get() - 1,
-                0,
-                ErrType::NoNewline,
             )));
         }
 
@@ -249,7 +247,7 @@ impl DoubleEndedIterator for NetdocParser<'_> {
         if !s.ends_with("\n") {
             self.end.set(0);
             return Some(Err(NetdocParseError::with_line_pos(
-                self.endl.get(),
+                self.endl.get() - 1,
                 0,
                 ErrType::NoNewline,
             )));
@@ -257,18 +255,29 @@ impl DoubleEndedIterator for NetdocParser<'_> {
         // SAFETY: String is suffixed with newline character
         let s = unsafe { s.get_unchecked(..s.len() - 1) };
 
-        let mut it = s.split('\n').rev();
-        let f = |s: &str| {
+        let mut last = s.len();
+        let mut it = memchr_iter(b'\n', s.as_bytes());
+        let mut it = from_fn(|| {
+            let (i, e) = match it.next_back() {
+                Some(i) => (i + 1, replace(&mut last, i)),
+                None if last != usize::MAX => (0, replace(&mut last, usize::MAX)),
+                None => return None,
+            };
+            debug_assert!(e >= i);
+            // SAFETY: Indices is within string
+            let s = unsafe { s.get_unchecked(i..e) };
+
             let i = self.end.get();
             debug_assert_eq!(&self.s[i - s.len() - 1..i - 1], s);
             self.endl.update(|l| l - 1);
             self.end.update(|o| o - s.len() - 1);
-        };
+            Some(s)
+        });
 
         let Some(s) = it.next() else {
             self.end.set(0);
             return Some(Err(NetdocParseError::with_line_pos(
-                self.endl.get(),
+                self.endl.get() - 1,
                 0,
                 ErrType::NoNewline,
             )));
@@ -294,12 +303,11 @@ impl DoubleEndedIterator for NetdocParser<'_> {
             }
             object_len = obj_s.len();
 
-            f(s);
             let s = loop {
                 let Some(s) = it.next() else {
                     self.end.set(0);
                     return Some(Err(NetdocParseError::with_line_pos(
-                        self.endl.get() + 1,
+                        self.endl.get() - 1,
                         0,
                         ErrType::NoNewline,
                     )));
@@ -313,7 +321,6 @@ impl DoubleEndedIterator for NetdocParser<'_> {
                     self.end.set(0);
                     return Some(Err(e));
                 }
-                f(s);
             };
 
             if !s.ends_with(ENDL) {
@@ -337,11 +344,10 @@ impl DoubleEndedIterator for NetdocParser<'_> {
                 )));
             }
 
-            f(s);
             let Some(s) = it.next() else {
                 self.end.set(0);
                 return Some(Err(NetdocParseError::with_line_pos(
-                    self.endl.get() + 1,
+                    self.endl.get() - 1,
                     0,
                     ErrType::NoNewline,
                 )));
@@ -361,7 +367,6 @@ impl DoubleEndedIterator for NetdocParser<'_> {
                 return Some(Err(e));
             }
         };
-        f(line_s);
 
         let start = self.end.get();
         debug_assert!(self.off.get() <= start, "{} > {}", self.off.get(), start);
@@ -455,7 +460,7 @@ impl<'a> Iterator for Arguments<'a> {
         if self.s.is_empty() {
             return None;
         }
-        let Some(i) = self.s.find([' ', '\t']) else {
+        let Some(i) = memchr2(b' ', b'\t', self.s.as_bytes()) else {
             return Some(take(&mut self.s));
         };
 
@@ -478,7 +483,7 @@ impl DoubleEndedIterator for Arguments<'_> {
         if self.s.is_empty() {
             return None;
         }
-        let Some(i) = self.s.rfind([' ', '\t']) else {
+        let Some(i) = memrchr2(b' ', b'\t', self.s.as_bytes()) else {
             return Some(take(&mut self.s));
         };
 
