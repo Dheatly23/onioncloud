@@ -30,7 +30,7 @@ struct HandshakeHeader {
     len: U16,
 }
 
-#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct ExtendCell {
     n_link: u8,
@@ -304,12 +304,12 @@ impl RelayExtend2 {
         handshake: Handshake<impl AsRef<[u8]>>,
     ) -> Self {
         fn write_linkspec(
-            [np, b @ ..]: &mut [u8; RELAY_DATA_LENGTH],
+            data: &mut [u8; RELAY_DATA_LENGTH],
             linkspec: impl IntoIterator<Item = Linkspec<impl AsRef<[u8]>>>,
         ) -> (usize, &mut [u8]) {
-            let mut total = 1;
+            let data: &mut ExtendCell = transmute_mut!(data);
             let mut n = 0u8;
-            let mut b = &mut b[..];
+            let mut b = &mut data.rest[..];
 
             for l in linkspec {
                 n = n.checked_add(1).expect("too many link specifiers");
@@ -322,12 +322,10 @@ impl RelayExtend2 {
                 header.len = v.len().try_into().expect("linkspec length > 255");
                 (data, b) = b.split_at_mut_checked(v.len()).expect("data does not fit");
                 data.copy_from_slice(v);
-
-                total += size_of_val(header) + v.len();
             }
 
-            *np = n;
-            (total, b)
+            data.n_link = n;
+            (RELAY_DATA_LENGTH - b.len(), b)
         }
 
         fn write_handshake(b: &mut [u8], ty: u16, data: &[u8]) -> usize {
@@ -346,7 +344,8 @@ impl RelayExtend2 {
         let mut data = RelayWrapper::from(cell);
 
         let (mut len, b) = write_linkspec(data.data_padding_mut(), linkspec);
-        let o_handshake = len as u16;
+        debug_assert!(len >= 1 && len < RELAY_DATA_LENGTH);
+        let o_handshake = (len - 1) as u16;
         len += write_handshake(b, handshake.ty, handshake.data.as_ref());
 
         // SAFETY: Payload length is valid.
@@ -384,6 +383,7 @@ impl RelayExtend2 {
         let [n, rest @ ..] = cell.data() else {
             return None;
         };
+        let start = rest.len();
         let mut rest = rest;
         for _ in 0..*n {
             let header;
@@ -391,10 +391,9 @@ impl RelayExtend2 {
             rest = rest.get(header.len as usize..)?;
         }
 
+        let o_handshake = (start - rest.len()) as u16;
         let header;
         (header, rest) = HandshakeHeader::ref_from_prefix(rest).ok()?;
-        // SAFETY: header and n are both coming from same allocation and header is after n.
-        let o_handshake = unsafe { from_ref(header).byte_offset_from_unsigned(n) as u16 };
         if rest.len() != usize::from(header.len.get()) {
             return None;
         }
@@ -404,18 +403,21 @@ impl RelayExtend2 {
 
     #[inline(always)]
     fn get_data(&self) -> (u8, &[u8], &HandshakeHeader, &[u8]) {
+        let o_handshake = usize::from(self.o_handshake);
+        let &ExtendCell { n_link, ref rest } = transmute_ref!(self.data.data_padding());
+        debug_assert!(o_handshake <= rest.len());
+        let p = from_ref(rest);
+
+        let (link_data, header, hs_data);
         // SAFETY: Data validity has been checked and auxilirary data is valid.
         unsafe {
-            let o_handshake = usize::from(self.o_handshake);
-            let p = from_ref(self.data.data_padding()).cast::<u8>();
-            let p_header = p.cast::<HandshakeHeader>().byte_add(o_handshake);
-            (
-                *p,
-                from_raw_parts(p.add(1), o_handshake - 1),
-                &*p_header,
-                from_raw_parts(p_header.add(1).cast::<u8>(), (*p_header).len.get().into()),
-            )
+            link_data = from_raw_parts(p.cast::<u8>(), o_handshake);
+            let p = p.cast::<HandshakeHeader>().byte_add(link_data.len());
+            header = &*p;
+            hs_data = from_raw_parts(p.add(1).cast::<u8>(), header.len.get().into());
         }
+
+        (n_link, link_data, header, hs_data)
     }
 }
 
