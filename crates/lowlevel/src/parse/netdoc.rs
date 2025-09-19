@@ -380,6 +380,8 @@ impl DoubleEndedIterator for NetdocParser<'_> {
     }
 }
 
+impl FusedIterator for NetdocParser<'_> {}
+
 impl<'a> Item<'a> {
     /// Keyword of item.
     pub fn keyword(&self) -> &'a str {
@@ -816,6 +818,31 @@ mod tests {
     fn test_netdoc_empty() {
         assert!(NetdocParser::new("").next().is_none());
         assert!(NetdocParser::new("").next_back().is_none());
+    }
+
+    #[test]
+    fn test_netdoc_some_doc() {
+        const DOC: &str = r#"ABC
+DEF
+"#;
+
+        for (i, item) in NetdocParser::new(DOC).enumerate() {
+            let item = item.unwrap();
+            match i {
+                0 => assert_eq!(item.keyword(), "ABC"),
+                1 => assert_eq!(item.keyword(), "DEF"),
+                _ => unreachable!("should only be 2 items max"),
+            }
+        }
+
+        for (i, item) in NetdocParser::new(DOC).rev().enumerate() {
+            let item = item.unwrap();
+            match i {
+                0 => assert_eq!(item.keyword(), "DEF"),
+                1 => assert_eq!(item.keyword(), "ABC"),
+                _ => unreachable!("should only be 2 items max"),
+            }
+        }
     }
 
     #[test]
