@@ -1,3 +1,5 @@
+mod check;
+
 use std::cell::Cell;
 use std::iter::{FusedIterator, from_fn};
 use std::mem::{replace, take};
@@ -614,8 +616,22 @@ pub fn get_signature(document: &str) -> Result<SignatureResult<'_>, NetdocParseE
     })
 }
 
+fn is_opt(s: &str) -> bool {
+    if s.len() < 4 {
+        return false;
+    }
+
+    // SAFETY: String is at least 4 bytes long
+    let v = u32::from_le_bytes(unsafe { *s.as_ptr().cast::<[u8; 4]>() });
+
+    const C: u32 = b'o' as u32 | (b'p' as u32) << 8 | (b't' as u32) << 16;
+    const C1: u32 = C | (b' ' as u32) << 24;
+    const C2: u32 = C | (b'\t' as u32) << 24;
+    v == C1 || v == C2
+}
+
 fn check_item_line(s: &str, line: isize) -> Result<(bool, usize), NetdocParseError> {
-    let is_opt = matches!(s.as_bytes(), [b'o', b'p', b't', b' ' | b'\t', ..]);
+    let is_opt = is_opt(s);
     let s = if is_opt {
         // SAFETY: String is prefixed with opt
         unsafe { s.get_unchecked(4..) }
@@ -623,137 +639,44 @@ fn check_item_line(s: &str, line: isize) -> Result<(bool, usize), NetdocParseErr
         s
     };
 
-    let k;
-    if let Some(i) = s.find([' ', '\t']) {
-        let a;
-
-        // SAFETY: Index points to space or tab character within string
-        unsafe {
-            k = s.get_unchecked(..i);
-            a = s.get_unchecked(i + 1..);
-        }
-
-        check_argument(a, line, if is_opt { 4 } else { 0 } + i + 1).map_or(Ok(()), Err)?;
-    } else {
-        k = s;
-    }
-
-    if k.is_empty() {
-        return Err(NetdocParseError::with_line_pos(
-            line,
-            if is_opt { 4 } else { 0 },
-            ErrType::InvalidKeywordChar,
-        ));
-    }
-
-    for (i, c) in k.bytes().enumerate() {
-        if !matches!((i, c), (_, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9') | (1.., b'-')) {
+    let ki = match check::check_line(s) {
+        Ok(i) => i,
+        Err(i) => {
             return Err(NetdocParseError::with_line_pos(
                 line,
                 if is_opt { 4 } else { 0 } + i,
                 ErrType::InvalidKeywordChar,
             ));
         }
-    }
+    };
 
-    Ok((is_opt, k.len()))
-}
-
-fn check_argument(s: &str, line: isize, off: usize) -> Option<NetdocParseError> {
-    enum AState {
-        NonSpace,
-        Space,
-    }
-
-    let mut t = AState::Space;
-    for (i, c) in s.bytes().enumerate() {
-        t = match (t, c) {
-            (_, b'\0') => {
-                return Some(NetdocParseError::with_line_pos(
-                    line,
-                    off + i,
-                    ErrType::Null,
-                ));
-            }
-            (AState::NonSpace, b' ' | b'\t') => AState::Space,
-            (AState::NonSpace, _) => AState::NonSpace,
-            (AState::Space, b' ' | b'\t') => {
-                return Some(NetdocParseError::with_line_pos(
-                    line,
-                    off + i,
-                    ErrType::InvalidArgumentChar,
-                ));
-            }
-            (AState::Space, _) => AState::NonSpace,
-        };
-    }
-
-    if matches!(t, AState::Space) {
-        return Some(NetdocParseError::with_line_pos(
-            line,
-            off + s.len() - 1,
-            ErrType::InvalidArgumentChar,
-        ));
-    }
-
-    None
-}
-
-fn check_object_keyword(s: &str, line: isize, off: usize) -> Option<NetdocParseError> {
-    enum KState {
-        WordBegin,
-        Word,
-        Space,
-    }
-
-    let mut t = KState::Space;
-    for (i, c) in s.bytes().enumerate() {
-        t = match (t, c) {
-            (KState::WordBegin | KState::Word, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9') => {
-                KState::Word
-            }
-            (KState::Space, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9') => KState::WordBegin,
-            (KState::Word, b'-') => KState::Word,
-            (KState::WordBegin | KState::Word, b' ') => KState::Space,
-            (KState::Space, b' ') => {
-                return Some(NetdocParseError::with_line_pos(
-                    line,
-                    off + i,
-                    ErrType::InvalidObjectFormat,
-                ));
-            }
-            _ => {
-                return Some(NetdocParseError::with_line_pos(
-                    line,
-                    off + i,
-                    ErrType::InvalidKeywordChar,
-                ));
-            }
-        };
-    }
-    if !matches!(t, KState::Word | KState::WordBegin) {
-        return Some(NetdocParseError::with_line_pos(
-            line,
-            off + s.len(),
-            ErrType::InvalidKeywordChar,
-        ));
-    }
-
-    None
-}
-
-fn check_object_content(s: &str, line: isize) -> Option<NetdocParseError> {
-    for (i, c) in s.as_bytes().iter().enumerate() {
-        if !matches!(c, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'+' | b'/' | b'=') {
-            return Some(NetdocParseError::with_line_pos(
+    if ki != s.len() {
+        // SAFETY: Index points to space or tab character after keyword or end of string
+        let a = unsafe { s.get_unchecked(ki + 1..) };
+        if let Some(i) = check::check_argument(a) {
+            return Err(NetdocParseError::with_line_pos(
                 line,
-                i,
-                ErrType::InvalidObjectContent,
+                if is_opt { 4 } else { 0 } + ki + 1 + i,
+                if let Some(0) = a.as_bytes().get(i) {
+                    ErrType::Null
+                } else {
+                    ErrType::InvalidArgumentChar
+                },
             ));
         }
     }
 
-    None
+    Ok((is_opt, ki))
+}
+
+fn check_object_keyword(s: &str, line: isize, off: usize) -> Option<NetdocParseError> {
+    check::check_object_keyword(s)
+        .map(|i| NetdocParseError::with_line_pos(line, off + i, ErrType::InvalidKeywordChar))
+}
+
+fn check_object_content(s: &str, line: isize) -> Option<NetdocParseError> {
+    check::check_object_content(s)
+        .map(|i| NetdocParseError::with_line_pos(line, i, ErrType::InvalidObjectContent))
 }
 
 #[cfg(test)]
@@ -767,7 +690,7 @@ mod tests {
     fn item_strat() -> impl Strategy<Value = (&'static str, String, Vec<(char, String)>)> {
         (
             prop_oneof![Just(""), Just("opt "), Just("opt\t")],
-            "[a-zA-Z0-9][a-zA-Z0-9-]{1,16}".prop_filter("keyword is opt", |s| s != "opt"),
+            "[a-zA-Z0-9][a-zA-Z0-9-]{0,16}".prop_filter("keyword is opt", |s| s != "opt"),
             vec(
                 (prop_oneof![Just(' '), Just('\t')], "[^ \t\n\0]{1,8}"),
                 0..8,
@@ -777,7 +700,7 @@ mod tests {
 
     fn sig_strat() -> impl Strategy<Value = (String, String)> {
         (
-            vec("[a-zA-Z0-9]{1,8}", 1..8).prop_map(|v| v.join(" ")),
+            "([a-zA-Z0-9][a-zA-Z0-9-]{0,8} ){0,8}[a-zA-Z0-9][a-zA-Z0-9-]{0,16}",
             "([a-zA-Z0-9+\\\n]{1,32}\n)?",
         )
     }
