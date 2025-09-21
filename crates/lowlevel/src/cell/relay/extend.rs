@@ -344,7 +344,7 @@ impl RelayExtend2 {
         let mut data = RelayWrapper::from(cell);
 
         let (mut len, b) = write_linkspec(data.data_padding_mut(), linkspec);
-        debug_assert!(len >= 1 && len < RELAY_DATA_LENGTH);
+        debug_assert!((1..RELAY_DATA_LENGTH).contains(&len));
         let o_handshake = (len - 1) as u16;
         len += write_handshake(b, handshake.ty, handshake.data.as_ref());
 

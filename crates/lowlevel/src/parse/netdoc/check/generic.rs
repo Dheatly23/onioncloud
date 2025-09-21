@@ -1,6 +1,7 @@
 //! Reference/generic variant.
 //!
 //! Implements non-SIMD variant. Defines reference for all other implementations.
+#![allow(dead_code)]
 
 pub(crate) fn check_line(s: &str) -> Result<usize, usize> {
     for (i, c) in s.as_bytes().iter().enumerate() {

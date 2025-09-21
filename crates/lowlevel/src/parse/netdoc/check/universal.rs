@@ -1,4 +1,5 @@
 //! 64-bit universal SIMD variant.
+#![allow(dead_code)]
 
 use std::ptr::from_ref;
 
