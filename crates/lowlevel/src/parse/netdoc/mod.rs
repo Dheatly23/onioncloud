@@ -616,22 +616,8 @@ pub fn get_signature(document: &str) -> Result<SignatureResult<'_>, NetdocParseE
     })
 }
 
-fn is_opt(s: &str) -> bool {
-    if s.len() < 4 {
-        return false;
-    }
-
-    // SAFETY: String is at least 4 bytes long
-    let v = u32::from_le_bytes(unsafe { *s.as_ptr().cast::<[u8; 4]>() });
-
-    const C: u32 = b'o' as u32 | (b'p' as u32) << 8 | (b't' as u32) << 16;
-    const C1: u32 = C | (b' ' as u32) << 24;
-    const C2: u32 = C | (b'\t' as u32) << 24;
-    v == C1 || v == C2
-}
-
 fn check_item_line(s: &str, line: isize) -> Result<(bool, usize), NetdocParseError> {
-    let is_opt = is_opt(s);
+    let is_opt = s.starts_with("opt ") | s.starts_with("opt\t");
     let s = if is_opt {
         // SAFETY: String is prefixed with opt
         unsafe { s.get_unchecked(4..) }
