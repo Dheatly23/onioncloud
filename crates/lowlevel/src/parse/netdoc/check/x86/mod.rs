@@ -1,6 +1,7 @@
 //! x86 SIMD variant.
 #![cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 
+mod avx;
 mod sse;
 
 use std::arch::is_x86_feature_detected;
@@ -20,8 +21,19 @@ fn get_fptr() -> NonNull<FPtrs> {
         return p;
     }
 
-    let p = NonNull::from(if is_x86_feature_detected!("sse2") {
-        // SAFETY: SSSE3 is enabled
+    let p = NonNull::from(if is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 is enabled
+        static FP: FPtrs = unsafe {
+            FPtrs {
+                check_line: |v| avx::check_line(v),
+                check_argument: |v| avx::check_argument(v),
+                check_object_keyword: |v| avx::check_object_keyword(v),
+                check_object_content: |v| avx::check_object_content(v),
+            }
+        };
+        &FP
+    } else if is_x86_feature_detected!("sse2") {
+        // SAFETY: SSE2 is enabled
         static FP: FPtrs = unsafe {
             FPtrs {
                 check_line: |v| sse::check_line(v),
@@ -72,12 +84,16 @@ mod tests {
     #[test]
     fn test_check_line() {
         let is_sse = is_x86_feature_detected!("sse2");
+        let is_avx = is_x86_feature_detected!("avx2");
 
-        if is_sse {
+        if is_sse || is_avx {
             proptest!(|(s: String)| {
                 let r = reference::check_line(&s);
+                if is_avx {
+                    assert_eq!(r, unsafe { avx::check_line(&s) });
+                }
                 if is_sse {
-                    assert_eq!(r, check_line(&s));
+                    assert_eq!(r, unsafe { sse::check_line(&s) });
                 }
             });
         }
@@ -86,12 +102,16 @@ mod tests {
     #[test]
     fn test_check_argument() {
         let is_sse = is_x86_feature_detected!("sse2");
+        let is_avx = is_x86_feature_detected!("avx2");
 
-        if is_sse {
-            proptest!(|(s in any::<String>().prop_filter("string is empty", |s| !s.is_empty()))| {
+        if is_sse || is_avx {
+            proptest!(|(s: String)| {
                 let r = reference::check_argument(&s);
+                if is_avx {
+                    assert_eq!(r, unsafe { avx::check_argument(&s) });
+                }
                 if is_sse {
-                    assert_eq!(r, check_argument(&s));
+                    assert_eq!(r, unsafe { sse::check_argument(&s) });
                 }
             });
         }
@@ -100,12 +120,16 @@ mod tests {
     #[test]
     fn test_check_object_keyword() {
         let is_sse = is_x86_feature_detected!("sse2");
+        let is_avx = is_x86_feature_detected!("avx2");
 
-        if is_sse {
+        if is_sse || is_avx {
             proptest!(|(s: String)| {
                 let r = reference::check_object_keyword(&s);
+                if is_avx {
+                    assert_eq!(r, unsafe { avx::check_object_keyword(&s) });
+                }
                 if is_sse {
-                    assert_eq!(r, check_object_keyword(&s));
+                    assert_eq!(r, unsafe { sse::check_object_keyword(&s) });
                 }
             });
         }
@@ -114,12 +138,16 @@ mod tests {
     #[test]
     fn test_check_object_content() {
         let is_sse = is_x86_feature_detected!("sse2");
+        let is_avx = is_x86_feature_detected!("avx2");
 
-        if is_sse {
+        if is_sse || is_avx {
             proptest!(|(s: String)| {
                 let r = reference::check_object_content(&s);
+                if is_avx {
+                    assert_eq!(r, unsafe { avx::check_object_content(&s) });
+                }
                 if is_sse {
-                    assert_eq!(r, check_object_content(&s));
+                    assert_eq!(r, unsafe { sse::check_object_content(&s) });
                 }
             });
         }
