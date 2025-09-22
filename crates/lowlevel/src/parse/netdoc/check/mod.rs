@@ -1,10 +1,13 @@
 mod generic;
 mod universal;
+mod wasm;
 mod x86;
 
 cfg_if::cfg_if! {
     if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] {
         pub(crate) use x86::*;
+    } else if #[cfg(all(target_family = "wasm", target_feature = "simd128"))] {
+        pub(crate) use wasm::*;
     } else if #[cfg(any(target_pointer_width = "32", target_pointer_width = "16"))] {
         pub(crate) use generic::*;
     } else {
