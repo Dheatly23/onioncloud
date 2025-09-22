@@ -1,10 +1,32 @@
 mod generic;
 mod universal;
+mod x86;
 
-#[cfg(any(target_pointer_width = "32", target_pointer_width = "16"))]
-pub(crate) use generic::*;
-#[cfg(not(any(target_pointer_width = "32", target_pointer_width = "16")))]
-pub(crate) use universal::*;
+cfg_if::cfg_if! {
+    if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] {
+        pub(crate) use x86::*;
+    } else if #[cfg(any(target_pointer_width = "32", target_pointer_width = "16"))] {
+        pub(crate) use generic::*;
+    } else {
+        pub(crate) use universal::*;
+    }
+}
+
+/// Stable implementation of `pointer::get_unchecked`.
+#[track_caller]
+#[inline(always)]
+unsafe fn get_unchecked<T>(p: *const [T], i: usize) -> *const T {
+    debug_assert!(i < p.len());
+    unsafe { (p as *const T).add(i) }
+}
+
+#[allow(dead_code, clippy::type_complexity)]
+struct FPtrs {
+    check_line: fn(s: &str) -> Result<usize, usize>,
+    check_argument: fn(s: &str) -> Option<usize>,
+    check_object_keyword: fn(s: &str) -> Option<usize>,
+    check_object_content: fn(s: &str) -> Option<usize>,
+}
 
 #[cfg(test)]
 mod tests {

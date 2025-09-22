@@ -760,6 +760,7 @@ dependencies = [
  "aes",
  "anyhow",
  "base64ct",
+ "cfg-if",
  "cipher",
  "crossbeam-queue",
  "ctr",

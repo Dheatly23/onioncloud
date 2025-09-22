@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 aes.workspace = true
 base64ct.workspace = true
+cfg-if.workspace = true
 cipher.workspace = true
 crossbeam-queue.workspace = true
 ctr.workspace = true

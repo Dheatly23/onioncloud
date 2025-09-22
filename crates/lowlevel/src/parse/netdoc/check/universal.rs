@@ -3,12 +3,7 @@
 
 use std::ptr::from_ref;
 
-/// Stable implementation of `pointer::get_unchecked`.
-#[track_caller]
-unsafe fn get_unchecked<T>(p: *const [T], i: usize) -> *const T {
-    debug_assert!(i < p.len());
-    unsafe { (p as *const T).add(i) }
-}
+use super::get_unchecked;
 
 /// Test less than or equals.
 ///
@@ -435,8 +430,8 @@ pub(crate) fn check_object_content(s: &str) -> Option<usize> {
 mod tests {
     use super::*;
 
-    use crate::parse::netdoc::check::generic as reference;
-    use crate::parse::netdoc::check::tests::aligned_str;
+    use super::super::generic as reference;
+    use super::super::tests::aligned_str;
 
     use proptest::prelude::*;
 
