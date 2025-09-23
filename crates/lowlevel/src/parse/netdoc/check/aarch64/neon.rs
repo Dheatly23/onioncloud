@@ -13,7 +13,7 @@ use super::arch;
 ///
 /// Returns u16 where each bit corresponds to if lane is all 1 or not.
 #[target_feature(enable = "neon")]
-fn movemask(v: arch::u8x18_t) -> u16 {
+fn movemask(v: arch::uint8x16_t) -> u16 {
     const C: [u8; 16] = [
         1 << 0,
         1 << 1,
@@ -32,7 +32,7 @@ fn movemask(v: arch::u8x18_t) -> u16 {
         1 << 6,
         1 << 7,
     ];
-    let v = arch::vandq_u8(v, arch::vld1q_u8(from_ref(&C)));
+    let v = arch::vandq_u8(v, unsafe { arch::vld1q_u8(from_ref(&C).cast()) });
     let vl = arch::vget_low_u8(v);
     let vh = arch::vget_high_u8(v);
     arch::vaddv_u8(vl) as u16 | (arch::vaddv_u8(vh) as u16) << 8
