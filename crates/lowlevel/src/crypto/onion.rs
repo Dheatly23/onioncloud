@@ -22,7 +22,8 @@ use super::{
 };
 use crate::cache::{Cached, CellCache, CellCacheExt};
 use crate::cell::create::{Create2, CreateFast, Created2, CreatedFast};
-use crate::cell::relay::{RelayLike, RelayRefWrapper};
+use crate::cell::relay::RelayRefWrapper;
+use crate::cell::relay::v0::RelayExt;
 use crate::cell::{FIXED_CELL_SIZE, FixedCell};
 use crate::crypto::relay::RelayId;
 use crate::errors;

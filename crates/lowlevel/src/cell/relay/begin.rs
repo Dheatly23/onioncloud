@@ -10,7 +10,9 @@ use memchr::memchr;
 use zerocopy::byteorder::big_endian::U32;
 use zerocopy::{FromBytes, transmute_mut};
 
-use super::{IntoRelay, Relay, RelayLike, RelayWrapper, TryFromRelay, with_cmd_stream};
+use super::{
+    IntoRelay, Relay, RelayV001, RelayVersion, RelayWrapper, TryFromRelay, v0, v1, with_cmd_stream,
+};
 use crate::cache::Cachable;
 use crate::cell::FixedCell;
 use crate::errors;
@@ -22,6 +24,8 @@ pub struct RelayBegin {
     pub stream: NonZeroU16,
     /// Cell payload.
     data: RelayWrapper,
+    /// Relay version.
+    version: Option<RelayVersion>,
 
     // Auxiliary data to speedup access.
     /// Size of address:port (not including trailing NUL).
@@ -65,22 +69,27 @@ impl Cachable for RelayBegin {
 }
 
 impl TryFromRelay for RelayBegin {
-    fn try_from_relay(relay: &mut Option<Relay>) -> Result<Option<Self>, errors::CellFormatError> {
-        if relay.as_mut().is_none_or(|r| r.command() != Self::ID) {
-            return Ok(None);
-        }
-        let Some(r) = relay.take() else {
-            return Ok(None);
+    fn try_from_relay(
+        relay: &mut Option<Relay>,
+        version: RelayVersion,
+    ) -> Result<Option<Self>, errors::CellFormatError> {
+        let r = match (&*relay, version) {
+            (Some(r), RelayVersion::V0) if v0::RelayExt::command(r) == Self::ID => r,
+            (Some(r), RelayVersion::V1) if v1::RelayExt::command(r) == Self::ID => r,
+            _ => return Ok(None),
         };
-        let Some((stream, addr_port_s, has_flags)) =
-            Self::check(AsRef::<FixedCell>::as_ref(&r).into())
+        let version = Some(version);
+        let Some((Some(stream), addr_port_s, has_flags)) =
+            Self::check(AsRef::<FixedCell>::as_ref(r).into(), version)
         else {
-            *relay = Some(r);
             return Err(errors::CellFormatError);
         };
+
         Ok(Some(Self {
             stream,
-            data: FixedCell::from(r).into(),
+            // SAFETY: Relay is Some
+            data: FixedCell::from(unsafe { relay.take().unwrap_unchecked() }).into(),
+            version,
             addr_port_s,
             has_flags,
         }))
@@ -88,8 +97,19 @@ impl TryFromRelay for RelayBegin {
 }
 
 impl IntoRelay for RelayBegin {
-    fn into_relay(self, circuit: NonZeroU32) -> Relay {
-        with_cmd_stream(self.data, Self::ID, self.stream.into(), circuit)
+    fn try_into_relay(
+        self,
+        circuit: NonZeroU32,
+        version: RelayVersion,
+    ) -> Result<Relay, errors::CellLengthOverflowError> {
+        with_cmd_stream(
+            self.data,
+            self.version,
+            version,
+            Self::ID,
+            self.stream.into(),
+            circuit,
+        )
     }
 }
 
@@ -102,13 +122,17 @@ impl RelayBegin {
     /// # Safety
     ///
     /// Cell must be a valid RELAY_BEGIN cell.
-    pub unsafe fn from_cell(cell: FixedCell) -> Self {
+    pub unsafe fn from_cell(cell: FixedCell, version: RelayVersion) -> Self {
+        let version = Some(version);
         let data = RelayWrapper::from(cell);
-        let (stream, addr_port_s, has_flags) = Self::check(&data).expect("malformed cell format");
+        let Some((stream, addr_port_s, has_flags)) = Self::check(&data, version) else {
+            panic!("malformed cell format");
+        };
 
         Self {
-            stream,
+            stream: unsafe { stream.unwrap_unchecked() },
             data,
+            version,
             addr_port_s,
             has_flags,
         }
@@ -126,9 +150,13 @@ impl RelayBegin {
     ///   - IPv6 address.
     /// - `flags` : RELAY_BEGIN flags
     ///
+    /// # Return
+    ///
+    /// Returns RELAY_BEGIN cell or error if data overflows cell.
+    ///
     /// # Panics
     ///
-    /// Panics if data is longer than [`RELAY_DATA_LENGTH`](`super::RELAY_DATA_LENGTH`).
+    /// Panics if `addr_port` contains null byte.
     ///
     /// # Example
     ///
@@ -142,12 +170,17 @@ impl RelayBegin {
     ///     NonZeroU16::new(1).unwrap(),
     ///     "example.com:80",
     ///     Flags::new(),
-    /// );
+    /// ).unwrap();
     ///
     /// assert_eq!(cell.addr_port(), "example.com:80");
     /// assert_eq!(cell.flags(), Flags::new());
     /// ```
-    pub fn new(cell: FixedCell, stream: NonZeroU16, addr_port: &str, flags: Flags) -> Self {
+    pub fn new(
+        cell: FixedCell,
+        stream: NonZeroU16,
+        addr_port: &str,
+        flags: Flags,
+    ) -> Result<Self, errors::CellLengthOverflowError> {
         assert_eq!(
             chr_nul(addr_port.as_bytes()),
             None,
@@ -155,37 +188,38 @@ impl RelayBegin {
         );
 
         let mut data = RelayWrapper::from(cell);
-        let b = data.data_padding_mut();
+        let RelayV001 { len, data: a } = RelayV001::from_mut(&mut data);
         let l = addr_port.len();
-        b[..l].copy_from_slice(addr_port.as_bytes());
-        b[l] = 0;
+        if l >= a.len() {
+            return Err(errors::CellLengthOverflowError);
+        }
+        a[..l].copy_from_slice(addr_port.as_bytes());
+        a[l] = 0;
 
         let (has_flags, sz) = if flags != 0 {
-            let p: &mut U32 =
-                transmute_mut!(<&mut [u8; 4]>::try_from(&mut b[l + 1..l + 5]).unwrap());
+            let Some(a) = a.get_mut(l + 1..l + 5) else {
+                return Err(errors::CellLengthOverflowError);
+            };
+            let p: &mut U32 = transmute_mut!(<&mut [u8; 4]>::try_from(a).unwrap());
             p.set(flags.into());
 
             (true, l + 5)
         } else {
             (false, l + 1)
         };
-
-        // SAFETY: Payload length is valid.
-        unsafe {
-            data.set_len(sz as u16);
-        }
+        len.set(sz as _);
 
         if cfg!(debug_assertions) {
-            data.set_stream(stream.into());
-            debug_assert_eq!(Self::check(&data), Some((stream, l, has_flags)));
+            debug_assert_eq!(Self::check(&data, None), Some((None, l, has_flags)));
         }
 
-        Self {
+        Ok(Self {
             stream,
             data,
+            version: None,
             addr_port_s: l,
             has_flags,
-        }
+        })
     }
 
     /// Get address and port.
@@ -200,10 +234,22 @@ impl RelayBegin {
         Flags(self.get_data().1.map_or(0, |v| v.get()))
     }
 
-    fn check(cell: &RelayWrapper) -> Option<(NonZeroU16, usize, bool)> {
-        let stream = NonZeroU16::new(cell.stream())?;
+    fn check(
+        cell: &RelayWrapper,
+        version: Option<RelayVersion>,
+    ) -> Option<(Option<NonZeroU16>, usize, bool)> {
+        let (stream, data) = match version {
+            None => (None, RelayV001::from_ref(cell).data()),
+            Some(RelayVersion::V0) => (
+                Some(NonZeroU16::new(v0::RelayExt::stream(cell))?),
+                v0::RelayExt::data(cell),
+            ),
+            Some(RelayVersion::V1) => (
+                Some(NonZeroU16::new(v1::RelayExt::stream(cell))?),
+                v1::RelayExt::data(cell),
+            ),
+        };
 
-        let data = cell.data();
         let (s, [0, data @ ..]) = chr_nul(data).map(|i| data.split_at(i))? else {
             return None;
         };
@@ -220,9 +266,15 @@ impl RelayBegin {
     }
 
     fn get_data(&self) -> (&str, Option<&U32>) {
+        let a = match self.version {
+            None => &RelayV001::from_ref(&self.data).data[..],
+            Some(RelayVersion::V0) => &v0::RelayExt::data_padding(&self.data)[..],
+            Some(RelayVersion::V1) => &v1::RelayExt::data_padding(&self.data)[..],
+        };
+
         // SAFETY: Data validity has been checked and auxilirary data is valid.
         unsafe {
-            let p = from_ref(self.data.data_padding()).cast::<u8>();
+            let p = from_ref(a).cast::<u8>();
             (
                 from_utf8_unchecked(from_raw_parts(p, self.addr_port_s)),
                 if self.has_flags {
@@ -323,8 +375,8 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use crate::cell::relay::RELAY_DATA_LENGTH;
-    use crate::cell::relay::tests::assert_relay_eq;
+    use crate::cell::FIXED_CELL_SIZE;
+    use crate::cell::relay::v0::tests::assert_relay_eq;
 
     fn strat() -> impl Strategy<Value = (String, u32, NonZeroU16)> {
         (
@@ -346,7 +398,7 @@ mod tests {
             1,
             b"example.com:80",
         ));
-        RelayBegin::try_from_relay(&mut cell).unwrap_err();
+        RelayBegin::try_from_relay(&mut cell, RelayVersion::V0).unwrap_err();
         cell.unwrap();
     }
 
@@ -359,7 +411,7 @@ mod tests {
             1,
             b"example.\x80com:80\0\0\0\0\0",
         ));
-        RelayBegin::try_from_relay(&mut cell).unwrap_err();
+        RelayBegin::try_from_relay(&mut cell, RelayVersion::V0).unwrap_err();
         cell.unwrap();
     }
 
@@ -372,27 +424,25 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_begin_overflow() {
-        let cell = RelayBegin::new(
+        let ret = RelayBegin::new(
             FixedCell::default(),
             NonZeroU16::new(1).unwrap(),
-            &make_long_addr(RELAY_DATA_LENGTH),
+            &make_long_addr(FIXED_CELL_SIZE - 2),
             Flags::new(),
         );
-        println!("{:?}", cell.data.data());
+        assert!(ret.is_err(), "expect error, got {ret:?}");
     }
 
     #[test]
-    #[should_panic]
     fn test_begin_overflow2() {
-        let cell = RelayBegin::new(
+        let ret = RelayBegin::new(
             FixedCell::default(),
             NonZeroU16::new(1).unwrap(),
-            &make_long_addr(RELAY_DATA_LENGTH - 4),
+            &make_long_addr(FIXED_CELL_SIZE - 6),
             Flags(1),
         );
-        println!("{:?}", cell.data.data());
+        assert!(ret.is_err(), "expect error, got {ret:?}");
     }
 
     proptest! {
@@ -400,7 +450,7 @@ mod tests {
         fn test_begin_new(
             (addr_port, flags, stream) in strat(),
         ) {
-            let cell = RelayBegin::new(FixedCell::default(), stream, &addr_port, Flags(flags));
+            let cell = RelayBegin::new(FixedCell::default(), stream, &addr_port, Flags(flags)).unwrap();
 
             assert_eq!(cell.stream, stream);
             assert_eq!(cell.addr_port(), addr_port);
@@ -411,7 +461,7 @@ mod tests {
         fn test_begin_clone(
             (addr_port, flags, stream) in strat(),
         ) {
-            let cell = RelayBegin::new(FixedCell::default(), stream, &addr_port, Flags(flags));
+            let cell = RelayBegin::new(FixedCell::default(), stream, &addr_port, Flags(flags)).unwrap();
             drop(addr_port);
             let target = cell.clone();
 
@@ -434,13 +484,13 @@ mod tests {
             let cell = Relay::new(FixedCell::default(), NonZeroU32::new(1).unwrap(), RelayBegin::ID, stream.into(), &v);
             drop(v);
             let data = RelayWrapper::from(AsRef::<FixedCell>::as_ref(&cell).clone());
-            let cell = RelayBegin::try_from_relay(&mut Some(cell)).unwrap().unwrap();
+            let cell = RelayBegin::try_from_relay(&mut Some(cell), RelayVersion::V0).unwrap().unwrap();
 
             assert_eq!(cell.stream, stream);
             assert_eq!(cell.addr_port(), addr_port);
             assert_eq!(cell.flags(), flags);
 
-            let cell = cell.into_relay(NonZeroU32::new(1).unwrap());
+            let cell = cell.try_into_relay(NonZeroU32::new(1).unwrap(), RelayVersion::V0).unwrap();
 
             assert_relay_eq(&cell, &data);
         }
@@ -455,7 +505,7 @@ mod tests {
                 1,
                 &STR[..STR.len() - n],
             ));
-            RelayBegin::try_from_relay(&mut cell).unwrap_err();
+            RelayBegin::try_from_relay(&mut cell, RelayVersion::V0).unwrap_err();
             cell.unwrap();
         }
     }

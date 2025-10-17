@@ -9,11 +9,11 @@ use zerocopy::{
 };
 
 use super::{
-    IntoRelay, RELAY_DATA_LENGTH, Relay, RelayLike, RelayWrapper, TryFromRelay, take_if,
-    with_cmd_stream,
+    IntoRelay, Relay, RelayV001, RelayVersion, RelayWrapper, TryFromRelay, take_if_nonzero_stream,
+    v0, v1, with_cmd_stream,
 };
 use crate::cache::Cachable;
-use crate::cell::FixedCell;
+use crate::cell::{FIXED_CELL_SIZE, FixedCell};
 use crate::errors;
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -28,13 +28,6 @@ struct LinkspecHeader {
 struct HandshakeHeader {
     ty: U16,
     len: U16,
-}
-
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
-#[repr(C)]
-struct ExtendCell {
-    n_link: u8,
-    rest: [u8; const { RELAY_DATA_LENGTH - 1 }],
 }
 
 /// Link specifier data type.
@@ -192,6 +185,8 @@ pub struct RelayExtend2 {
     pub stream: NonZeroU16,
     /// Cell payload.
     data: RelayWrapper,
+    /// Relay version.
+    version: Option<RelayVersion>,
 
     // Auxiliary data to speed up access.
     o_handshake: u16,
@@ -210,25 +205,48 @@ impl Cachable for RelayExtend2 {
 }
 
 impl TryFromRelay for RelayExtend2 {
-    fn try_from_relay(relay: &mut Option<Relay>) -> Result<Option<Self>, errors::CellFormatError> {
-        let Some((stream, o_handshake)) = (match relay {
-            Some(r) if r.command() == Self::ID => Self::check(AsRef::<FixedCell>::as_ref(r).into()),
+    fn try_from_relay(
+        relay: &mut Option<Relay>,
+        version: RelayVersion,
+    ) -> Result<Option<Self>, errors::CellFormatError> {
+        let (stream, a) = match (&*relay, version) {
+            (Some(r), RelayVersion::V0) if v0::RelayExt::command(r) == Self::ID => {
+                (v0::RelayExt::stream(r), v0::RelayExt::data(r))
+            }
+            (Some(r), RelayVersion::V1) if v1::RelayExt::command(r) == Self::ID => {
+                (v1::RelayExt::stream(r), v1::RelayExt::data(r))
+            }
             _ => return Ok(None),
-        }) else {
+        };
+
+        let (Some(stream), Some(o_handshake)) = (NonZeroU16::new(stream), Self::check(a)) else {
             return Err(errors::CellFormatError);
         };
 
         Ok(Some(Self {
             stream,
-            data: FixedCell::from(relay.take().unwrap()).into(),
+            // SAFETY: Relay is Some
+            data: FixedCell::from(unsafe { relay.take().unwrap_unchecked() }).into(),
+            version: Some(version),
             o_handshake,
         }))
     }
 }
 
 impl IntoRelay for RelayExtend2 {
-    fn into_relay(self, circuit: NonZeroU32) -> Relay {
-        with_cmd_stream(self.data, Self::ID, self.stream.into(), circuit)
+    fn try_into_relay(
+        self,
+        circuit: NonZeroU32,
+        version: RelayVersion,
+    ) -> Result<Relay, errors::CellLengthOverflowError> {
+        with_cmd_stream(
+            self.data,
+            self.version,
+            version,
+            Self::ID,
+            self.stream.into(),
+            circuit,
+        )
     }
 }
 
@@ -241,14 +259,27 @@ impl RelayExtend2 {
     /// # Safety
     ///
     /// Cell must be a valid RELAY_EXTEND2 cell.
-    pub unsafe fn from_cell(cell: FixedCell) -> Self {
+    pub unsafe fn from_cell(cell: FixedCell, version: RelayVersion) -> Self {
         let data = RelayWrapper::from(cell);
-        let (stream, o_handshake) = Self::check(&data).expect("malformed cell format");
+        let (command, stream, a) = match version {
+            RelayVersion::V0 => (
+                v0::RelayExt::command(&data),
+                v0::RelayExt::stream(&data),
+                v0::RelayExt::data(&data),
+            ),
+            RelayVersion::V1 => (
+                v1::RelayExt::command(&data),
+                v1::RelayExt::stream(&data),
+                v1::RelayExt::data(&data),
+            ),
+        };
+        debug_assert_eq!(command, Self::ID);
 
         Self {
-            stream,
+            o_handshake: unsafe { Self::check(a).unwrap_unchecked() },
+            stream: unsafe { NonZeroU16::new_unchecked(stream) },
             data,
-            o_handshake,
+            version: Some(version),
         }
     }
 
@@ -261,13 +292,13 @@ impl RelayExtend2 {
     /// - `linkspec` : Link specifier.
     /// - `handshake` : Handshake.
     ///
-    /// # Panics
+    /// # Return
     ///
-    /// Panics if:
+    /// Returns RELAY_EXTEND2 cell or error if:
     /// - Number of link specifiers > 255.
     /// - Link specifier payload length > 255.
     /// - Handshake payload length > 65535.
-    /// - Data does not fit [`RELAY_DATA_LENGTH`].
+    /// - Data overflows cell.
     ///
     /// # Example
     ///
@@ -295,74 +326,86 @@ impl RelayExtend2 {
     ///     NonZeroU16::new(1).unwrap(),
     ///     linkspec,
     ///     handshake,
-    /// );
+    /// ).unwrap();
     /// ```
     pub fn new(
         cell: FixedCell,
         stream: NonZeroU16,
         linkspec: impl IntoIterator<Item = Linkspec<impl AsRef<[u8]>>>,
         handshake: Handshake<impl AsRef<[u8]>>,
-    ) -> Self {
+    ) -> Result<Self, errors::CellLengthOverflowError> {
         fn write_linkspec(
-            data: &mut [u8; RELAY_DATA_LENGTH],
+            data: &mut [u8; const { FIXED_CELL_SIZE - 2 }],
             linkspec: impl IntoIterator<Item = Linkspec<impl AsRef<[u8]>>>,
-        ) -> (usize, &mut [u8]) {
-            let data: &mut ExtendCell = transmute_mut!(data);
+        ) -> Result<(usize, &mut [u8]), errors::CellLengthOverflowError> {
+            let [n_link, b @ ..] = data;
             let mut n = 0u8;
-            let mut b = &mut data.rest[..];
+            let mut b = &mut b[..];
 
             for l in linkspec {
-                n = n.checked_add(1).expect("too many link specifiers");
+                n = n.checked_add(1).ok_or(errors::CellLengthOverflowError)?;
 
                 let v = l.data.as_ref();
 
                 let (header, data);
-                (header, b) = LinkspecHeader::mut_from_prefix(b).expect("data does not fit");
+                (header, b) = LinkspecHeader::mut_from_prefix(b)
+                    .ok()
+                    .ok_or(errors::CellLengthOverflowError)?;
                 header.ty = l.ty;
-                header.len = v.len().try_into().expect("linkspec length > 255");
-                (data, b) = b.split_at_mut_checked(v.len()).expect("data does not fit");
+                header.len = v
+                    .len()
+                    .try_into()
+                    .map_err(|_| errors::CellLengthOverflowError)?;
+                (data, b) = b
+                    .split_at_mut_checked(v.len())
+                    .ok_or(errors::CellLengthOverflowError)?;
                 data.copy_from_slice(v);
             }
 
-            data.n_link = n;
-            (RELAY_DATA_LENGTH - b.len(), b)
+            *n_link = n;
+            Ok((FIXED_CELL_SIZE - 2 - b.len(), b))
         }
 
-        fn write_handshake(b: &mut [u8], ty: u16, data: &[u8]) -> usize {
-            let (header, b) = HandshakeHeader::mut_from_prefix(b).expect("data does not fit");
+        fn write_handshake(
+            b: &mut [u8],
+            ty: u16,
+            data: &[u8],
+        ) -> Result<usize, errors::CellLengthOverflowError> {
+            let (header, b) = HandshakeHeader::mut_from_prefix(b)
+                .ok()
+                .ok_or(errors::CellLengthOverflowError)?;
             header.ty.set(ty);
-            header
-                .len
-                .set(data.len().try_into().expect("handshake length > 65535"));
+            header.len.set(
+                data.len()
+                    .try_into()
+                    .ok()
+                    .ok_or(errors::CellLengthOverflowError)?,
+            );
             b.get_mut(..data.len())
-                .expect("data does not fit")
+                .ok_or(errors::CellLengthOverflowError)?
                 .copy_from_slice(data);
 
-            size_of_val(header) + data.len()
+            Ok(size_of_val(header) + data.len())
         }
 
         let mut data = RelayWrapper::from(cell);
 
-        let (mut len, b) = write_linkspec(data.data_padding_mut(), linkspec);
-        debug_assert!((1..RELAY_DATA_LENGTH).contains(&len));
-        let o_handshake = (len - 1) as u16;
-        len += write_handshake(b, handshake.ty, handshake.data.as_ref());
+        let RelayV001 { len, data: a } = RelayV001::from_mut(&mut data);
+        let (mut l, b) = write_linkspec(a, linkspec)?;
+        let o_handshake = (l - 1) as u16;
+        l += write_handshake(b, handshake.ty, handshake.data.as_ref())?;
 
-        // SAFETY: Payload length is valid.
-        unsafe {
-            data.set_len(len as _);
-        }
+        debug_assert!((1..=FIXED_CELL_SIZE - 2).contains(&l));
+        len.set(l as _);
 
-        if cfg!(debug_assertions) {
-            data.set_stream(stream.into());
-            debug_assert_eq!(Self::check(&data), Some((stream, o_handshake)));
-        }
+        debug_assert_eq!(Self::check(&a[..len.get() as usize]), Some(o_handshake));
 
-        Self {
+        Ok(Self {
             stream,
             data,
+            version: None,
             o_handshake,
-        }
+        })
     }
 
     /// Get link specifiers.
@@ -377,14 +420,13 @@ impl RelayExtend2 {
         Handshake::new(header.ty.get(), data)
     }
 
-    fn check(cell: &RelayWrapper) -> Option<(NonZeroU16, u16)> {
-        let stream = NonZeroU16::new(cell.stream())?;
-
-        let [n, rest @ ..] = cell.data() else {
+    fn check(data: &[u8]) -> Option<u16> {
+        let [n, rest @ ..] = data else {
             return None;
         };
-        let start = rest.len();
         let mut rest = rest;
+
+        let start = rest.len();
         for _ in 0..*n {
             let header;
             (header, rest) = LinkspecHeader::ref_from_prefix(rest).ok()?;
@@ -398,13 +440,20 @@ impl RelayExtend2 {
             return None;
         }
 
-        Some((stream, o_handshake))
+        Some(o_handshake)
     }
 
     #[inline(always)]
     fn get_data(&self) -> (u8, &[u8], &HandshakeHeader, &[u8]) {
         let o_handshake = usize::from(self.o_handshake);
-        let &ExtendCell { n_link, ref rest } = transmute_ref!(self.data.data_padding());
+        let data = match self.version {
+            None => &RelayV001::from_ref(&self.data).data[..],
+            Some(RelayVersion::V0) => &v0::RelayExt::data_padding(&self.data)[..],
+            Some(RelayVersion::V1) => &v1::RelayExt::data_padding(&self.data)[..],
+        };
+        let [n_link, rest @ ..] = data else {
+            unreachable!()
+        };
         debug_assert!(o_handshake <= rest.len());
         let p = from_ref(rest);
 
@@ -417,7 +466,7 @@ impl RelayExtend2 {
             hs_data = from_raw_parts(p.add(1).cast::<u8>(), header.len.get().into());
         }
 
-        (n_link, link_data, header, hs_data)
+        (*n_link, link_data, header, hs_data)
     }
 }
 
@@ -455,13 +504,6 @@ impl ExactSizeIterator for LinkspecIter<'_> {
     }
 }
 
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
-#[repr(C)]
-struct ExtendedData {
-    len: U16,
-    rest: [u8; const { RELAY_DATA_LENGTH - 2 }],
-}
-
 /// Represents a RELAY_EXTENDED2 cell.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RelayExtended2 {
@@ -469,6 +511,8 @@ pub struct RelayExtended2 {
     pub stream: NonZeroU16,
     /// Cell payload.
     data: RelayWrapper,
+    /// Relay version.
+    version: Option<RelayVersion>,
 }
 
 impl AsRef<FixedCell> for RelayExtended2 {
@@ -484,21 +528,34 @@ impl Cachable for RelayExtended2 {
 }
 
 impl TryFromRelay for RelayExtended2 {
-    fn try_from_relay(relay: &mut Option<Relay>) -> Result<Option<Self>, errors::CellFormatError> {
-        let stream = match &*relay {
-            Some(r) if r.command() == Self::ID => {
-                NonZeroU16::new(r.stream()).ok_or(errors::CellFormatError)?
-            }
-            _ => return Ok(None),
-        };
-
-        take_if(relay, Self::check).map(|v| v.map(|data| Self { stream, data }))
+    fn try_from_relay(
+        relay: &mut Option<Relay>,
+        version: RelayVersion,
+    ) -> Result<Option<Self>, errors::CellFormatError> {
+        take_if_nonzero_stream(relay, Self::ID, version, Self::check).map(|v| {
+            v.map(|(stream, data)| Self {
+                stream,
+                data,
+                version: Some(version),
+            })
+        })
     }
 }
 
 impl IntoRelay for RelayExtended2 {
-    fn into_relay(self, circuit: NonZeroU32) -> Relay {
-        with_cmd_stream(self.data, Self::ID, self.stream.into(), circuit)
+    fn try_into_relay(
+        self,
+        circuit: NonZeroU32,
+        version: RelayVersion,
+    ) -> Result<Relay, errors::CellLengthOverflowError> {
+        with_cmd_stream(
+            self.data,
+            self.version,
+            version,
+            Self::ID,
+            self.stream.into(),
+            circuit,
+        )
     }
 }
 
@@ -511,13 +568,28 @@ impl RelayExtended2 {
     /// # Safety
     ///
     /// Cell must be a valid RELAY_EXTENDED2 cell.
-    pub unsafe fn from_cell(cell: FixedCell) -> Self {
+    pub unsafe fn from_cell(cell: FixedCell, version: RelayVersion) -> Self {
         let data = RelayWrapper::from(cell);
-        debug_assert!(Self::check(data.data()));
+
+        let (command, stream, a) = match version {
+            RelayVersion::V0 => (
+                v0::RelayExt::command(&data),
+                v0::RelayExt::stream(&data),
+                v0::RelayExt::data(&data),
+            ),
+            RelayVersion::V1 => (
+                v1::RelayExt::command(&data),
+                v1::RelayExt::stream(&data),
+                v1::RelayExt::data(&data),
+            ),
+        };
+        debug_assert_eq!(command, Self::ID);
+        debug_assert!(Self::check(a));
 
         Self {
-            stream: NonZeroU16::new(data.stream()).expect("stream ID is zero"),
+            stream: unsafe { NonZeroU16::new_unchecked(stream) },
             data,
+            version: Some(version),
         }
     }
 
@@ -529,9 +601,9 @@ impl RelayExtended2 {
     /// - `stream` : Stream ID.
     /// - `data` : Handshake data.
     ///
-    /// # Panics
+    /// # Return
     ///
-    /// Panics if handshake data is longer than `RELAY_DATA_LENGTH - 2`.
+    /// Returns RELAY_EXTENDED2 cell or error if data overflows cell.
     ///
     /// # Example
     ///
@@ -544,35 +616,86 @@ impl RelayExtended2 {
     ///     Default::default(),
     ///     NonZeroU16::new(1).unwrap(),
     ///     &[1, 2, 3],
-    /// );
+    /// ).unwrap();
     /// ```
-    pub fn new(cell: FixedCell, stream: NonZeroU16, data: &[u8]) -> Self {
+    pub fn new(
+        cell: FixedCell,
+        stream: NonZeroU16,
+        data: &[u8],
+    ) -> Result<Self, errors::CellLengthOverflowError> {
         let mut cell = RelayWrapper::from(cell);
-        let p: &mut ExtendedData = transmute_mut!(cell.data_padding_mut());
-        p.rest[..data.len()].copy_from_slice(data);
-        p.len.set(data.len().try_into().unwrap());
+        let RelayV001 { len, data: a } = RelayV001::from_mut(&mut cell);
 
-        // SAFETY: Payload length is valid.
-        unsafe {
-            cell.set_len((data.len() + 2) as _);
+        #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+        #[repr(C)]
+        struct Data {
+            n: U16,
+            rest: [u8; const { FIXED_CELL_SIZE - 4 }],
         }
 
-        debug_assert!(Self::check(cell.data()));
+        let Data { n, rest } = transmute_mut!(a);
+        rest.get_mut(..data.len())
+            .ok_or(errors::CellLengthOverflowError)?
+            .copy_from_slice(data);
+        n.set(data.len() as _);
+        len.set((data.len() + 2) as _);
 
-        Self { stream, data: cell }
+        debug_assert!(Self::check(&a[..len.get() as usize]));
+
+        Ok(Self {
+            stream,
+            data: cell,
+            version: None,
+        })
     }
 
     /// Get handshake data.
     pub fn data(&self) -> &[u8] {
-        let p: &ExtendedData = transmute_ref!(self.data.data_padding());
-        &p.rest[..p.len.get() as usize]
+        match self.version {
+            None => {
+                #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+                #[repr(C)]
+                struct Data {
+                    n: U16,
+                    rest: [u8; const { FIXED_CELL_SIZE - 4 }],
+                }
+
+                let Data { n, rest } = transmute_ref!(&RelayV001::from_ref(&self.data).data);
+
+                &rest[..n.get() as usize]
+            }
+            Some(RelayVersion::V0) => {
+                #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+                #[repr(C)]
+                struct Data {
+                    n: U16,
+                    rest: [u8; const { v0::RELAY_DATA_LENGTH - 2 }],
+                }
+
+                let Data { n, rest } = transmute_ref!(v0::RelayExt::data_padding(&self.data));
+
+                &rest[..n.get() as usize]
+            }
+            Some(RelayVersion::V1) => {
+                #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+                #[repr(C)]
+                struct Data {
+                    n: U16,
+                    rest: [u8; const { v1::RELAY_DATA_LENGTH - 2 }],
+                }
+
+                let Data { n, rest } = transmute_ref!(v1::RelayExt::data_padding(&self.data));
+
+                &rest[..n.get() as usize]
+            }
+        }
     }
 
     fn check(data: &[u8]) -> bool {
         let Ok((len, data)) = U16::ref_from_prefix(data) else {
             return false;
         };
-        data.len() == len.get().into()
+        data.len() >= len.get().into()
     }
 }
 
@@ -583,7 +706,7 @@ mod tests {
     use proptest::collection::vec;
     use proptest::prelude::*;
 
-    use crate::cell::relay::tests::assert_relay_eq;
+    use crate::cell::relay::v0::tests::assert_relay_eq;
 
     fn strat() -> impl Strategy<Value = (NonZeroU16, Vec<Linkspec<Vec<u8>>>, Handshake<Vec<u8>>)> {
         (
@@ -599,62 +722,57 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_extend2_linkspec_too_many() {
-        let cell = RelayExtend2::new(
+        let ret = RelayExtend2::new(
             FixedCell::default(),
             NonZeroU16::new(1).unwrap(),
             [Linkspec::new(0, []); 256].iter().copied(),
             Handshake::new(0, []),
         );
-        println!("{:?}", cell.data.data());
+        assert!(ret.is_err(), "expect error, got {ret:?}");
     }
 
     #[test]
-    #[should_panic(expected = "linkspec length > 255")]
     fn test_extend2_linkspec_too_long() {
-        let cell = RelayExtend2::new(
+        let ret = RelayExtend2::new(
             FixedCell::default(),
             NonZeroU16::new(1).unwrap(),
             [Linkspec::new(0, &[0; 256])],
             Handshake::new(0, []),
         );
-        println!("{:?}", cell.data.data());
+        assert!(ret.is_err(), "expect error, got {ret:?}");
     }
 
     #[test]
-    #[should_panic]
     fn test_extend2_handshake_not_fit() {
-        let cell = RelayExtend2::new(
+        let ret = RelayExtend2::new(
             FixedCell::default(),
             NonZeroU16::new(1).unwrap(),
             [Linkspec::new(0, [])],
-            Handshake::new(0, &[0; const { RELAY_DATA_LENGTH - 6 }]),
+            Handshake::new(0, &[0; const { FIXED_CELL_SIZE - 8 }]),
         );
-        println!("{:?}", cell.data.data());
+        assert!(ret.is_err(), "expect error, got {ret:?}");
     }
 
     #[test]
-    #[should_panic(expected = "handshake length > 65535")]
     fn test_extend2_handshake_too_long() {
-        let cell = RelayExtend2::new(
+        let ret = RelayExtend2::new(
             FixedCell::default(),
             NonZeroU16::new(1).unwrap(),
             [Linkspec::new(0, [])],
             Handshake::new(0, &[0; 65536]),
         );
-        println!("{:?}", cell.data.data());
+        assert!(ret.is_err(), "expect error, got {ret:?}");
     }
 
     #[test]
-    #[should_panic]
     fn test_extended2_too_long() {
-        let cell = RelayExtended2::new(
+        let ret = RelayExtended2::new(
             FixedCell::default(),
             NonZeroU16::new(1).unwrap(),
-            &[0; const { RELAY_DATA_LENGTH - 1 }],
+            &[0; const { FIXED_CELL_SIZE - 3 }],
         );
-        println!("{:?}", cell.data.data());
+        assert!(ret.is_err(), "expect error, got {ret:?}");
     }
 
     proptest! {
@@ -662,7 +780,7 @@ mod tests {
         fn test_extend2_new(
             (stream, linkspec, handshake) in strat(),
         ) {
-            let cell = RelayExtend2::new(FixedCell::default(), stream, linkspec.iter().map(|l| l.as_ref()), handshake.as_ref());
+            let cell = RelayExtend2::new(FixedCell::default(), stream, linkspec.iter().map(|l| l.as_ref()), handshake.as_ref()).unwrap();
 
             assert_eq!(cell.stream, stream);
             assert_eq!(cell.linkspec().collect::<Vec<_>>(), linkspec);
@@ -691,13 +809,13 @@ mod tests {
             let cell = Relay::new(FixedCell::default(), NonZeroU32::new(1).unwrap(), RelayExtend2::ID, stream.into(), &v);
             drop(v);
             let data = RelayWrapper::from(AsRef::<FixedCell>::as_ref(&cell).clone());
-            let cell = RelayExtend2::try_from_relay(&mut Some(cell)).unwrap().unwrap();
+            let cell = RelayExtend2::try_from_relay(&mut Some(cell), RelayVersion::V0).unwrap().unwrap();
 
             assert_eq!(cell.stream, stream);
             assert_eq!(cell.linkspec().collect::<Vec<_>>(), linkspec);
             assert_eq!(cell.handshake(), handshake);
 
-            let cell = cell.into_relay(NonZeroU32::new(1).unwrap());
+            let cell = cell.try_into_relay(NonZeroU32::new(1).unwrap(), RelayVersion::V0).unwrap();
 
             assert_relay_eq(&cell, &data);
         }
@@ -706,7 +824,7 @@ mod tests {
         fn test_extend2_truncated(n in 0..9usize) {
             static DATA: &[u8] = &[1, 1, 1, 0, 0, 1, 0, 1, 0];
             let mut cell = Some(Relay::new(FixedCell::default(), NonZeroU32::new(1).unwrap(), RelayExtend2::ID, 1, &DATA[..n]));
-            RelayExtend2::try_from_relay(&mut cell).unwrap_err();
+            RelayExtend2::try_from_relay(&mut cell, RelayVersion::V0).unwrap_err();
             cell.unwrap();
         }
 
@@ -715,7 +833,7 @@ mod tests {
             stream: NonZeroU16,
             data in vec(any::<u8>(), 0..300),
         ) {
-            let cell = RelayExtended2::new(FixedCell::default(), stream, &data);
+            let cell = RelayExtended2::new(FixedCell::default(), stream, &data).unwrap();
 
             assert_eq!(cell.stream, stream);
             assert_eq!(cell.data(), data);
@@ -733,12 +851,12 @@ mod tests {
             let cell = Relay::new(FixedCell::default(), NonZeroU32::new(1).unwrap(), RelayExtended2::ID, stream.into(), &v);
             drop(v);
             let data_ = RelayWrapper::from(AsRef::<FixedCell>::as_ref(&cell).clone());
-            let cell = RelayExtended2::try_from_relay(&mut Some(cell)).unwrap().unwrap();
+            let cell = RelayExtended2::try_from_relay(&mut Some(cell), RelayVersion::V0).unwrap().unwrap();
 
             assert_eq!(cell.stream, stream);
             assert_eq!(cell.data(), data);
 
-            let cell = cell.into_relay(NonZeroU32::new(1).unwrap());
+            let cell = cell.try_into_relay(NonZeroU32::new(1).unwrap(), RelayVersion::V0).unwrap();
 
             assert_relay_eq(&cell, &data_);
         }
@@ -753,7 +871,7 @@ mod tests {
 
             let mut cell = Some(Relay::new(FixedCell::default(), NonZeroU32::new(1).unwrap(), RelayExtended2::ID, 1, &v[..n]));
             drop(v);
-            RelayExtended2::try_from_relay(&mut cell).unwrap_err();
+            RelayExtended2::try_from_relay(&mut cell, RelayVersion::V0).unwrap_err();
             cell.unwrap();
         }
     }

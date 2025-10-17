@@ -3,7 +3,8 @@ use std::num::{NonZeroU16, NonZeroU32};
 use rand::prelude::*;
 
 use super::{
-    IntoRelay, RELAY_DATA_LENGTH, Relay, RelayLike, RelayWrapper, TryFromRelay, with_cmd_stream,
+    IntoRelay, Relay, RelayV001, RelayVersion, RelayWrapper, TryFromRelay, take_if_nonzero_stream,
+    v0, v1, with_cmd_stream,
 };
 use crate::cache::Cachable;
 use crate::cell::FixedCell;
@@ -16,6 +17,8 @@ pub struct RelayDrop {
     pub stream: NonZeroU16,
     /// Cell payload.
     data: RelayWrapper,
+    /// Relay version.
+    version: Option<RelayVersion>,
 }
 
 impl AsRef<FixedCell> for RelayDrop {
@@ -31,24 +34,34 @@ impl Cachable for RelayDrop {
 }
 
 impl TryFromRelay for RelayDrop {
-    fn try_from_relay(relay: &mut Option<Relay>) -> Result<Option<Self>, errors::CellFormatError> {
-        let stream = match &*relay {
-            Some(r) if r.command() == Self::ID => {
-                NonZeroU16::new(r.stream()).ok_or(errors::CellFormatError)?
-            }
-            _ => return Ok(None),
-        };
-
-        Ok(Some(Self {
-            stream,
-            data: RelayWrapper::from(FixedCell::from(relay.take().unwrap())),
-        }))
+    fn try_from_relay(
+        relay: &mut Option<Relay>,
+        version: RelayVersion,
+    ) -> Result<Option<Self>, errors::CellFormatError> {
+        take_if_nonzero_stream(relay, Self::ID, version, |_| true).map(|v| {
+            v.map(|(stream, data)| Self {
+                stream,
+                data,
+                version: Some(version),
+            })
+        })
     }
 }
 
 impl IntoRelay for RelayDrop {
-    fn into_relay(self, circuit: NonZeroU32) -> Relay {
-        with_cmd_stream(self.data, Self::ID, self.stream.into(), circuit)
+    fn try_into_relay(
+        self,
+        circuit: NonZeroU32,
+        version: RelayVersion,
+    ) -> Result<Relay, errors::CellLengthOverflowError> {
+        with_cmd_stream(
+            self.data,
+            self.version,
+            version,
+            Self::ID,
+            self.stream.into(),
+            circuit,
+        )
     }
 }
 
@@ -61,13 +74,19 @@ impl RelayDrop {
     /// # Safety
     ///
     /// Cell must be a valid RELAY_DROP cell.
-    pub unsafe fn from_cell(cell: FixedCell) -> Self {
+    pub unsafe fn from_cell(cell: FixedCell, version: RelayVersion) -> Self {
         let data = RelayWrapper::from(cell);
-        debug_assert_eq!(data.command(), Self::ID);
+
+        let (command, stream) = match version {
+            RelayVersion::V0 => (v0::RelayExt::command(&data), v0::RelayExt::stream(&data)),
+            RelayVersion::V1 => (v1::RelayExt::command(&data), v1::RelayExt::stream(&data)),
+        };
+        debug_assert_eq!(command, Self::ID);
 
         Self {
-            stream: NonZeroU16::new(data.stream()).expect("stream ID is zero"),
+            stream: unsafe { NonZeroU16::new_unchecked(stream) },
             data,
+            version: Some(version),
         }
     }
 
@@ -79,9 +98,9 @@ impl RelayDrop {
     /// - `stream` : Stream ID.
     /// - `len` : Padding length.
     ///
-    /// # Panics
+    /// # Return
     ///
-    /// Panics if data length is bigger than [`RELAY_DATA_LENGTH`].
+    /// Returns RELAY_DROP cell or error if data overflows cell.
     ///
     /// # Example
     ///
@@ -94,28 +113,39 @@ impl RelayDrop {
     ///     Default::default(),
     ///     NonZeroU16::new(1).unwrap(),
     ///     123,
-    /// );
+    /// ).unwrap();
     ///
     /// assert_eq!(cell.len(), 123);
     /// ```
-    pub fn new(cell: FixedCell, stream: NonZeroU16, len: usize) -> Self {
-        assert!(len <= RELAY_DATA_LENGTH, "length is too long");
-
+    pub fn new(
+        cell: FixedCell,
+        stream: NonZeroU16,
+        len: usize,
+    ) -> Result<Self, errors::CellLengthOverflowError> {
         let mut data = RelayWrapper::from(cell);
+        let RelayV001 { len: l, data: a } = RelayV001::from_mut(&mut data);
 
-        // SAFETY: Length is checked.
-        unsafe {
-            data.set_len(len as u16);
+        if len > a.len() {
+            return Err(errors::CellLengthOverflowError);
         }
+        ThreadRng::default().fill_bytes(a);
+        l.set(len as _);
 
-        ThreadRng::default().fill_bytes(data.data_mut());
-
-        Self { stream, data }
+        Ok(Self {
+            stream,
+            data,
+            version: None,
+        })
     }
 
     /// Get cell length.
     pub fn len(&self) -> usize {
-        self.data.len().into()
+        match self.version {
+            None => RelayV001::from_ref(&self.data).len.get(),
+            Some(RelayVersion::V0) => v0::RelayExt::len(&self.data),
+            Some(RelayVersion::V1) => v1::RelayExt::len(&self.data),
+        }
+        .into()
     }
 
     /// Returns `true` if cell is empty.
@@ -131,26 +161,27 @@ mod tests {
     use proptest::collection::vec;
     use proptest::prelude::*;
 
-    use crate::cell::relay::tests::assert_relay_eq;
+    use crate::cell::FIXED_CELL_SIZE;
+    use crate::cell::relay::v0::RELAY_DATA_LENGTH;
+    use crate::cell::relay::v0::tests::assert_relay_eq;
 
     #[test]
-    #[should_panic(expected = "length is too long")]
     fn test_drop_overflow() {
-        let cell = RelayDrop::new(
+        let ret = RelayDrop::new(
             FixedCell::default(),
             NonZeroU16::new(1).unwrap(),
-            RELAY_DATA_LENGTH + 1,
+            FIXED_CELL_SIZE - 1,
         );
-        println!("{:?}", cell.data.data());
+        assert!(ret.is_err(), "expect error, got {ret:?}");
     }
 
     proptest! {
         #[test]
         fn test_drop(
             stream: NonZeroU16,
-            len in 0..=RELAY_DATA_LENGTH,
+            len in 0..=FIXED_CELL_SIZE - 2,
         ) {
-            let cell = RelayDrop::new(FixedCell::default(), stream, len);
+            let cell = RelayDrop::new(FixedCell::default(), stream, len).unwrap();
 
             assert_eq!(cell.stream, stream);
             assert_eq!(cell.len(), len);
@@ -165,12 +196,12 @@ mod tests {
             let cell = Relay::new(FixedCell::default(), NonZeroU32::new(1).unwrap(), RelayDrop::ID, stream.into(), &data);
             drop(data);
             let data = RelayWrapper::from(AsRef::<FixedCell>::as_ref(&cell).clone());
-            let cell = RelayDrop::try_from_relay(&mut Some(cell)).unwrap().unwrap();
+            let cell = RelayDrop::try_from_relay(&mut Some(cell), RelayVersion::V0).unwrap().unwrap();
 
             assert_eq!(cell.stream, stream);
             assert_eq!(cell.len(), len);
 
-            let cell = cell.into_relay(NonZeroU32::new(1).unwrap());
+            let cell = cell.try_into_relay(NonZeroU32::new(1).unwrap(), RelayVersion::V0).unwrap();
 
             assert_relay_eq(&cell, &data);
         }

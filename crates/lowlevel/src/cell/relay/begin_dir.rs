@@ -1,6 +1,9 @@
 use std::num::{NonZeroU16, NonZeroU32};
 
-use super::{IntoRelay, Relay, RelayLike, RelayWrapper, TryFromRelay, with_cmd_stream};
+use super::{
+    IntoRelay, Relay, RelayVersion, RelayWrapper, TryFromRelay, get_stream_if_command_match, v0,
+    v1, with_cmd_stream_v0, with_cmd_stream_v1,
+};
 use crate::cache::Cachable;
 use crate::cell::FixedCell;
 use crate::errors;
@@ -27,25 +30,38 @@ impl Cachable for RelayBeginDir {
 }
 
 impl TryFromRelay for RelayBeginDir {
-    fn try_from_relay(relay: &mut Option<Relay>) -> Result<Option<Self>, errors::CellFormatError> {
-        let stream = match &*relay {
-            Some(r) if r.command() == Self::ID => {
-                NonZeroU16::new(r.stream()).ok_or(errors::CellFormatError)?
-            }
-            _ => return Ok(None),
+    fn try_from_relay(
+        relay: &mut Option<Relay>,
+        version: RelayVersion,
+    ) -> Result<Option<Self>, errors::CellFormatError> {
+        let Some(stream) = get_stream_if_command_match(relay, version, Self::ID)? else {
+            return Ok(None);
         };
 
         Ok(Some(Self {
             stream,
-            data: RelayWrapper::from(FixedCell::from(relay.take().unwrap())),
+            // SAFETY: Relay is Some
+            data: FixedCell::from(unsafe { relay.take().unwrap_unchecked() }).into(),
         }))
     }
 }
 
 impl IntoRelay for RelayBeginDir {
-    fn into_relay(mut self, circuit: NonZeroU32) -> Relay {
-        self.data.set_data(&[]);
-        with_cmd_stream(self.data, Self::ID, self.stream.into(), circuit)
+    fn try_into_relay(
+        mut self,
+        circuit: NonZeroU32,
+        version: RelayVersion,
+    ) -> Result<Relay, errors::CellLengthOverflowError> {
+        Ok(match version {
+            RelayVersion::V0 => {
+                v0::RelayExt::set_data(&mut self.data, &[]);
+                with_cmd_stream_v0(self.data, Self::ID, self.stream.into(), circuit)
+            }
+            RelayVersion::V1 => {
+                v1::RelayExt::set_data(&mut self.data, &[]);
+                with_cmd_stream_v1(self.data, Self::ID, self.stream.into(), circuit)
+            }
+        })
     }
 }
 
@@ -58,12 +74,17 @@ impl RelayBeginDir {
     /// # Safety
     ///
     /// Cell must be a valid RELAY_BEGIN_DIR cell.
-    pub unsafe fn from_cell(cell: FixedCell) -> Self {
+    pub unsafe fn from_cell(cell: FixedCell, version: RelayVersion) -> Self {
         let data = RelayWrapper::from(cell);
-        debug_assert_eq!(data.command(), Self::ID);
+
+        let (command, stream) = match version {
+            RelayVersion::V0 => (v0::RelayExt::command(&data), v0::RelayExt::stream(&data)),
+            RelayVersion::V1 => (v1::RelayExt::command(&data), v1::RelayExt::stream(&data)),
+        };
+        debug_assert_eq!(command, Self::ID);
 
         Self {
-            stream: NonZeroU16::new(data.stream()).expect("stream ID is zero"),
+            stream: unsafe { NonZeroU16::new_unchecked(stream) },
             data,
         }
     }
@@ -99,17 +120,32 @@ impl RelayBeginDir {
 mod tests {
     use super::*;
 
-    use crate::cell::relay::tests::assert_relay_eq;
+    use crate::cell::relay::v0::tests::assert_relay_eq;
+    use crate::cell::relay::v1::tests::assert_relay_eq as assert_relay_eq_v1;
 
     #[test]
     fn test_begin_dir() {
         let stream = NonZeroU16::new(0x1234).unwrap();
         let circuit = NonZeroU32::new(227020 + 226554).unwrap();
-        let cell = RelayBeginDir::new(FixedCell::default(), stream).into_relay(circuit);
+        let cell = RelayBeginDir::new(FixedCell::default(), stream);
 
         assert_relay_eq(
-            &cell,
+            &cell
+                .clone()
+                .try_into_relay(circuit, RelayVersion::V0)
+                .unwrap(),
             &Relay::new(
+                FixedCell::default(),
+                circuit,
+                RelayBeginDir::ID,
+                stream.into(),
+                &[],
+            ),
+        );
+
+        assert_relay_eq_v1(
+            &cell.try_into_relay(circuit, RelayVersion::V1).unwrap(),
+            &Relay::new_v1(
                 FixedCell::default(),
                 circuit,
                 RelayBeginDir::ID,

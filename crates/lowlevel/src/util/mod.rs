@@ -438,6 +438,10 @@ pub(crate) fn fill_data_multipart<'a>(
     l
 }
 
+pub(crate) const fn c_max_usize(a: usize, b: usize) -> usize {
+    if a >= b { a } else { b }
+}
+
 #[cfg(test)]
 pub(crate) use tests::*;
 

@@ -19,7 +19,8 @@ use crate::cell::relay::data::RelayData;
 use crate::cell::relay::drop::RelayDrop;
 use crate::cell::relay::end::{EndReason, RelayEnd};
 use crate::cell::relay::sendme::{RelaySendme, SendmeData};
-use crate::cell::relay::{IntoRelay, Relay, RelayEarly, RelayLike, cast as cast_r};
+use crate::cell::relay::v0::RelayExt;
+use crate::cell::relay::{IntoRelay, Relay, RelayEarly, RelayVersion, cast as cast_r};
 use crate::cell::{Cell, cast};
 use crate::circuit::controller::CircuitController;
 use crate::circuit::{CircuitInput, CircuitOutput, NewStream};
@@ -587,10 +588,10 @@ impl SteadyState {
             self.has_new_cell = true;
         } else {
             let mut cell = Cached::map(cell, Some);
-            if let Some(cell) = cast_r::<RelayDrop>(&mut cell)? {
+            if let Some(cell) = cast_r::<RelayDrop>(&mut cell, RelayVersion::V0)? {
                 // RELAY_DROP is for long-range padding
                 cfg.cache.discard(cell);
-            } else if let Some(cell) = cast_r::<RelaySendme>(&mut cell)? {
+            } else if let Some(cell) = cast_r::<RelaySendme>(&mut cell, RelayVersion::V0)? {
                 // RELAY_SENDME, check digest and increment forward data counter.
                 let cell = (*cfg.cache).cache_b(cell);
 
@@ -665,10 +666,10 @@ fn read_handler(
     // Should only be done if timeout or in buffer has new data.
     if take(&mut this.is_timeout) | take(&mut this.has_new_cell) {
         this.in_buffer.scan_pop(|p| {
-            let is_begin = if let Some(cell) = cast_r::<RelayBegin>(p)? {
+            let is_begin = if let Some(cell) = cast_r::<RelayBegin>(p, RelayVersion::V0)? {
                 cfg.cache.discard(cell);
                 true
-            } else if let Some(cell) = cast_r::<RelayBeginDir>(p)? {
+            } else if let Some(cell) = cast_r::<RelayBeginDir>(p, RelayVersion::V0)? {
                 cfg.cache.discard(cell);
                 true
             } else {
@@ -701,12 +702,14 @@ fn read_handler(
                 return Ok(());
             }
 
-            if let Some(cell) = cast_r::<RelayEnd>(p)? {
+            if let Some(cell) = cast_r::<RelayEnd>(p, RelayVersion::V0)? {
                 // RELAY_END cell received, force closing stream.
                 let cell = cfg.cache.cache(cell);
                 let reason = cell.reason();
                 debug!(id, %reason, "peer is closing stream");
-                match stream.send(Cached::map(cell, |c| c.into_relay(cfg.circ_id))) {
+                match stream.send(Cached::map(cell, |c| {
+                    c.try_into_relay(cfg.circ_id, RelayVersion::V0).unwrap()
+                })) {
                     Ok(()) => (),
                     Err(TrySendError::Full(_)) => warn!(
                         id,
@@ -724,7 +727,7 @@ fn read_handler(
 
                 return Ok(());
             }
-            if let Some(cell) = cast_r::<RelayConnected>(p)? {
+            if let Some(cell) = cast_r::<RelayConnected>(p, RelayVersion::V0)? {
                 cfg.cache.discard(cell);
                 trace!(id, "directory stream connected");
 
@@ -827,7 +830,11 @@ fn write_handler(
         debug_assert!(meta.closing);
 
         // Prepend RELAY_END cell
-        found = Some(RelayEnd::new(cfg.cache.get_cached(), id, reason).into_relay(cfg.circ_id));
+        found = Some(
+            RelayEnd::new(cfg.cache.get_cached(), id, reason)
+                .try_into_relay(cfg.circ_id, RelayVersion::V0)
+                .unwrap(),
+        );
         break;
     }
 
@@ -848,7 +855,8 @@ fn write_handler(
 
                 found = Some(
                     RelayBeginDir::new(cfg.cache.get_cached(), m.id.try_into().unwrap())
-                        .into_relay(cfg.circ_id),
+                        .try_into_relay(cfg.circ_id, RelayVersion::V0)
+                        .unwrap(),
                 );
 
                 // Store handle to be resolved later.
@@ -870,7 +878,11 @@ fn write_handler(
         }
     {
         // Prepend RELAY_SENDME cell
-        found = Some(RelaySendme::from_data(cfg.cache.get_cached(), data).into_relay(cfg.circ_id));
+        found = Some(
+            RelaySendme::from_data(cfg.cache.get_cached(), data)
+                .try_into_relay(cfg.circ_id, RelayVersion::V0)
+                .unwrap(),
+        );
 
         this.backward_data_count = this
             .backward_data_count
@@ -893,13 +905,13 @@ fn write_handler(
         }
         let mut cell = Some(cell);
 
-        found = if let Some(cell) = cast_r::<RelayEnd>(&mut cell)? {
+        found = if let Some(cell) = cast_r::<RelayEnd>(&mut cell, RelayVersion::V0)? {
             if stream_map.remove(id.into()).is_none() {
                 // No need to scan pending close because it should be empty by now.
                 continue;
             }
 
-            Some(cell.into_relay(cfg.circ_id))
+            Some(cell.try_into_relay(cfg.circ_id, RelayVersion::V0).unwrap())
         } else {
             cell
         };

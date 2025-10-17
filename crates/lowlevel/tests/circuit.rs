@@ -15,7 +15,7 @@ use onioncloud_lowlevel::cell::destroy::{Destroy, DestroyReason};
 use onioncloud_lowlevel::cell::relay::begin_dir::RelayBeginDir;
 use onioncloud_lowlevel::cell::relay::connected::RelayConnected;
 use onioncloud_lowlevel::cell::relay::data::RelayData;
-use onioncloud_lowlevel::cell::relay::{IntoRelay, Relay, RelayEarly};
+use onioncloud_lowlevel::cell::relay::{IntoRelay, Relay, RelayEarly, RelayVersion};
 use onioncloud_lowlevel::channel::controller::{UserConfig, UserControlMsg, UserController};
 use onioncloud_lowlevel::channel::manager::ChannelManager;
 use onioncloud_lowlevel::channel::{ChannelConfig, NewCircuit};
@@ -216,11 +216,14 @@ fn test_circuit_dir() {
 
     let mut cell = Cached::map_into::<Relay>(assert_cast::<RelayEarly, _>(v.recv_cell().unwrap()));
     forward(&mut layer, &mut cell);
-    let stream_id = assert_cast_relay::<RelayBeginDir, _>(cell).stream;
+    let stream_id = assert_cast_relay::<RelayBeginDir, _>(cell, RelayVersion::V0).stream;
     info!(stream_id, "opening directory stream");
 
-    let mut cell =
-        cache.cache(RelayConnected::new_empty(cache.get_cached(), stream_id).into_relay(circ_id));
+    let mut cell = cache.cache(
+        RelayConnected::new_empty(cache.get_cached(), stream_id)
+            .try_into_relay(circ_id, RelayVersion::V0)
+            .unwrap(),
+    );
     backward(&mut layer, &mut cell);
     v.send_cell(Cached::map_into(cell));
 
@@ -252,7 +255,9 @@ fn test_circuit_dir() {
         send.try_send(
             cache.cache(
                 RelayData::new(cache.get_cached(), stream_id, DATA)
-                    .into_relay(circ_id)
+                    .unwrap()
+                    .try_into_relay(circ_id, RelayVersion::V0)
+                    .unwrap()
                     .into(),
             ),
         )
@@ -269,7 +274,7 @@ fn test_circuit_dir() {
         let mut cell =
             Cached::map_into::<Relay>(assert_cast::<RelayEarly, _>(v.recv_cell().unwrap()));
         forward(&mut layer, &mut cell);
-        let cell = assert_cast_relay::<RelayData, _>(cell);
+        let cell = assert_cast_relay::<RelayData, _>(cell, RelayVersion::V0);
         assert_eq!(cell.stream, stream_id);
         assert_eq!(cell.data(), DATA);
     }
@@ -277,8 +282,12 @@ fn test_circuit_dir() {
     {
         info!("sending data to client");
         static DATA: &[u8] = b"test123";
-        let mut cell =
-            cache.cache(RelayData::new(cache.get_cached(), stream_id, DATA).into_relay(circ_id));
+        let mut cell = cache.cache(
+            RelayData::new(cache.get_cached(), stream_id, DATA)
+                .unwrap()
+                .try_into_relay(circ_id, RelayVersion::V0)
+                .unwrap(),
+        );
         backward(&mut layer, &mut cell);
         v.send_cell(Cached::map_into(cell));
 
@@ -290,7 +299,7 @@ fn test_circuit_dir() {
             ret.parent_cell_msg_pause, ret.child_cell_msg_pause
         );
 
-        let cell = assert_cast_relay::<RelayData, _>(recv.try_recv().unwrap());
+        let cell = assert_cast_relay::<RelayData, _>(recv.try_recv().unwrap(), RelayVersion::V0);
         assert_eq!(cell.stream, stream_id);
         assert_eq!(cell.data(), DATA);
     }

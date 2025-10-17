@@ -1,17 +1,19 @@
 use std::mem::size_of;
 use std::net::IpAddr;
 use std::num::{NonZeroU16, NonZeroU32};
+use std::ptr::from_mut;
 
 use zerocopy::byteorder::big_endian::U32;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned, transmute_ref};
 
 use super::{
-    IntoRelay, RELAY_DATA_LENGTH, Relay, RelayLike, RelayWrapper, TryFromRelay, take_if,
-    with_cmd_stream,
+    IntoRelay, Relay, RelayV001, RelayVersion, RelayWrapper, TryFromRelay, take_if_nonzero_stream,
+    v0, v1, with_cmd_stream,
 };
 use crate::cache::Cachable;
 use crate::cell::FixedCell;
 use crate::errors;
+use crate::util::c_max_usize;
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
@@ -29,20 +31,6 @@ struct ConnectedIpv6 {
     ttl: U32,
 }
 
-#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
-#[repr(C)]
-struct ConnectedIpv4Pad {
-    data: ConnectedIpv4,
-    pad: [u8; const { RELAY_DATA_LENGTH - size_of::<ConnectedIpv4>() }],
-}
-
-#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
-#[repr(C)]
-struct ConnectedIpv6Pad {
-    data: ConnectedIpv6,
-    pad: [u8; const { RELAY_DATA_LENGTH - size_of::<ConnectedIpv6>() }],
-}
-
 /// Represents a RELAY_CONNECTED cell.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RelayConnected {
@@ -50,6 +38,8 @@ pub struct RelayConnected {
     pub stream: NonZeroU16,
     /// Cell payload.
     data: RelayWrapper,
+    /// Relay version.
+    version: Option<RelayVersion>,
 }
 
 impl AsRef<FixedCell> for RelayConnected {
@@ -65,21 +55,34 @@ impl Cachable for RelayConnected {
 }
 
 impl TryFromRelay for RelayConnected {
-    fn try_from_relay(relay: &mut Option<Relay>) -> Result<Option<Self>, errors::CellFormatError> {
-        let stream = match &*relay {
-            Some(r) if r.command() == Self::ID => {
-                NonZeroU16::new(r.stream()).ok_or(errors::CellFormatError)?
-            }
-            _ => return Ok(None),
-        };
-
-        take_if(relay, Self::check).map(|v| v.map(|data| Self { stream, data }))
+    fn try_from_relay(
+        relay: &mut Option<Relay>,
+        version: RelayVersion,
+    ) -> Result<Option<Self>, errors::CellFormatError> {
+        take_if_nonzero_stream(relay, Self::ID, version, Self::check).map(|v| {
+            v.map(|(stream, data)| Self {
+                stream,
+                data,
+                version: Some(version),
+            })
+        })
     }
 }
 
 impl IntoRelay for RelayConnected {
-    fn into_relay(self, circuit: NonZeroU32) -> Relay {
-        with_cmd_stream(self.data, Self::ID, self.stream.into(), circuit)
+    fn try_into_relay(
+        self,
+        circuit: NonZeroU32,
+        version: RelayVersion,
+    ) -> Result<Relay, errors::CellLengthOverflowError> {
+        with_cmd_stream(
+            self.data,
+            self.version,
+            version,
+            Self::ID,
+            self.stream.into(),
+            circuit,
+        )
     }
 }
 
@@ -92,14 +95,28 @@ impl RelayConnected {
     /// # Safety
     ///
     /// Cell must be a valid RELAY_CONNECTED cell.
-    pub unsafe fn from_cell(cell: FixedCell) -> Self {
+    pub unsafe fn from_cell(cell: FixedCell, version: RelayVersion) -> Self {
         let data = RelayWrapper::from(cell);
-        debug_assert_eq!(data.command(), Self::ID);
-        debug_assert!(Self::check(data.data()));
+
+        let (command, stream, a) = match version {
+            RelayVersion::V0 => (
+                v0::RelayExt::command(&data),
+                v0::RelayExt::stream(&data),
+                v0::RelayExt::data(&data),
+            ),
+            RelayVersion::V1 => (
+                v1::RelayExt::command(&data),
+                v1::RelayExt::stream(&data),
+                v1::RelayExt::data(&data),
+            ),
+        };
+        debug_assert_eq!(command, Self::ID);
+        debug_assert!(Self::check(a));
 
         Self {
-            stream: NonZeroU16::new(data.stream()).expect("stream ID is zero"),
+            stream: unsafe { NonZeroU16::new_unchecked(stream) },
             data,
+            version: Some(version),
         }
     }
 
@@ -125,11 +142,13 @@ impl RelayConnected {
     pub fn new_empty(cell: FixedCell, stream: NonZeroU16) -> Self {
         let mut data = RelayWrapper::from(cell);
 
-        data.set_data(&[]);
+        RelayV001::from_mut(&mut data).len.set(0);
 
-        debug_assert!(Self::check(data.data()));
-
-        Self { stream, data }
+        Self {
+            stream,
+            data,
+            version: None,
+        }
     }
 
     /// Creates new RELAY_CONNECTED cell.
@@ -165,40 +184,84 @@ impl RelayConnected {
 
         let mut data = RelayWrapper::from(cell);
 
-        match ip {
-            IpAddr::V4(v) => data.set_data(
-                ConnectedIpv4 {
+        let RelayV001 { len, data: a } = RelayV001::from_mut(&mut data);
+        len.set(match ip {
+            IpAddr::V4(v) => {
+                let v = ConnectedIpv4 {
                     ip: v.octets(),
                     ttl: ttl.into(),
-                }
-                .as_bytes(),
-            ),
-            IpAddr::V6(v) => data.set_data(
-                ConnectedIpv6 {
+                };
+
+                // SAFETY: Value fits in array.
+                unsafe { *from_mut(a).cast::<_>() = v };
+
+                size_of::<ConnectedIpv4>()
+            }
+            IpAddr::V6(v) => {
+                let v = ConnectedIpv6 {
                     all_z: [0; 4],
                     ip_ty: 6,
                     ip: v.octets(),
                     ttl: ttl.into(),
-                }
-                .as_bytes(),
-            ),
-        };
+                };
 
-        debug_assert!(Self::check(data.data()));
+                // SAFETY: Value fits in array.
+                unsafe { *from_mut(a).cast::<_>() = v };
 
-        Self { stream, data }
+                size_of::<ConnectedIpv6>()
+            }
+        } as _);
+
+        debug_assert!(Self::check(&a[..len.get() as usize]));
+
+        Self {
+            stream,
+            data,
+            version: None,
+        }
     }
 
     /// Get content of RELAY_CONNECTED.
     ///
     /// Returns an [`Option`] of IP address and TTL.
     pub fn data(&self) -> Option<(IpAddr, u32)> {
-        if self.data.is_empty() {
+        const MAX_SIZE: usize = c_max_usize(size_of::<ConnectedIpv4>(), size_of::<ConnectedIpv6>());
+
+        let (l, a) = match self.version {
+            None => {
+                let RelayV001 { len, data } = RelayV001::from_ref(&self.data);
+                (len.get(), &data[..MAX_SIZE])
+            }
+            Some(RelayVersion::V0) => (
+                v0::RelayExt::len(&self.data),
+                &v0::RelayExt::data_padding(&self.data)[..MAX_SIZE],
+            ),
+            Some(RelayVersion::V1) => (
+                v1::RelayExt::len(&self.data),
+                &v1::RelayExt::data_padding(&self.data)[..MAX_SIZE],
+            ),
+        };
+        if l == 0 {
             return None;
         }
-        let data = self.data.data_padding();
 
-        Some(match transmute_ref!(data) {
+        let a = <&[u8; MAX_SIZE]>::try_from(a).expect("array size must be MAX_LEN");
+
+        #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+        #[repr(C)]
+        struct ConnectedIpv4Pad {
+            data: ConnectedIpv4,
+            pad: [u8; const { MAX_SIZE - size_of::<ConnectedIpv4>() }],
+        }
+
+        #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+        #[repr(C)]
+        struct ConnectedIpv6Pad {
+            data: ConnectedIpv6,
+            pad: [u8; const { MAX_SIZE - size_of::<ConnectedIpv6>() }],
+        }
+
+        Some(match transmute_ref!(a) {
             ConnectedIpv4Pad {
                 data: ConnectedIpv4 {
                     ip: [0, 0, 0, 0], ..
@@ -206,15 +269,15 @@ impl RelayConnected {
                 ..
             } => {
                 let &ConnectedIpv6Pad {
-                    data: ConnectedIpv6 { ip, ref ttl, .. },
+                    data: ConnectedIpv6 { ip, ttl, .. },
                     ..
-                } = transmute_ref!(data);
-                (ip.into(), ttl.get())
+                } = transmute_ref!(a);
+                (ip.into(), ttl.into())
             }
             &ConnectedIpv4Pad {
-                data: ConnectedIpv4 { ip, ref ttl },
+                data: ConnectedIpv4 { ip, ttl },
                 ..
-            } => (ip.into(), ttl.get()),
+            } => (ip.into(), ttl.into()),
         })
     }
 
@@ -245,7 +308,7 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use crate::cell::relay::tests::assert_relay_eq;
+    use crate::cell::relay::v0::tests::assert_relay_eq;
 
     fn strat() -> impl Strategy<Value = (IpAddr, u32, NonZeroU16)> {
         (
@@ -266,7 +329,7 @@ mod tests {
                 0, 0, 0, 0, 123, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
             ],
         ));
-        RelayConnected::try_from_relay(&mut cell).unwrap_err();
+        RelayConnected::try_from_relay(&mut cell, RelayVersion::V0).unwrap_err();
         cell.unwrap();
     }
 
@@ -279,7 +342,7 @@ mod tests {
             [0; 4].into(),
             0,
         );
-        println!("{:?}", cell.data.data());
+        println!("{cell:?}");
     }
 
     #[test]
@@ -291,7 +354,7 @@ mod tests {
             [0; 16].into(),
             0,
         );
-        println!("{:?}", cell.data.data());
+        println!("{cell:?}");
     }
 
     proptest! {
@@ -322,12 +385,12 @@ mod tests {
             let cell = Relay::new(FixedCell::default(), NonZeroU32::new(1).unwrap(), RelayConnected::ID, stream.into(), &v);
             drop(v);
             let data = RelayWrapper::from(AsRef::<FixedCell>::as_ref(&cell).clone());
-            let cell = RelayConnected::try_from_relay(&mut Some(cell)).unwrap().unwrap();
+            let cell = RelayConnected::try_from_relay(&mut Some(cell), RelayVersion::V0).unwrap().unwrap();
 
             assert_eq!(cell.stream, stream);
             assert_eq!(cell.data(), Some((addr, ttl)));
 
-            let cell = cell.into_relay(NonZeroU32::new(1).unwrap());
+            let cell = cell.try_into_relay(NonZeroU32::new(1).unwrap(), RelayVersion::V0).unwrap();
 
             assert_relay_eq(&cell, &data);
         }
@@ -350,14 +413,14 @@ mod tests {
                 &[],
             );
             let data = RelayWrapper::from(AsRef::<FixedCell>::as_ref(&cell).clone());
-            let cell = RelayConnected::try_from_relay(&mut Some(cell))
+            let cell = RelayConnected::try_from_relay(&mut Some(cell), RelayVersion::V0)
                 .unwrap()
                 .unwrap();
 
             assert_eq!(cell.stream, stream);
             assert_eq!(cell.data(), None);
 
-            let cell = cell.into_relay(NonZeroU32::new(1).unwrap());
+            let cell = cell.try_into_relay(NonZeroU32::new(1).unwrap(), RelayVersion::V0).unwrap();
 
             assert_relay_eq(&cell, &data);
         }
@@ -371,7 +434,7 @@ mod tests {
                 1,
                 &[127, 0, 0, 1, 0, 0, 0, 0][..n],
             ));
-            RelayConnected::try_from_relay(&mut cell).unwrap_err();
+            RelayConnected::try_from_relay(&mut cell, RelayVersion::V0).unwrap_err();
             cell.unwrap();
         }
     }

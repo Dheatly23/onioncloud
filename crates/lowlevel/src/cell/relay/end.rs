@@ -1,14 +1,19 @@
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::mem::size_of;
 use std::net::IpAddr;
 use std::num::{NonZeroU16, NonZeroU32};
 
 use zerocopy::byteorder::big_endian::U32;
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned, transmute_mut};
 
-use super::{IntoRelay, Relay, RelayLike, RelayWrapper, TryFromRelay, with_cmd_stream};
+use super::{
+    IntoRelay, Relay, RelayV001, RelayVersion, RelayWrapper, TryFromRelay, take_if_nonzero_stream,
+    v0, v1, with_cmd_stream,
+};
 use crate::cache::Cachable;
 use crate::cell::FixedCell;
 use crate::errors;
+use crate::util::c_max_usize;
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
@@ -35,6 +40,8 @@ pub struct RelayEnd {
     pub stream: NonZeroU16,
     /// Cell payload.
     data: RelayWrapper,
+    /// Relay version.
+    version: Option<RelayVersion>,
 }
 
 impl AsRef<FixedCell> for RelayEnd {
@@ -50,24 +57,34 @@ impl Cachable for RelayEnd {
 }
 
 impl TryFromRelay for RelayEnd {
-    fn try_from_relay(relay: &mut Option<Relay>) -> Result<Option<Self>, errors::CellFormatError> {
-        let stream = match &*relay {
-            Some(r) if r.command() == Self::ID => {
-                NonZeroU16::new(r.stream()).ok_or(errors::CellFormatError)?
-            }
-            _ => return Ok(None),
-        };
-
-        Ok(Some(Self {
-            stream,
-            data: FixedCell::from(relay.take().unwrap()).into(),
-        }))
+    fn try_from_relay(
+        relay: &mut Option<Relay>,
+        version: RelayVersion,
+    ) -> Result<Option<Self>, errors::CellFormatError> {
+        take_if_nonzero_stream(relay, Self::ID, version, |_| true).map(|v| {
+            v.map(|(stream, data)| Self {
+                stream,
+                data,
+                version: Some(version),
+            })
+        })
     }
 }
 
 impl IntoRelay for RelayEnd {
-    fn into_relay(self, circuit: NonZeroU32) -> Relay {
-        with_cmd_stream(self.data, Self::ID, self.stream.into(), circuit)
+    fn try_into_relay(
+        self,
+        circuit: NonZeroU32,
+        version: RelayVersion,
+    ) -> Result<Relay, errors::CellLengthOverflowError> {
+        with_cmd_stream(
+            self.data,
+            self.version,
+            version,
+            Self::ID,
+            self.stream.into(),
+            circuit,
+        )
     }
 }
 
@@ -80,12 +97,19 @@ impl RelayEnd {
     /// # Safety
     ///
     /// Cell must be a valid RELAY_END cell.
-    pub unsafe fn from_cell(cell: FixedCell) -> Self {
+    pub unsafe fn from_cell(cell: FixedCell, version: RelayVersion) -> Self {
         let data = RelayWrapper::from(cell);
 
+        let (command, stream) = match version {
+            RelayVersion::V0 => (v0::RelayExt::command(&data), v0::RelayExt::stream(&data)),
+            RelayVersion::V1 => (v1::RelayExt::command(&data), v1::RelayExt::stream(&data)),
+        };
+        debug_assert_eq!(command, Self::ID);
+
         Self {
-            stream: NonZeroU16::new(data.stream()).expect("stream ID is zero"),
+            stream: unsafe { NonZeroU16::new_unchecked(stream) },
             data,
+            version: Some(version),
         }
     }
 
@@ -112,9 +136,13 @@ impl RelayEnd {
     /// ```
     pub fn new(cell: FixedCell, stream: NonZeroU16, reason: EndReason) -> Self {
         let mut data = RelayWrapper::from(cell);
-        Self::set_reason_inner(&mut data, &reason);
+        Self::set_reason_inner(&mut data, None, &reason);
 
-        let ret = Self { stream, data };
+        let ret = Self {
+            stream,
+            data,
+            version: None,
+        };
         debug_assert_eq!(ret.reason(), reason);
         ret
     }
@@ -144,7 +172,13 @@ impl RelayEnd {
             }
         }
 
-        match self.data.data() {
+        let a = match self.version {
+            None => RelayV001::from_ref(&self.data).data(),
+            Some(RelayVersion::V0) => v0::RelayExt::data(&self.data),
+            Some(RelayVersion::V1) => v1::RelayExt::data(&self.data),
+        };
+
+        match a {
             [2, ..] => EndReason::ResolveFailed,
             [3, ..] => EndReason::ConnectRefused,
             [4, data @ ..] => EndReason::ExitPolicy(parse_exit_policy(data)),
@@ -164,47 +198,89 @@ impl RelayEnd {
 
     /// Set end reason.
     pub fn set_reason(&mut self, reason: EndReason) {
-        Self::set_reason_inner(&mut self.data, &reason);
+        Self::set_reason_inner(&mut self.data, self.version, &reason);
     }
 
-    fn set_reason_inner(data: &mut RelayWrapper, reason: &EndReason) {
+    fn set_reason_inner(
+        data: &mut RelayWrapper,
+        version: Option<RelayVersion>,
+        reason: &EndReason,
+    ) {
+        const MAX_SIZE: usize = c_max_usize(
+            size_of::<u8>(),
+            c_max_usize(size_of::<ExitPolicyIpv4>(), size_of::<ExitPolicyIpv6>()),
+        );
+
+        let a = match version {
+            None => &mut RelayV001::from_mut(data).data[..MAX_SIZE],
+            Some(RelayVersion::V0) => &mut v0::RelayExt::data_padding_mut(data)[..MAX_SIZE],
+            Some(RelayVersion::V1) => &mut v1::RelayExt::data_padding_mut(data)[..MAX_SIZE],
+        };
+        let a = <&mut [u8; MAX_SIZE]>::try_from(a).expect("array size must be MAX_LEN");
+
+        #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+        #[repr(C)]
+        struct ExitPolicyIpv4Pad {
+            data: ExitPolicyIpv4,
+            pad: [u8; const { MAX_SIZE - size_of::<ExitPolicyIpv4>() }],
+        }
+
+        #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+        #[repr(C)]
+        struct ExitPolicyIpv6Pad {
+            data: ExitPolicyIpv6,
+            pad: [u8; const { MAX_SIZE - size_of::<ExitPolicyIpv6>() }],
+        }
+
+        let mut len = 1;
         match *reason {
-            EndReason::Misc => data.set_data(&[1]),
-            EndReason::ResolveFailed => data.set_data(&[2]),
-            EndReason::ConnectRefused => data.set_data(&[3]),
-            EndReason::ExitPolicy(None) => data.set_data(&[4]),
+            EndReason::Misc => a[0] = 1,
+            EndReason::ResolveFailed => a[0] = 2,
+            EndReason::ConnectRefused => a[0] = 3,
+            EndReason::ExitPolicy(None) => a[0] = 4,
             EndReason::ExitPolicy(Some(ExitPolicy {
-                addr: IpAddr::V4(ref a),
+                addr: IpAddr::V4(ref addr),
                 ttl,
-            })) => data.set_data(
-                ExitPolicyIpv4 {
+            })) => {
+                let ExitPolicyIpv4Pad { data, .. } = transmute_mut!(a);
+                *data = ExitPolicyIpv4 {
                     ty: 4,
-                    addr: a.octets(),
+                    addr: addr.octets(),
                     ttl: ttl.into(),
-                }
-                .as_bytes(),
-            ),
+                };
+                len = size_of::<ExitPolicyIpv4>() as u16;
+            }
             EndReason::ExitPolicy(Some(ExitPolicy {
-                addr: IpAddr::V6(ref a),
+                addr: IpAddr::V6(ref addr),
                 ttl,
-            })) => data.set_data(
-                ExitPolicyIpv6 {
+            })) => {
+                let ExitPolicyIpv6Pad { data, .. } = transmute_mut!(a);
+                *data = ExitPolicyIpv6 {
                     ty: 4,
-                    addr: a.octets(),
+                    addr: addr.octets(),
                     ttl: ttl.into(),
-                }
-                .as_bytes(),
-            ),
-            EndReason::Destroy => data.set_data(&[5]),
-            EndReason::Done => data.set_data(&[6]),
-            EndReason::Timeout => data.set_data(&[7]),
-            EndReason::NoRoute => data.set_data(&[8]),
-            EndReason::Hibernating => data.set_data(&[9]),
-            EndReason::Internal => data.set_data(&[10]),
-            EndReason::ResourceLimit => data.set_data(&[11]),
-            EndReason::ConnReset => data.set_data(&[12]),
-            EndReason::TorProtocol => data.set_data(&[13]),
-            EndReason::NotDirectory => data.set_data(&[14]),
+                };
+                len = size_of::<ExitPolicyIpv6>() as u16;
+            }
+            EndReason::Destroy => a[0] = 5,
+            EndReason::Done => a[0] = 6,
+            EndReason::Timeout => a[0] = 7,
+            EndReason::NoRoute => a[0] = 8,
+            EndReason::Hibernating => a[0] = 9,
+            EndReason::Internal => a[0] = 10,
+            EndReason::ResourceLimit => a[0] = 11,
+            EndReason::ConnReset => a[0] = 12,
+            EndReason::TorProtocol => a[0] = 13,
+            EndReason::NotDirectory => a[0] = 14,
+        }
+
+        // SAFETY: Length matches data length.
+        unsafe {
+            match version {
+                None => RelayV001::from_mut(data).len.set(len),
+                Some(RelayVersion::V0) => v0::RelayExt::set_len(data, len),
+                Some(RelayVersion::V1) => v1::RelayExt::set_len(data, len),
+            };
         }
     }
 }
@@ -303,7 +379,7 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use crate::cell::relay::tests::assert_relay_eq;
+    use crate::cell::relay::v0::tests::assert_relay_eq;
 
     fn strat() -> impl Strategy<Value = (NonZeroU16, EndReason)> {
         (
@@ -338,7 +414,9 @@ mod tests {
             1,
             &[],
         ));
-        let cell = RelayEnd::try_from_relay(&mut cell).unwrap().unwrap();
+        let cell = RelayEnd::try_from_relay(&mut cell, RelayVersion::V0)
+            .unwrap()
+            .unwrap();
         assert_eq!(cell.reason(), EndReason::Misc);
     }
 
@@ -351,7 +429,9 @@ mod tests {
             1,
             &[255],
         ));
-        let cell = RelayEnd::try_from_relay(&mut cell).unwrap().unwrap();
+        let cell = RelayEnd::try_from_relay(&mut cell, RelayVersion::V0)
+            .unwrap()
+            .unwrap();
         assert_eq!(cell.reason(), EndReason::Misc);
     }
 
@@ -407,12 +487,12 @@ mod tests {
             let cell = Relay::new(FixedCell::default(), NonZeroU32::new(1).unwrap(), RelayEnd::ID, stream.into(), &v);
             drop(v);
             let data = RelayWrapper::from(AsRef::<FixedCell>::as_ref(&cell).clone());
-            let cell = RelayEnd::try_from_relay(&mut Some(cell)).unwrap().unwrap();
+            let cell = RelayEnd::try_from_relay(&mut Some(cell), RelayVersion::V0).unwrap().unwrap();
 
             assert_eq!(cell.stream, stream);
             assert_eq!(cell.reason(), reason);
 
-            let cell = cell.into_relay(NonZeroU32::new(1).unwrap());
+            let cell = cell.try_into_relay(NonZeroU32::new(1).unwrap(), RelayVersion::V0).unwrap();
 
             assert_relay_eq(&cell, &data);
         }
@@ -426,7 +506,7 @@ mod tests {
                 1,
                 &[4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][..n],
             ));
-            let cell = RelayEnd::try_from_relay(&mut cell).unwrap().unwrap();
+            let cell = RelayEnd::try_from_relay(&mut cell, RelayVersion::V0).unwrap().unwrap();
             let reason = cell.reason();
             assert!(
                 matches!(reason, EndReason::ExitPolicy(None | Some(ExitPolicy {
@@ -451,7 +531,7 @@ mod tests {
             ));
             drop(v);
 
-            let cell = RelayEnd::try_from_relay(&mut cell).unwrap().unwrap();
+            let cell = RelayEnd::try_from_relay(&mut cell, RelayVersion::V0).unwrap().unwrap();
             assert_eq!(
                 cell.reason(),
                 EndReason::ExitPolicy(Some(ExitPolicy {
@@ -475,7 +555,7 @@ mod tests {
             ));
             drop(v);
 
-            let cell = RelayEnd::try_from_relay(&mut cell).unwrap().unwrap();
+            let cell = RelayEnd::try_from_relay(&mut cell, RelayVersion::V0).unwrap().unwrap();
             assert_eq!(
                 cell.reason(),
                 EndReason::ExitPolicy(Some(ExitPolicy {

@@ -22,7 +22,8 @@ use crate::cell::relay::data::RelayData;
 use crate::cell::relay::drop::RelayDrop;
 use crate::cell::relay::end::{EndReason, RelayEnd};
 use crate::cell::relay::sendme::RelaySendme;
-use crate::cell::relay::{IntoRelay, RELAY_DATA_LENGTH, Relay, RelayLike, cast};
+use crate::cell::relay::v0::{RELAY_DATA_LENGTH, RelayExt};
+use crate::cell::relay::{IntoRelay, Relay, RelayVersion, cast};
 use crate::circuit::NewStream;
 use crate::util::cell_map::NewHandler;
 
@@ -143,23 +144,31 @@ impl DirStream {
             debug_assert_eq!(cell.stream(), stream_id.into());
             let mut cell = Cached::map(cell, Some);
 
-            if let Some(cell) = cast::<RelayData>(&mut cell).map_err(map_io_err)? {
+            if let Some(cell) =
+                cast::<RelayData>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
+            {
                 // RELAY_DATA cell
                 if !cell.data().is_empty() {
                     return Ready(Ok(Some(cell)));
                 }
                 cache.discard(cell);
-            } else if let Some(cell) = cast::<RelayEnd>(&mut cell).map_err(map_io_err)? {
+            } else if let Some(cell) =
+                cast::<RelayEnd>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
+            {
                 // RELAY_END cell
                 let reason = cache.cache_b(cell).reason();
                 info!(%reason, "stream closed");
                 *state = State::Shutdown;
                 ready!(self.poll_close(cx))?;
                 break;
-            } else if let Some(cell) = cast::<RelayDrop>(&mut cell).map_err(map_io_err)? {
+            } else if let Some(cell) =
+                cast::<RelayDrop>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
+            {
                 // RELAY_DROP cell
                 cache.discard(cell);
-            } else if let Some(cell) = cast::<RelaySendme>(&mut cell).map_err(map_io_err)? {
+            } else if let Some(cell) =
+                cast::<RelaySendme>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
+            {
                 // RELAY_SENDME cell
                 cache.discard(cell);
             } else if let Some(cell) = Cached::transpose(cell) {
@@ -190,8 +199,10 @@ impl DirStream {
         // Flush write buffer.
         if !handle_write_err(ready!(send.as_mut().poll_ready(cx))) {
             let n = take(send_buf_len);
-            let cell =
-                RelayData::new(cache.get_cached(), stream_id, &send_buf[..n]).into_relay(circ_id);
+            let cell = RelayData::new(cache.get_cached(), stream_id, &send_buf[..n])
+                .unwrap()
+                .try_into_relay(circ_id, RelayVersion::V0)
+                .unwrap();
             if !handle_write_err(send.as_mut().start_send(cache.cache(cell))) {
                 trace!("flushed {n} bytes");
                 return Ready(Ok(()));
@@ -403,7 +414,9 @@ impl AsyncWrite for DirStream {
                     stream_id,
                     [&send_buf[..take(send_buf_len)], &buf[..n]],
                 )
-                .into_relay(circ_id);
+                .unwrap()
+                .try_into_relay(circ_id, RelayVersion::V0)
+                .unwrap();
                 ok = !handle_write_err(send.as_mut().start_send(cache.cache(cell)));
             }
 
@@ -490,7 +503,9 @@ impl AsyncWrite for DirStream {
                         Some(&buf[..i])
                     });
                     let cell = RelayData::new_multipart(cache.get_cached(), stream_id, it)
-                        .into_relay(circ_id);
+                        .unwrap()
+                        .try_into_relay(circ_id, RelayVersion::V0)
+                        .unwrap();
                     ok = !handle_write_err(send.as_mut().start_send(cache.cache(cell)));
                 } else {
                     // Copy bytes to buffer
@@ -557,8 +572,9 @@ impl AsyncWrite for DirStream {
 
                     let reason = reason.clone();
                     *state = State::Shutdown;
-                    let cell =
-                        RelayEnd::new(cache.get_cached(), stream_id, reason).into_relay(circ_id);
+                    let cell = RelayEnd::new(cache.get_cached(), stream_id, reason)
+                        .try_into_relay(circ_id, RelayVersion::V0)
+                        .unwrap();
                     if handle_write_err(send.as_mut().start_send(cache.cache(cell))) {
                         break;
                     }
@@ -714,8 +730,10 @@ mod tests {
                         }
 
                         info!("sending {} bytes", b.len());
-                        let cell =
-                            RelayData::new(cache.get_cached(), STREAM_ID, b).into_relay(CIRC_ID);
+                        let cell = RelayData::new(cache.get_cached(), STREAM_ID, b)
+                            .unwrap()
+                            .try_into_relay(CIRC_ID, RelayVersion::V0)
+                            .unwrap();
                         send.feed(cache.cache(cell)).await.unwrap();
                         if s.is_empty() {
                             break;
@@ -726,8 +744,10 @@ mod tests {
                         let b;
                         (b, s) = s.split_at(RELAY_DATA_LENGTH.min(s.len()));
                         info!("sending {} bytes", b.len());
-                        let cell =
-                            RelayData::new(cache.get_cached(), STREAM_ID, b).into_relay(CIRC_ID);
+                        let cell = RelayData::new(cache.get_cached(), STREAM_ID, b)
+                            .unwrap()
+                            .try_into_relay(CIRC_ID, RelayVersion::V0)
+                            .unwrap();
                         send.feed(cache.cache(cell)).await.unwrap();
                     }
                     send.flush().await.unwrap();
@@ -738,7 +758,7 @@ mod tests {
                         recv.next().await.expect("should be sending closing cell"),
                         Some,
                     );
-                    let Some(cell) = cast::<RelayEnd>(&mut cell).unwrap() else {
+                    let Some(cell) = cast::<RelayEnd>(&mut cell, RelayVersion::V0).unwrap() else {
                         panic!(
                             "unknown cell with command {}",
                             Cached::transpose(cell).unwrap().command()
@@ -806,8 +826,10 @@ mod tests {
                         }
 
                         info!("sending {} bytes", b.len());
-                        let cell =
-                            RelayData::new(cache.get_cached(), STREAM_ID, b).into_relay(CIRC_ID);
+                        let cell = RelayData::new(cache.get_cached(), STREAM_ID, b)
+                            .unwrap()
+                            .try_into_relay(CIRC_ID, RelayVersion::V0)
+                            .unwrap();
                         send.feed(cache.cache(cell)).await.unwrap();
                         if s.is_empty() {
                             break;
@@ -818,8 +840,10 @@ mod tests {
                         let b;
                         (b, s) = s.split_at(RELAY_DATA_LENGTH.min(s.len()));
                         info!("sending {} bytes", b.len());
-                        let cell =
-                            RelayData::new(cache.get_cached(), STREAM_ID, b).into_relay(CIRC_ID);
+                        let cell = RelayData::new(cache.get_cached(), STREAM_ID, b)
+                            .unwrap()
+                            .try_into_relay(CIRC_ID, RelayVersion::V0)
+                            .unwrap();
                         send.feed(cache.cache(cell)).await.unwrap();
                     }
                     send.flush().await.unwrap();
@@ -830,7 +854,7 @@ mod tests {
                         recv.next().await.expect("should be sending closing cell"),
                         Some,
                     );
-                    let Some(cell) = cast::<RelayEnd>(&mut cell).unwrap() else {
+                    let Some(cell) = cast::<RelayEnd>(&mut cell, RelayVersion::V0).unwrap() else {
                         panic!(
                             "unknown cell with command {}",
                             Cached::transpose(cell).unwrap().command()
@@ -938,7 +962,7 @@ mod tests {
                         recv.next().await.expect("stream should not be dropped"),
                         Some,
                     );
-                    let Some(cell) = cast::<RelayData>(&mut cell).unwrap() else {
+                    let Some(cell) = cast::<RelayData>(&mut cell, RelayVersion::V0).unwrap() else {
                         panic!(
                             "unknown cell with command {}",
                             Cached::transpose(cell).unwrap().command()
@@ -956,7 +980,8 @@ mod tests {
             info!("closing");
             let mut send = send.into_sink();
             let cell = RelayEnd::new(cache.get_cached(), STREAM_ID, EndReason::default())
-                .into_relay(CIRC_ID);
+                .try_into_relay(CIRC_ID, RelayVersion::V0)
+                .unwrap();
             send.send(cache.cache(cell)).await.unwrap();
             debug!("close success");
 
@@ -1023,7 +1048,7 @@ mod tests {
                         recv.next().await.expect("stream should not be dropped"),
                         Some,
                     );
-                    let Some(cell) = cast::<RelayData>(&mut cell).unwrap() else {
+                    let Some(cell) = cast::<RelayData>(&mut cell, RelayVersion::V0).unwrap() else {
                         panic!(
                             "unknown cell with command {}",
                             Cached::transpose(cell).unwrap().command()
@@ -1042,7 +1067,8 @@ mod tests {
             info!("closing");
             let mut send = send.into_sink();
             let cell = RelayEnd::new(cache.get_cached(), STREAM_ID, EndReason::default())
-                .into_relay(CIRC_ID);
+                .try_into_relay(CIRC_ID, RelayVersion::V0)
+                .unwrap();
             send.send(cache.cache(cell)).await.unwrap();
             debug!("close success");
 

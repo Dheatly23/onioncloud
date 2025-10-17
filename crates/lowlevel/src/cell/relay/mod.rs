@@ -6,11 +6,12 @@ pub mod drop;
 pub mod end;
 pub mod extend;
 pub mod sendme;
+pub mod v0;
+pub mod v1;
 
-use std::mem::{size_of, transmute};
-use std::num::NonZeroU32;
+use std::mem::transmute;
+use std::num::{NonZeroU16, NonZeroU32};
 
-use rand::prelude::*;
 use zerocopy::byteorder::big_endian::U16;
 use zerocopy::{
     FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned, transmute_mut, transmute_ref,
@@ -23,173 +24,8 @@ use crate::cache::Cachable;
 use crate::errors;
 use crate::private::Sealed;
 
-/// RELAY and RELAY_EARLY cell header.
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Debug, PartialEq, Eq)]
-#[repr(C)]
-pub(crate) struct RelayHeader {
-    /// Relay command.
-    pub(crate) command: u8,
-
-    /// Recognized field.
-    pub(crate) recognized: [u8; 2],
-
-    /// Stream ID.
-    pub(crate) stream: U16,
-
-    /// Cell digest.
-    pub(crate) digest: [u8; 4],
-
-    /// Message length.
-    pub(crate) len: U16,
-}
-
-/// Maximum length of RELAY payload.
-pub const RELAY_DATA_LENGTH: usize = FIXED_CELL_SIZE - size_of::<RelayHeader>();
-
-/// RELAY and RELAY_EARLY cell content.
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
-#[repr(C)]
-pub(crate) struct RelayCell {
-    /// Relay header.
-    pub(crate) header: RelayHeader,
-
-    /// Message payload + padding.
-    pub(crate) data: [u8; RELAY_DATA_LENGTH],
-}
-
 /// Common trait for [`Relay`] and [`RelayEarly`] cells.
-pub trait RelayLike: Sealed + AsRef<[u8; FIXED_CELL_SIZE]> + AsMut<[u8; FIXED_CELL_SIZE]> {
-    /// Gets command.
-    fn command(&self) -> u8 {
-        cast_cell(self).header.command
-    }
-
-    /// Sets command.
-    fn set_command(&mut self, value: u8) {
-        cast_cell_mut(self).header.command = value;
-    }
-
-    /// Gets recognized.
-    fn recognized(&self) -> [u8; 2] {
-        cast_cell(self).header.recognized
-    }
-
-    /// Sets recognized.
-    fn set_recognized(&mut self, value: [u8; 2]) {
-        cast_cell_mut(self).header.recognized = value;
-    }
-
-    /// Check if cell is recognized.
-    fn is_recognized(&self) -> bool {
-        self.recognized() == [0; 2]
-    }
-
-    /// Gets stream ID.
-    fn stream(&self) -> u16 {
-        cast_cell(self).header.stream.get()
-    }
-
-    /// Sets stream ID.
-    fn set_stream(&mut self, value: u16) {
-        cast_cell_mut(self).header.stream.set(value);
-    }
-
-    /// Gets digest.
-    fn digest(&self) -> [u8; 4] {
-        cast_cell(self).header.digest
-    }
-
-    /// Sets digest.
-    fn set_digest(&mut self, value: [u8; 4]) {
-        cast_cell_mut(self).header.digest = value;
-    }
-
-    /// Gets length.
-    fn len(&self) -> u16 {
-        cast_cell(self).header.len.get()
-    }
-
-    /// Returns [`true`] if length is 0.
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Set length.
-    ///
-    /// # SAFETY
-    ///
-    /// Length must be shorter than [`RELAY_DATA_LENGTH`].
-    unsafe fn set_len(&mut self, len: u16) {
-        debug_assert!(len as usize <= RELAY_DATA_LENGTH);
-        cast_cell_mut(self).header.len.set(len)
-    }
-
-    /// Get payload.
-    ///
-    /// # Panics
-    ///
-    /// Panics if length field is invalid. This can happen if the cell content is encrypted.
-    fn data(&self) -> &[u8] {
-        let cell = cast_cell(self);
-        &cell.data[..usize::from(cell.header.len.get())]
-    }
-
-    /// Get payload mutably.
-    ///
-    /// # Panics
-    ///
-    /// Panics if length field is invalid. This can happen if the cell content is encrypted.
-    fn data_mut(&mut self) -> &mut [u8] {
-        let cell = cast_cell_mut(self);
-        &mut cell.data[..usize::from(cell.header.len.get())]
-    }
-
-    /// Set payload.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `data` is longer than [`RELAY_DATA_LENGTH`].
-    fn set_data(&mut self, data: &[u8]) {
-        let cell = cast_cell_mut(self);
-        assert!(
-            data.len() <= cell.data.len(),
-            "data is too long ({} > {})",
-            data.len(),
-            cell.data.len()
-        );
-        cell.data[..data.len()].copy_from_slice(data);
-        cell.header
-            .len
-            .set(data.len().try_into().expect("data must fit cell"));
-    }
-
-    /// Get data and padding.
-    fn data_padding(&self) -> &[u8; RELAY_DATA_LENGTH] {
-        &cast_cell(self).data
-    }
-
-    /// Get data and padding mutably.
-    fn data_padding_mut(&mut self) -> &mut [u8; RELAY_DATA_LENGTH] {
-        &mut cast_cell_mut(self).data
-    }
-
-    /// Fill padding bytes in accordance to spec.
-    fn fill_padding(&mut self) {
-        let cell = cast_cell_mut(self);
-        let padding = &mut cell.data[usize::from(cell.header.len.get())..];
-        if let [_, _, _, _, padding @ ..] = padding {
-            ThreadRng::default().fill_bytes(padding)
-        }
-    }
-}
-
-fn cast_cell<T: ?Sized + RelayLike>(this: &T) -> &RelayCell {
-    transmute_ref!(this.as_ref())
-}
-
-fn cast_cell_mut<T: ?Sized + RelayLike>(this: &mut T) -> &mut RelayCell {
-    transmute_mut!(this.as_mut())
-}
+pub trait RelayLike: Sealed + AsRef<[u8; FIXED_CELL_SIZE]> + AsMut<[u8; FIXED_CELL_SIZE]> {}
 
 /// Represents a RELAY cell.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -310,31 +146,51 @@ impl Relay {
     ///
     /// # Panics
     ///
-    /// Panics if `data` is longer than [`RELAY_DATA_LENGTH`].
+    /// Panics if `data` is longer than [`RELAY_DATA_LENGTH`](`v0::RELAY_DATA_LENGTH``).
     pub fn new(
-        mut cell: FixedCell,
+        cell: FixedCell,
         circuit: NonZeroU32,
         command: u8,
         stream: u16,
         data: &[u8],
     ) -> Self {
-        let RelayCell { header, data: out } = transmute_mut!(cell.data_mut());
-        assert!(
-            data.len() <= out.len(),
-            "data is too long ({} > {})",
-            data.len(),
-            out.len()
-        );
-        out[..data.len()].copy_from_slice(data);
-        header.command = command;
-        header.recognized = [0; 2];
-        header.stream.set(stream);
-        header.digest = [0; 4];
-        header
-            .len
-            .set(data.len().try_into().expect("data must fit cell"));
+        use v0::RelayExt as _;
+        let mut ret = Self::from_cell(circuit, cell);
+        ret.set_data(data);
+        ret.set_command(command);
+        ret.set_recognized([0; 2]);
+        ret.set_stream(stream);
+        ret.set_digest([0; 4]);
+        ret
+    }
 
-        Self::from_cell(circuit, cell)
+    /// Creates new RELAY cell.
+    ///
+    /// # Parameters
+    ///
+    /// - `cell` : Cached [`FixedCell`].
+    /// - `circuit` : Circuit ID.
+    /// - `command` : Relay command.
+    /// - `stream` : Stream ID.
+    /// - `data` : Message payload.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `data` is longer than [`RELAY_DATA_LENGTH`](`v1::RELAY_DATA_LENGTH``).
+    pub fn new_v1(
+        cell: FixedCell,
+        circuit: NonZeroU32,
+        command: u8,
+        stream: u16,
+        data: &[u8],
+    ) -> Self {
+        use v1::RelayExt as _;
+        let mut ret = Self::from_cell(circuit, cell);
+        ret.set_data(data);
+        ret.set_command(command);
+        ret.set_stream(stream);
+        *ret.tag_mut() = [0; 16];
+        ret
     }
 
     /// Unwraps into inner [`FixedCell`].
@@ -470,8 +326,7 @@ impl RelayEarly {
             cell: data,
         }
     }
-
-    /// Creates new RELAY_EARLY cell.
+    /// Creates new RELAY cell.
     ///
     /// # Parameters
     ///
@@ -483,30 +338,39 @@ impl RelayEarly {
     ///
     /// # Panics
     ///
-    /// Panics if `data` is longer than [`RELAY_DATA_LENGTH`].
+    /// Panics if `data` is longer than [`RELAY_DATA_LENGTH`](`v0::RELAY_DATA_LENGTH``).
     pub fn new(
-        mut cell: FixedCell,
+        cell: FixedCell,
         circuit: NonZeroU32,
         command: u8,
         stream: u16,
         data: &[u8],
     ) -> Self {
-        let RelayCell { header, data: out } = transmute_mut!(cell.data_mut());
-        assert!(
-            data.len() <= out.len(),
-            "data is too long ({} > {})",
-            data.len(),
-            out.len()
-        );
-        out[..data.len()].copy_from_slice(data);
-        header.command = command;
-        header.recognized = [0; 2];
-        header.stream.set(stream);
-        header.digest = [0; 4];
-        header
-            .len
-            .set(data.len().try_into().expect("data must fit cell"));
+        let Relay { circuit, cell } = Relay::new(cell, circuit, command, stream, data);
+        Self::from_cell(circuit, cell)
+    }
 
+    /// Creates new RELAY cell.
+    ///
+    /// # Parameters
+    ///
+    /// - `cell` : Cached [`FixedCell`].
+    /// - `circuit` : Circuit ID.
+    /// - `command` : Relay command.
+    /// - `stream` : Stream ID.
+    /// - `data` : Message payload.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `data` is longer than [`RELAY_DATA_LENGTH`](`v1::RELAY_DATA_LENGTH``).
+    pub fn new_v1(
+        cell: FixedCell,
+        circuit: NonZeroU32,
+        command: u8,
+        stream: u16,
+        data: &[u8],
+    ) -> Self {
+        let Relay { circuit, cell } = Relay::new_v1(cell, circuit, command, stream, data);
         Self::from_cell(circuit, cell)
     }
 
@@ -588,6 +452,16 @@ impl<'a> From<&'a mut RelayWrapper> for &'a mut FixedCell {
     }
 }
 
+impl RelayWrapper {
+    /// Convert into relay.
+    fn into_relay(self, circuit: NonZeroU32) -> Relay {
+        Relay {
+            circuit,
+            cell: self.0,
+        }
+    }
+}
+
 /// Helper for wrapping reference to RELAY cell payload.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
@@ -636,6 +510,18 @@ impl<'a> From<&'a mut RelayRefWrapper> for &'a mut [u8; FIXED_CELL_SIZE] {
     }
 }
 
+/// Relay format version.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RelayVersion {
+    /// Default version.
+    #[default]
+    V0,
+
+    /// (Proposed) version for counter galois mode.
+    V1,
+}
+
 /// Trait to cast from [`Relay`] cell.
 pub trait TryFromRelay: Sized {
     /// Checks cell content, take it, then cast it into `Self`.
@@ -648,70 +534,212 @@ pub trait TryFromRelay: Sized {
     /// This method **should** not mutate the cell, it's only allowed to inspect it.
     /// If the checks are good, then use the [`Option::take`] method to pop cell out of it.
     /// The cell may not be dropped, only moved.
-    fn try_from_relay(relay: &mut Option<Relay>) -> Result<Option<Self>, errors::CellFormatError>;
+    fn try_from_relay(
+        relay: &mut Option<Relay>,
+        version: RelayVersion,
+    ) -> Result<Option<Self>, errors::CellFormatError>;
+
+    /// Cast from version 0 relay.
+    fn try_from_relay_v0(
+        relay: &mut Option<Relay>,
+    ) -> Result<Option<Self>, errors::CellFormatError> {
+        Self::try_from_relay(relay, RelayVersion::V0)
+    }
+
+    /// Cast from version 1 relay.
+    fn try_from_relay_v1(
+        relay: &mut Option<Relay>,
+    ) -> Result<Option<Self>, errors::CellFormatError> {
+        Self::try_from_relay(relay, RelayVersion::V1)
+    }
 }
 
 /// Convenient function wrapping [`TryFromRelay`].
 pub fn cast<T: TryFromRelay>(
     relay: &mut Option<Relay>,
+    version: RelayVersion,
 ) -> Result<Option<T>, errors::CellFormatError> {
-    T::try_from_relay(relay)
+    T::try_from_relay(relay, version)
+}
+
+fn take_if_nonzero_stream(
+    relay: &mut Option<Relay>,
+    command: u8,
+    version: RelayVersion,
+    check: impl FnOnce(&[u8]) -> bool,
+) -> Result<Option<(NonZeroU16, RelayWrapper)>, errors::CellFormatError> {
+    let Some(r) = relay.as_ref() else {
+        return Ok(None);
+    };
+
+    let (c, stream, data) = match version {
+        RelayVersion::V0 => (
+            v0::RelayExt::command(r),
+            v0::RelayExt::stream(r),
+            v0::RelayExt::data(r),
+        ),
+        RelayVersion::V1 => (
+            v1::RelayExt::command(r),
+            v1::RelayExt::stream(r),
+            v1::RelayExt::data(r),
+        ),
+    };
+    let stream = if c != command {
+        return Ok(None);
+    } else if let Some(stream) = NonZeroU16::new(stream)
+        && check(data)
+    {
+        stream
+    } else {
+        return Err(errors::CellFormatError);
+    };
+
+    // SAFETY: Relay is some
+    unsafe { Ok(Some((stream, relay.take().unwrap_unchecked().cell.into()))) }
 }
 
 fn take_if(
     relay: &mut Option<Relay>,
+    command: u8,
+    version: RelayVersion,
     check: impl FnOnce(&[u8]) -> bool,
-) -> Result<Option<RelayWrapper>, errors::CellFormatError> {
-    match relay.take() {
-        Some(r) if check(r.data()) => Ok(Some(r.cell.into())),
-        None => Ok(None),
-        v => {
-            *relay = v;
-            Err(errors::CellFormatError)
-        }
-    }
+) -> Result<Option<(u16, RelayWrapper)>, errors::CellFormatError> {
+    let Some(r) = relay.as_ref() else {
+        return Ok(None);
+    };
+
+    let (c, stream, data) = match version {
+        RelayVersion::V0 => (
+            v0::RelayExt::command(r),
+            v0::RelayExt::stream(r),
+            v0::RelayExt::data(r),
+        ),
+        RelayVersion::V1 => (
+            v1::RelayExt::command(r),
+            v1::RelayExt::stream(r),
+            v1::RelayExt::data(r),
+        ),
+    };
+    let stream = if c != command {
+        return Ok(None);
+    } else if check(data) {
+        stream
+    } else {
+        return Err(errors::CellFormatError);
+    };
+
+    // SAFETY: Relay is some
+    unsafe { Ok(Some((stream, relay.take().unwrap_unchecked().cell.into()))) }
 }
 
 /// Convert cell into [`Relay`] cell.
 pub trait IntoRelay: Sized {
-    /// Convert into [`Relay`] with given circuit ID.
-    fn into_relay(self, circuit: NonZeroU32) -> Relay;
+    /// Convert into [`Relay`] with given circuit ID and version.
+    fn try_into_relay(
+        self,
+        circuit: NonZeroU32,
+        version: RelayVersion,
+    ) -> Result<Relay, errors::CellLengthOverflowError>;
 
-    /// Convert into [`RelayEarly`] with given circuit ID.
-    fn into_relay_early(self, circuit: NonZeroU32) -> RelayEarly {
-        self.into_relay(circuit).into()
+    /// Convert into [`RelayEarly`] with given circuit ID and version.
+    fn try_into_relay_early(
+        self,
+        circuit: NonZeroU32,
+        version: RelayVersion,
+    ) -> Result<RelayEarly, errors::CellLengthOverflowError> {
+        self.try_into_relay(circuit, version).map(RelayEarly::from)
     }
 }
 
-impl IntoRelay for RelayWrapper {
-    fn into_relay(self, circuit: NonZeroU32) -> Relay {
-        Relay {
-            circuit,
-            cell: self.0,
+fn with_cmd_stream(
+    mut data: RelayWrapper,
+    orig_version: Option<RelayVersion>,
+    version: RelayVersion,
+    cmd: u8,
+    stream: u16,
+    circuit: NonZeroU32,
+) -> Result<Relay, errors::CellLengthOverflowError> {
+    Ok(match version {
+        RelayVersion::V0 => {
+            match orig_version {
+                None => v0::to_v0(&mut data)?,
+                Some(RelayVersion::V0) => (),
+                Some(RelayVersion::V1) => v1::v1_to_v0(&mut data)?,
+            }
+            with_cmd_stream_v0(data, cmd, stream, circuit)
         }
-    }
+        RelayVersion::V1 => {
+            match orig_version {
+                None => v1::to_v1(&mut data)?,
+                Some(RelayVersion::V0) => v1::v0_to_v1(&mut data)?,
+                Some(RelayVersion::V1) => (),
+            }
+            with_cmd_stream_v1(data, cmd, stream, circuit)
+        }
+    })
 }
 
-fn with_cmd_stream(mut data: RelayWrapper, cmd: u8, stream: u16, circuit: NonZeroU32) -> Relay {
+fn with_cmd_stream_v0(mut data: RelayWrapper, cmd: u8, stream: u16, circuit: NonZeroU32) -> Relay {
+    use v0::RelayExt as _;
     data.set_command(cmd);
     data.set_stream(stream);
     data.fill_padding();
     data.into_relay(circuit)
 }
 
+fn with_cmd_stream_v1(mut data: RelayWrapper, cmd: u8, stream: u16, circuit: NonZeroU32) -> Relay {
+    use v1::RelayExt as _;
+    data.set_command(cmd);
+    data.set_stream(stream);
+    data.fill_padding();
+    data.into_relay(circuit)
+}
+
+fn get_stream_if_command_match(
+    relay: &Option<Relay>,
+    version: RelayVersion,
+    cmd: u8,
+) -> Result<Option<NonZeroU16>, errors::CellFormatError> {
+    NonZeroU16::new(match (relay, version) {
+        (Some(r), RelayVersion::V0) if v0::RelayExt::command(r) == cmd => v0::RelayExt::stream(r),
+        (Some(r), RelayVersion::V1) if v1::RelayExt::command(r) == cmd => v1::RelayExt::stream(r),
+        _ => return Ok(None),
+    })
+    .ok_or(errors::CellFormatError)
+    .map(Some)
+}
+
+/// Version 0.0.1
+///
+/// Not actually a valid version, it only store length and data.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Debug, PartialEq, Eq)]
+#[repr(C)]
+struct RelayV001 {
+    data: [u8; const { FIXED_CELL_SIZE - 2 }],
+    len: U16,
+}
+
+impl RelayV001 {
+    fn from_ref(v: &RelayWrapper) -> &Self {
+        transmute_ref!(AsRef::<[u8; FIXED_CELL_SIZE]>::as_ref(v))
+    }
+
+    fn from_mut(v: &mut RelayWrapper) -> &mut Self {
+        transmute_mut!(AsMut::<[u8; FIXED_CELL_SIZE]>::as_mut(v))
+    }
+
+    fn data(&self) -> &[u8] {
+        &self.data[..self.len.get() as usize]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[track_caller]
-    pub(crate) fn assert_relay_eq(a: &impl RelayLike, b: &impl RelayLike) {
-        let a = cast_cell(a);
-        let b = cast_cell(b);
+    use proptest::prelude::*;
 
-        assert_eq!(a.header, b.header);
-
-        let a_data = &a.data[..usize::from(a.header.len.get())];
-        let b_data = &b.data[..usize::from(b.header.len.get())];
-        assert_eq!(a_data, b_data);
+    pub(crate) fn strat_relay_version() -> impl Strategy<Value = RelayVersion> {
+        prop_oneof![Just(RelayVersion::V0), Just(RelayVersion::V1),]
     }
 }

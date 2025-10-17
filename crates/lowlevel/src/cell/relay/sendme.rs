@@ -5,7 +5,7 @@ use zerocopy::byteorder::big_endian::U16;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned, transmute_ref};
 
 use super::{
-    IntoRelay, RELAY_DATA_LENGTH, Relay, RelayLike, RelayWrapper, TryFromRelay, take_if,
+    IntoRelay, Relay, RelayV001, RelayVersion, RelayWrapper, TryFromRelay, take_if, v0, v1,
     with_cmd_stream,
 };
 use crate::cache::Cachable;
@@ -28,13 +28,6 @@ struct AuthSendme {
     digest: [u8; 20],
 }
 
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
-#[repr(C)]
-struct AuthSendmePad {
-    data: AuthSendme,
-    pad: [u8; const { RELAY_DATA_LENGTH - size_of::<AuthSendme>() }],
-}
-
 /// Represents a RELAY_SENDME cell.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RelaySendme {
@@ -42,6 +35,8 @@ pub struct RelaySendme {
     pub stream: u16,
     /// Cell payload.
     data: RelayWrapper,
+    /// Relay version.
+    version: Option<RelayVersion>,
 }
 
 impl AsRef<FixedCell> for RelaySendme {
@@ -57,23 +52,34 @@ impl Cachable for RelaySendme {
 }
 
 impl TryFromRelay for RelaySendme {
-    fn try_from_relay(relay: &mut Option<Relay>) -> Result<Option<Self>, errors::CellFormatError> {
-        if !matches!(relay, Some(r) if r.command() == Self::ID) {
-            return Ok(None);
-        }
-
-        take_if(relay, Self::check).map(|v| {
-            v.map(|data| Self {
-                stream: data.stream(),
+    fn try_from_relay(
+        relay: &mut Option<Relay>,
+        version: RelayVersion,
+    ) -> Result<Option<Self>, errors::CellFormatError> {
+        take_if(relay, Self::ID, version, Self::check).map(|v| {
+            v.map(|(stream, data)| Self {
+                stream,
                 data,
+                version: Some(version),
             })
         })
     }
 }
 
 impl IntoRelay for RelaySendme {
-    fn into_relay(self, circuit: NonZeroU32) -> Relay {
-        with_cmd_stream(self.data, Self::ID, self.stream, circuit)
+    fn try_into_relay(
+        self,
+        circuit: NonZeroU32,
+        version: RelayVersion,
+    ) -> Result<Relay, errors::CellLengthOverflowError> {
+        with_cmd_stream(
+            self.data,
+            self.version,
+            version,
+            Self::ID,
+            self.stream,
+            circuit,
+        )
     }
 }
 
@@ -86,13 +92,27 @@ impl RelaySendme {
     /// # Safety
     ///
     /// Cell must be a valid RELAY_SENDME cell.
-    pub unsafe fn from_cell(cell: FixedCell) -> Self {
+    pub unsafe fn from_cell(cell: FixedCell, version: RelayVersion) -> Self {
         let data = RelayWrapper::from(cell);
-        debug_assert!(Self::check(data.data()));
+        let (command, stream, a) = match version {
+            RelayVersion::V0 => (
+                v0::RelayExt::command(&data),
+                v0::RelayExt::stream(&data),
+                v0::RelayExt::data(&data),
+            ),
+            RelayVersion::V1 => (
+                v1::RelayExt::command(&data),
+                v1::RelayExt::stream(&data),
+                v1::RelayExt::data(&data),
+            ),
+        };
+        debug_assert_eq!(command, Self::ID);
+        debug_assert!(Self::check(a));
 
         Self {
-            stream: data.stream(),
+            stream,
             data,
+            version: Some(version),
         }
     }
 
@@ -113,17 +133,24 @@ impl RelaySendme {
     /// ```
     pub fn new_unauth(cell: FixedCell) -> Self {
         let mut data = RelayWrapper::from(cell);
-        data.set_data(
+
+        let RelayV001 { len, data: a } = RelayV001::from_mut(&mut data);
+        a[..size_of::<SendmeHeader>()].copy_from_slice(
             SendmeHeader {
                 ty: 0,
                 len: 0.into(),
             }
             .as_bytes(),
         );
+        len.set(size_of::<SendmeHeader>() as _);
 
-        debug_assert!(Self::check(data.data()));
+        debug_assert!(Self::check(&a[..len.get() as usize]));
 
-        Self { stream: 0, data }
+        Self {
+            stream: 0,
+            data,
+            version: None,
+        }
     }
 
     /// Creates new authenticated sendme cell.
@@ -145,7 +172,9 @@ impl RelaySendme {
     /// ```
     pub fn new_auth(cell: FixedCell, digest: [u8; 20]) -> Self {
         let mut data = RelayWrapper::from(cell);
-        data.set_data(
+
+        let RelayV001 { len, data: a } = RelayV001::from_mut(&mut data);
+        a[..size_of::<AuthSendme>()].copy_from_slice(
             AuthSendme {
                 header: SendmeHeader {
                     ty: 1,
@@ -155,10 +184,15 @@ impl RelaySendme {
             }
             .as_bytes(),
         );
+        len.set(size_of::<AuthSendme>() as _);
 
-        debug_assert!(Self::check(data.data()));
+        debug_assert!(Self::check(&a[..len.get() as usize]));
 
-        Self { stream: 0, data }
+        Self {
+            stream: 0,
+            data,
+            version: None,
+        }
     }
 
     /// Creates new stream-level sendme cell.
@@ -184,13 +218,13 @@ impl RelaySendme {
     /// ```
     pub fn new_stream_unauth(cell: FixedCell, stream: NonZeroU16) -> Self {
         let mut data = RelayWrapper::from(cell);
-        data.set_data(&[]);
 
-        debug_assert!(Self::check(data.data()));
+        RelayV001::from_mut(&mut data).len.set(0);
 
         Self {
             stream: stream.into(),
             data,
+            version: None,
         }
     }
 
@@ -220,17 +254,34 @@ impl RelaySendme {
 
     /// Get SENDME data.
     pub fn data(&self) -> Option<SendmeData> {
-        if self.data.len() == 0 {
+        const MAX_SIZE: usize = size_of::<AuthSendme>();
+
+        let (l, a) = match self.version {
+            None => {
+                let RelayV001 { len, data } = RelayV001::from_ref(&self.data);
+                (len.get(), &data[..MAX_SIZE])
+            }
+            Some(RelayVersion::V0) => (
+                v0::RelayExt::len(&self.data),
+                &v0::RelayExt::data_padding(&self.data)[..MAX_SIZE],
+            ),
+            Some(RelayVersion::V1) => (
+                v1::RelayExt::len(&self.data),
+                &v1::RelayExt::data_padding(&self.data)[..MAX_SIZE],
+            ),
+        };
+        if l == 0 {
             return None;
         }
 
-        Some(match self.data.data_padding() {
-            [0, ..] => SendmeData::Unauth,
-            data @ [1, ..] => {
-                let p: &AuthSendmePad = transmute_ref!(data);
-                SendmeData::Auth(p.data.digest)
-            }
-            _ => unreachable!("data must be valid"),
+        let a = <&[u8; MAX_SIZE]>::try_from(a).expect("array size must be MAX_LEN");
+
+        Some(match transmute_ref!(a) {
+            AuthSendme {
+                header: SendmeHeader { ty: 0, .. },
+                ..
+            } => SendmeData::Unauth,
+            AuthSendme { digest, .. } => SendmeData::Auth(*digest),
         })
     }
 
@@ -275,7 +326,7 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use crate::cell::relay::tests::assert_relay_eq;
+    use crate::cell::relay::v0::tests::assert_relay_eq;
 
     fn strat() -> impl Strategy<Value = SendmeData> {
         prop_oneof![
@@ -293,7 +344,7 @@ mod tests {
             0,
             &[0, 0, 1, 1],
         );
-        let cell = RelaySendme::try_from_relay(&mut Some(cell))
+        let cell = RelaySendme::try_from_relay(&mut Some(cell), RelayVersion::V0)
             .unwrap()
             .unwrap();
 
@@ -311,7 +362,7 @@ mod tests {
                 1, 0, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
             ],
         );
-        let cell = RelaySendme::try_from_relay(&mut Some(cell))
+        let cell = RelaySendme::try_from_relay(&mut Some(cell), RelayVersion::V0)
             .unwrap()
             .unwrap();
 
@@ -345,12 +396,12 @@ mod tests {
             let cell = Relay::new(FixedCell::default(), NonZeroU32::new(1).unwrap(), RelaySendme::ID, 0, &v);
             drop(v);
             let data_ = RelayWrapper::from(AsRef::<FixedCell>::as_ref(&cell).clone());
-            let cell = RelaySendme::try_from_relay(&mut Some(cell)).unwrap().unwrap();
+            let cell = RelaySendme::try_from_relay(&mut Some(cell), RelayVersion::V0).unwrap().unwrap();
 
             assert_eq!(cell.stream, 0);
             assert_eq!(cell.data(), Some(data));
 
-            let cell = cell.into_relay(NonZeroU32::new(1).unwrap());
+            let cell = cell.try_into_relay(NonZeroU32::new(1).unwrap(), RelayVersion::V0).unwrap();
 
             assert_relay_eq(&cell, &data_);
         }
@@ -372,7 +423,7 @@ mod tests {
                 0,
                 &[1, 0, n as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][..n + 3],
             ));
-            RelaySendme::try_from_relay(&mut cell).unwrap_err();
+            RelaySendme::try_from_relay(&mut cell, RelayVersion::V0).unwrap_err();
             cell.unwrap();
         }
     }

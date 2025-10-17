@@ -412,3 +412,10 @@ impl NetdocParseError {
         }
     }
 }
+
+/// Cell length overflow.
+#[derive(Error)]
+#[error("cell length overflows")]
+pub struct CellLengthOverflowError;
+
+display2debug! {CellLengthOverflowError}
