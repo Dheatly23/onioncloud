@@ -257,6 +257,7 @@ pub fn extract_rsa_from_x509(
         .map_err(|_| errors::CertFormatError)?
         .subject_public_key_info();
     let pk = RsaPublicKey::from_public_key_der(&spki).map_err(|_| errors::CertFormatError)?;
+    drop(spki);
     let id: RelayId = Sha1::digest(
         pk.to_pkcs1_der()
             .map_err(|_| errors::CertFormatError)?
@@ -273,18 +274,34 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use rand::prelude::*;
     use rsa::RsaPrivateKey;
-    use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+    use rsa::pkcs1::DecodeRsaPrivateKey;
 
     use crate::util::print_hex;
 
     #[test]
     fn test_rsa_cert() {
         let mut rng = ThreadRng::default();
-        let private_key = RsaPrivateKey::new(&mut rng, 1024).unwrap();
-        println!(
-            "Private key:\n{}",
-            *private_key.to_pkcs8_pem(LineEnding::LF).unwrap()
-        );
+        // Stolen from arti test data :)
+        let private_key = RsaPrivateKey::from_pkcs1_pem(
+            r"
+-----BEGIN RSA PRIVATE KEY-----
+MIICXAIBAAKBgQDNg5E85lyFRFXHVQRs+cOHFuLh9iPs/mbvDbGY0RBAUyiSjrj8
+9kEUqWPW5TLDxiS4BFihZz5jvGu1wncMMxxc/d6F4fhh0QRl4TcOwI7pi3jZKHWS
++x5/JcRZkhbGjVgZ65NbzZTHQRjvJAfrsGvGUUaOw8nefp/rgmEEfdw1hQIDAQAB
+AoGAUK0IU87enRYxUjnGrfzyS9KpKCkW+073G3rVr/bKGWZLtBTA+9SzwaepYM/C
+uOXMvkw+esXr0P1DjyuSzkA2LnoeTxsznKvb59roUTMVh13b1VmHmySMBSX4+i90
+jUMpGK9di83KMqLL1HGsmI6iLzNEjFc1B2WBd8jNFgsJl6ECQQD9rhZDhtf7Tn8E
+MbNMIrPSge1PSw05f7SL+nEvRpS/G0TiLdnmBl2hrV/AHITlqgQMZgvpOOnRoEq9
+cbWHf29pAkEAz2S24+bZBGxMv/GGScwACPSpEOPdxKdSd39gPLHq5na/FLzpgddE
+U+uIaO8rpzIkm0+LUv6+vO5NEmHDH/WtvQJALquNawTuzUwmsAXYv6QOwyamGxVq
+rG5jL/F2S0VH7lS8+oOG9/up1CnKWNSmWn5J2mIXxON0mN1Ngsbdp7z5KQJADOlI
+OYf1msDjRk/S/GUm22ff3p1RAR0plSbo5t5ssUxTOQdJwjuUlWTkaSP6o74LaV/a
+XKBfX4O2aJ6Ndz/kQQJBAKC9k6WHAbw6CF87TMEldlPXqcfeT3qswhNJXgkt1zTY
+SrdzFgs07XrrqKVgMcO5qmdWeVFbUo/0fbgGVLNQDgQ=
+-----END RSA PRIVATE KEY-----
+",
+        )
+        .unwrap();
         let public_key = private_key.to_public_key();
 
         // Sign
@@ -320,6 +337,7 @@ mod tests {
     #[test]
     fn test_ed_cert() {
         let mut rng = ThreadRng::default();
+        // Ed25519 key generation should be fast enough (unlike RSA)
         let private_key = SigningKey::generate(&mut rng);
         println!("Private key:{}", print_hex(private_key.as_bytes()));
         let public_key = private_key.verifying_key();

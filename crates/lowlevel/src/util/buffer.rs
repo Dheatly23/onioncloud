@@ -598,6 +598,8 @@ mod tests {
     use proptest::prelude::*;
     use proptest::strategy::LazyJust;
     use proptest_state_machine::*;
+    use test_log::test;
+    use tracing::info;
 
     static EXAMPLE_DATA: &[u8] = b"Never gonna give you up";
 
@@ -627,7 +629,7 @@ mod tests {
     #[test]
     fn test_buffer_read() {
         for i in 0..=EXAMPLE_DATA.len() * 2 {
-            println!("Trying: {i}");
+            info!("Trying: {i}");
             let mut buf = Buffer::new(EXAMPLE_DATA);
 
             let n = i.min(EXAMPLE_DATA.len());
@@ -642,7 +644,7 @@ mod tests {
     #[test]
     fn test_buffer_read_exact() {
         for i in 0..=EXAMPLE_DATA.len() {
-            println!("Trying: {i}");
+            info!("Trying: {i}");
             let mut buf = Buffer::new(EXAMPLE_DATA);
 
             let mut v = vec![0; i];
@@ -656,7 +658,7 @@ mod tests {
     #[test]
     fn test_buffer_read_exact_fail() {
         for i in EXAMPLE_DATA.len() + 1..=EXAMPLE_DATA.len() * 2 {
-            println!("Trying: {i}");
+            info!("Trying: {i}");
             let mut buf = Buffer::new(EXAMPLE_DATA);
 
             let mut v = vec![0; i];
