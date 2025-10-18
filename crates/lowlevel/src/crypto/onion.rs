@@ -548,12 +548,9 @@ impl OnionLayerNtor {
         circuit: NonZeroU32,
         cache: &C,
     ) -> Cached<Create2, C> {
-        cache.cache(Create2::new(
-            cache.get_cached(),
-            circuit,
-            2,
-            self.client_data().as_ref(),
-        ))
+        cache.cache(
+            Create2::new(cache.get_cached(), circuit, 2, self.client_data().as_ref()).unwrap(),
+        )
     }
 
     /// Starts handshake as server.
@@ -590,7 +587,10 @@ impl OnionLayerNtor {
         cell: FixedCell,
     ) -> Result<(OnionLayerData, Created2), errors::CircuitHandshakeError> {
         let (derived, data) = Self::derive_server_inner(id, sk, input.data())?;
-        Ok((derived, Created2::new(cell, input.circuit, data.as_ref())))
+        Ok((
+            derived,
+            Created2::new(cell, input.circuit, data.as_ref()).unwrap(),
+        ))
     }
 
     /// Starts handshake as server.
@@ -890,7 +890,8 @@ impl OnionLayerNtor3 {
                 client_msg,
                 &ret.client_msg_mac(),
             ],
-        );
+        )
+        .unwrap();
         Ok((ret, cell))
     }
 
@@ -957,14 +958,13 @@ impl OnionLayerNtor3 {
         let (server, client_msg) = Self::derive_server_inner(id, sk, cell.data_mut())?;
         let mut server_msg = server_fn(client_msg)?;
         let (derived, data) = server.finalize(server_msg.as_mut())?;
-        Ok((
-            derived,
-            Created2::new_multipart(
-                cache.get_cached(),
-                circuit,
-                [data.as_ref(), server_msg.as_ref()],
-            ),
-        ))
+        let cell = Created2::new_multipart(
+            cache.get_cached(),
+            circuit,
+            [data.as_ref(), server_msg.as_ref()],
+        )
+        .unwrap();
+        Ok((derived, cell))
     }
 
     /// Same as [`derive_server`], but with [`Cached`].

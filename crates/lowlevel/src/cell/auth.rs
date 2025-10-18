@@ -73,22 +73,29 @@ impl AuthChallenge {
     /// Note that methods is not deduplicated nor checked for validity (e.g zero is not allowed).
     /// It is the responsibility of implementer to do all that.
     ///
-    /// # Panics
+    /// # Error
     ///
-    /// Panics if methods length is > 65535.
+    /// Errors if data does not fit the cell (eg. methods length is > 65535).
     ///
     /// # Example
     ///
     /// ```
     /// use onioncloud_lowlevel::cell::auth::AuthChallenge;
     ///
-    /// let cell = AuthChallenge::new(&[0; 32], &[1, 2, 3]);
+    /// let cell = AuthChallenge::new(&[0; 32], &[1, 2, 3]).unwrap();
     /// ```
-    pub fn new(challenge: &[u8; 32], methods: &[u16]) -> Self {
-        let n = u16::try_from(methods.len()).expect("too many methods");
+    pub fn new(
+        challenge: &[u8; 32],
+        methods: &[u16],
+    ) -> Result<Self, errors::CellLengthOverflowError> {
+        let n = u16::try_from(methods.len()).map_err(|_| errors::CellLengthOverflowError)?;
 
+        let len = size_of::<AuthChallengeHeader>() + size_of::<U16>() * methods.len();
+        if len > 65535 {
+            return Err(errors::CellLengthOverflowError);
+        }
         // TODO: Replace this with equivalent of new_box_zeroed_with_elems but with Vec<u8>
-        let mut v = vec![0; size_of::<AuthChallengeHeader>() + size_of::<U16>() * methods.len()];
+        let mut v = vec![0; len];
         let (header, rest) =
             AuthChallengeHeader::mut_from_prefix(&mut v).expect("data must be valid");
         header.challenge = *challenge;
@@ -101,7 +108,7 @@ impl AuthChallenge {
         }
 
         // SAFETY: Data is valid
-        unsafe { Self::from_cell(VariableCell::from(v)) }
+        unsafe { Ok(Self::from_cell(VariableCell::from(v))) }
     }
 
     /// Gets the challenge string.
@@ -227,18 +234,34 @@ impl Authenticate {
     }
 
     /// Create AUTHENTICATE cell.
-    pub fn new(auth_type: u16, data: &[u8]) -> Self {
-        let n = u16::try_from(data.len()).expect("data is too long");
+    ///
+    /// # Error
+    ///
+    /// Errors if data does not fit the cell.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::cell::auth::Authenticate;
+    ///
+    /// let cell = Authenticate::new(0, &[1, 2, 3]).unwrap();
+    /// ```
+    pub fn new(auth_type: u16, data: &[u8]) -> Result<Self, errors::CellLengthOverflowError> {
+        let n = u16::try_from(data.len()).map_err(|_| errors::CellLengthOverflowError)?;
 
+        let len = size_of::<AuthenticateTy<[u8; 0]>>() + data.len();
+        if len > 65535 {
+            return Err(errors::CellLengthOverflowError);
+        }
         // TODO: Replace this with equivalent of new_box_zeroed_with_elems but with Vec<u8>
-        let mut v = vec![0; size_of::<AuthenticateTy<[u8; 0]>>() + data.len()];
+        let mut v = vec![0; len];
         let p = AuthTy::mut_from_bytes_with_elems(&mut v, data.len()).expect("data must be valid");
         p.ty.set(auth_type);
         p.length.set(n);
         p.data.copy_from_slice(data);
 
         // SAFETY: Data is valid
-        unsafe { Self::from_cell(VariableCell::from(v)) }
+        unsafe { Ok(Self::from_cell(VariableCell::from(v))) }
     }
 
     /// Gets authentication type.
@@ -295,14 +318,14 @@ mod tests {
     proptest! {
         #[test]
         fn test_auth_challenge_from_list(challenge: [u8; 32], methods: Vec<u16>) {
-            let cell = AuthChallenge::new(&challenge, &methods);
+            let cell = AuthChallenge::new(&challenge, &methods).unwrap();
             assert_eq!(*cell.challenge(), challenge);
             assert_eq!(cell.methods(), methods);
         }
 
         #[test]
         fn test_auth_challenge_content(challenge: [u8; 32], methods: Vec<u16>) {
-            let data = AuthChallenge::new(&challenge, &methods).into_inner();
+            let data = AuthChallenge::new(&challenge, &methods).unwrap().into_inner();
             assert_eq!(
                 data.data(),
                 challenge
@@ -314,7 +337,7 @@ mod tests {
 
         #[test]
         fn test_authenticate(auth_type: u16, data in vec(any::<u8>(), 0..256)) {
-            let cell = Authenticate::new(auth_type, &data);
+            let cell = Authenticate::new(auth_type, &data).unwrap();
             assert_eq!(cell.auth_type(), auth_type);
             assert_eq!(cell.data(), data);
         }

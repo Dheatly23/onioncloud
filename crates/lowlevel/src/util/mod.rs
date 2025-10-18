@@ -424,20 +424,6 @@ pub(crate) fn option_ord_min<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
     }
 }
 
-pub(crate) fn fill_data_multipart<'a>(
-    in_: impl IntoIterator<Item = &'a [u8]>,
-    out: &mut [u8],
-) -> usize {
-    let (mut l, mut out) = (0, out);
-    for s in in_ {
-        let d;
-        (d, out) = out.split_at_mut(s.len());
-        d.copy_from_slice(s);
-        l += s.len();
-    }
-    l
-}
-
 pub(crate) const fn c_max_usize(a: usize, b: usize) -> usize {
     if a >= b { a } else { b }
 }

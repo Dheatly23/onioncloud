@@ -12,7 +12,6 @@ use super::{
 };
 use crate::crypto::Sha1Output;
 use crate::errors;
-use crate::util::fill_data_multipart;
 
 /// CREATE2 cell header.
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -144,19 +143,28 @@ impl Create2 {
     /// - `ty` : Handshake type.
     /// - `data` : Handshake data.
     ///
-    /// # Panics
+    /// # Error
     ///
-    /// Panics if data does not fit the cell.
-    pub fn new(mut cell: FixedCell, circuit: NonZeroU32, ty: u16, data: &[u8]) -> Self {
+    /// Errors if data does not fit the cell.
+    pub fn new(
+        mut cell: FixedCell,
+        circuit: NonZeroU32,
+        ty: u16,
+        data: &[u8],
+    ) -> Result<Self, errors::CellLengthOverflowError> {
         let Create2Cell { header, data: out } = transmute_mut!(cell.data_mut());
-        out[..data.len()].copy_from_slice(data);
+        out.get_mut(..data.len())
+            .ok_or(errors::CellLengthOverflowError)?
+            .copy_from_slice(data);
         header.ty.set(ty);
-        header
-            .len
-            .set(data.len().try_into().expect("data must fit cell"));
+        header.len.set(
+            data.len()
+                .try_into()
+                .map_err(|_| errors::CellLengthOverflowError)?,
+        );
 
         // SAFETY: Data is valid
-        unsafe { Self::from_cell(circuit, cell) }
+        unsafe { Ok(Self::from_cell(circuit, cell)) }
     }
 
     /// Creates new CREATE2 cell with multipart data.
@@ -168,22 +176,36 @@ impl Create2 {
     /// - `ty` : Handshake type.
     /// - `data` : Handshake data in multiple byte slices.
     ///
-    /// # Panics
+    /// # Error
     ///
-    /// Panics if data does not fit the cell.
-    pub fn new_multipart<'a>(
+    /// Errors if data does not fit the cell.
+    pub fn new_multipart<T: AsRef<[u8]>>(
         mut cell: FixedCell,
         circuit: NonZeroU32,
         ty: u16,
-        data: impl IntoIterator<Item = &'a [u8]>,
-    ) -> Self {
+        data: impl IntoIterator<Item = T>,
+    ) -> Result<Self, errors::CellLengthOverflowError> {
         let Create2Cell { header, data: out } = transmute_mut!(cell.data_mut());
+
+        let mut o = &mut out[..];
+        for v in data {
+            let v = v.as_ref();
+            let s;
+            (s, o) = o
+                .split_at_mut_checked(v.len())
+                .ok_or(errors::CellLengthOverflowError)?;
+            s.copy_from_slice(v);
+        }
+        let end = o.len();
         header.ty.set(ty);
-        let l = fill_data_multipart(data, out);
-        header.len.set(l.try_into().expect("data must fit cell"));
+        header.len.set(
+            (out.len() - end)
+                .try_into()
+                .map_err(|_| errors::CellLengthOverflowError)?,
+        );
 
         // SAFETY: Data is valid
-        unsafe { Self::from_cell(circuit, cell) }
+        unsafe { Ok(Self::from_cell(circuit, cell)) }
     }
 
     /// Gets handshake type.
@@ -220,35 +242,48 @@ impl Create2 {
 
     /// Set handshake data.
     ///
-    /// # Panics
+    /// # Error
     ///
-    /// Panics if data does not fit the cell.
-    pub fn set_data(&mut self, data: &[u8]) {
+    /// Errors if data does not fit the cell.
+    pub fn set_data(&mut self, data: &[u8]) -> Result<(), errors::CellLengthOverflowError> {
         let Create2Cell { header, data: out } = self.cast_mut();
-        out[..data.len()].copy_from_slice(data);
-        header
-            .len
-            .set(data.len().try_into().expect("data must fit cell"));
+        out.get_mut(..data.len())
+            .ok_or(errors::CellLengthOverflowError)?
+            .copy_from_slice(data);
+        header.len.set(
+            data.len()
+                .try_into()
+                .map_err(|_| errors::CellLengthOverflowError)?,
+        );
+        Ok(())
     }
 
     /// Set handshake data in multipart.
     ///
-    /// # Panics
+    /// # Error
     ///
-    /// Panics if data does not fit the cell.
-    pub fn set_data_multipart(&mut self, data: &[&[u8]]) {
+    /// Errors if data does not fit the cell.
+    pub fn set_data_multipart<T: AsRef<[u8]>>(
+        &mut self,
+        data: impl IntoIterator<Item = T>,
+    ) -> Result<(), errors::CellLengthOverflowError> {
         let Create2Cell { header, data: out } = self.cast_mut();
 
-        let mut len = 0;
-        let mut out = &mut out[..];
+        let mut o = &mut out[..];
         for v in data {
-            let (a, b) = out.split_at_mut(v.len());
-            a.copy_from_slice(v);
-            out = b;
-            len += v.len();
+            let v = v.as_ref();
+            let s;
+            (s, o) = out.split_at_mut(v.len());
+            s.copy_from_slice(v);
         }
+        let end = o.len();
+        let len = out.len() - end;
 
-        header.len.set(len.try_into().expect("data must fit cell"));
+        header.len.set(
+            len.try_into()
+                .map_err(|_| errors::CellLengthOverflowError)?,
+        );
+        Ok(())
     }
 
     /// Unwraps into inner [`FixedCell`].
@@ -346,18 +381,26 @@ impl Created2 {
     /// - `circuit` : Circuit ID.
     /// - `data` : Handshake data.
     ///
-    /// # Panics
+    /// # Error
     ///
-    /// Panics if data does not fit the cell.
-    pub fn new(mut cell: FixedCell, circuit: NonZeroU32, data: &[u8]) -> Self {
+    /// Errors if data does not fit the cell.
+    pub fn new(
+        mut cell: FixedCell,
+        circuit: NonZeroU32,
+        data: &[u8],
+    ) -> Result<Self, errors::CellLengthOverflowError> {
         let Created2Cell { header, data: out } = transmute_mut!(cell.data_mut());
-        out[..data.len()].copy_from_slice(data);
-        header
-            .len
-            .set(data.len().try_into().expect("data must fit cell"));
+        out.get_mut(..data.len())
+            .ok_or(errors::CellLengthOverflowError)?
+            .copy_from_slice(data);
+        header.len.set(
+            data.len()
+                .try_into()
+                .map_err(|_| errors::CellLengthOverflowError)?,
+        );
 
         // SAFETY: Data is valid
-        unsafe { Self::from_cell(circuit, cell) }
+        unsafe { Ok(Self::from_cell(circuit, cell)) }
     }
 
     /// Creates new CREATED2 cell with multipart data.
@@ -368,20 +411,34 @@ impl Created2 {
     /// - `circuit` : Circuit ID.
     /// - `data` : Handshake data in multiple byte slices.
     ///
-    /// # Panics
+    /// # Error
     ///
-    /// Panics if data does not fit the cell.
-    pub fn new_multipart<'a>(
+    /// Errors if data does not fit the cell.
+    pub fn new_multipart<T: AsRef<[u8]>>(
         mut cell: FixedCell,
         circuit: NonZeroU32,
-        data: impl IntoIterator<Item = &'a [u8]>,
-    ) -> Self {
+        data: impl IntoIterator<Item = T>,
+    ) -> Result<Self, errors::CellLengthOverflowError> {
         let Created2Cell { header, data: out } = transmute_mut!(cell.data_mut());
-        let l = fill_data_multipart(data, out);
-        header.len.set(l.try_into().expect("data must fit cell"));
+
+        let mut o = &mut out[..];
+        for v in data {
+            let v = v.as_ref();
+            let s;
+            (s, o) = o
+                .split_at_mut_checked(v.len())
+                .ok_or(errors::CellLengthOverflowError)?;
+            s.copy_from_slice(v);
+        }
+        let end = o.len();
+        header.len.set(
+            (out.len() - end)
+                .try_into()
+                .map_err(|_| errors::CellLengthOverflowError)?,
+        );
 
         // SAFETY: Data is valid
-        unsafe { Self::from_cell(circuit, cell) }
+        unsafe { Ok(Self::from_cell(circuit, cell)) }
     }
 
     /// Gets handshake length.

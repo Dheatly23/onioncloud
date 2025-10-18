@@ -127,12 +127,12 @@ impl From<Certs> for Cell {
 
 /// Creates CERTS cell from iterator of [`Cert`].
 ///
-/// # Panics
+/// # Error
 ///
-/// Panics if one of the following happened:
+/// Errors if one of the following happened:
 /// - Number of certificates exceeds 255.
 /// - Length of _any_ certificate exceeds 65535.
-impl<T: AsRef<[u8]>> FromIterator<Cert<T>> for Certs {
+impl<T: AsRef<[u8]>> FromIterator<Cert<T>> for Result<Certs, errors::CellLengthOverflowError> {
     fn from_iter<It: IntoIterator<Item = Cert<T>>>(it: It) -> Self {
         let mut buf = vec![0];
         let mut n = 0u8;
@@ -141,15 +141,9 @@ impl<T: AsRef<[u8]>> FromIterator<Cert<T>> for Certs {
             let ty = c.ty;
             let data = c.data.as_ref();
 
-            n = n.checked_add(1).expect("too many certificates!");
+            n = n.checked_add(1).ok_or(errors::CellLengthOverflowError)?;
 
-            let Ok(l) = u16::try_from(data.len()) else {
-                panic!(
-                    "certificate {} is too long! (length: {})",
-                    n - 1,
-                    data.len()
-                );
-            };
+            let l = u16::try_from(data.len()).map_err(|_| errors::CellLengthOverflowError)?;
             let [a, b] = l.to_be_bytes();
 
             buf.reserve(3 + data.len());
@@ -159,7 +153,7 @@ impl<T: AsRef<[u8]>> FromIterator<Cert<T>> for Certs {
 
         buf[0] = n;
         // SAFETY: Data is valid CERTS payload
-        unsafe { Self::new(VariableCell::from(buf)) }
+        unsafe { Ok(Certs::from_cell(VariableCell::from(buf))) }
     }
 }
 
@@ -176,7 +170,7 @@ impl TryFromCell for Certs {
         if c.circuit != 0 {
             return Err(errors::CellFormatError);
         }
-        to_variable_with(cell, Self::check).map(|v| v.map(|v| unsafe { Self::new(v) }))
+        to_variable_with(cell, Self::check).map(|v| v.map(|v| unsafe { Self::from_cell(v) }))
     }
 }
 
@@ -203,20 +197,35 @@ impl Certs {
     /// # Safety
     ///
     /// Data must be a valid CERTS cell.
-    pub unsafe fn new(data: VariableCell) -> Self {
+    pub unsafe fn from_cell(data: VariableCell) -> Self {
         debug_assert!(Self::check(data.data()));
         Self(data)
     }
 
-    /// Creates CERTS cell from certificates.
+    /// Creates CERTS cell from terator of certificates.
     ///
-    /// # Panics
+    /// # Error
     ///
-    /// Panics if one of the following happened:
+    /// Errors if one of the following happened:
     /// - Number of certificates exceeds 255.
     /// - Length of _any_ certificate exceeds 65535.
-    pub fn from_list<T: AsRef<[u8]>>(list: &[Cert<T>]) -> Self {
-        Self::from_iter(list.iter().map(Cert::as_ref))
+    pub fn try_from_iter<T: AsRef<[u8]>>(
+        it: impl IntoIterator<Item = Cert<T>>,
+    ) -> Result<Self, errors::CellLengthOverflowError> {
+        it.into_iter().collect()
+    }
+
+    /// Creates CERTS cell from certificates.
+    ///
+    /// # Error
+    ///
+    /// Errors if one of the following happened:
+    /// - Number of certificates exceeds 255.
+    /// - Length of _any_ certificate exceeds 65535.
+    pub fn try_from_list<T: AsRef<[u8]>>(
+        list: &[Cert<T>],
+    ) -> Result<Self, errors::CellLengthOverflowError> {
+        Self::try_from_iter(list.iter().map(Cert::as_ref))
     }
 
     /// Gets number of certificates.
@@ -320,41 +329,41 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_certs_too_long() {
         static DATA: &[u8] = &[0; 65536];
 
-        Certs::from_iter([Cert::new(0, DATA)]);
+        let ret = Certs::try_from_iter([Cert::new(0, DATA)]);
+        assert!(ret.is_err(), "expect error, got {ret:?}");
     }
 
     #[test]
-    #[should_panic]
     fn test_certs_too_many() {
-        Certs::from_iter(repeat_n(Cert::new(0, []), 256));
+        let ret = Certs::try_from_iter(repeat_n(Cert::new(0, []), 256));
+        assert!(ret.is_err(), "expect error, got {ret:?}");
     }
 
     #[test]
-    #[should_panic]
     fn test_certs_infinity() {
-        Certs::from_iter(repeat(Cert::new(0, [])));
+        let ret = Certs::try_from_iter(repeat(Cert::new(0, [])));
+        assert!(ret.is_err(), "expect error, got {ret:?}");
     }
 
     proptest! {
         #[test]
         fn test_certs_from_list(certs in certs_strat()) {
-            let cell = Certs::from_list(&certs.iter().map(|(t, v)| Cert::new(*t, &v[..])).collect::<Vec<_>>());
+            let cell = Certs::try_from_list(&certs.iter().map(|(t, v)| Cert::new(*t, &v[..])).collect::<Vec<_>>()).unwrap();
             assert_eq!(cell.into_iter().map(|v| (v.ty, Vec::from(v.data))).collect::<Vec<_>>(), certs);
         }
 
         #[test]
         fn test_certs_from_iter(certs in certs_strat()) {
-            let cell = Certs::from_iter(certs.iter().map(|(t, v)| Cert::new(*t, &v[..])));
+            let cell = Certs::try_from_iter(certs.iter().map(|(t, v)| Cert::new(*t, &v[..]))).unwrap();
             assert_eq!(cell.into_iter().map(|v| (v.ty, Vec::from(v.data))).collect::<Vec<_>>(), certs);
         }
 
         #[test]
         fn test_certs_content(certs in certs_strat()) {
-            let cell = Certs::from_iter(certs.iter().map(|(t, v)| Cert::new(*t, &v[..]))).into_inner();
+            let cell = Certs::try_from_iter(certs.iter().map(|(t, v)| Cert::new(*t, &v[..]))).unwrap().into_inner();
             let mut data = cell.data();
 
             assert_eq!(data[0] as usize, certs.len());
