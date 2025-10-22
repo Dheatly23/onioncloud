@@ -315,31 +315,165 @@ mod tests {
     use proptest::collection::vec;
     use proptest::prelude::*;
 
+    fn auth_challenge_strat() -> impl Strategy<Value = ([u8; 32], Vec<u16>)> {
+        (any::<[u8; 32]>(), vec(any::<u16>(), 0..(65535 - 34) / 2))
+    }
+
+    fn authenticate_strat() -> impl Strategy<Value = (u16, Vec<u8>)> {
+        (any::<u16>(), vec(any::<u8>(), 0..65535 - 4))
+    }
+
+    #[test]
+    fn test_auth_challenge_too_long() {
+        let ret = AuthChallenge::new(&[0; 32], &[0; (65536 - 34) / 2]);
+        assert!(ret.is_err(), "expect error, got {ret:?}");
+    }
+
+    #[test]
+    fn test_auth_challenge_nonzero_circuit() {
+        let ret = AuthChallenge::try_from_cell(&mut Some(Cell::from_variable(
+            CellHeader::new(1, 130),
+            vec![0; 34].into(),
+        )));
+        assert!(ret.is_err(), "expect error, got {ret:?}");
+    }
+
+    #[test]
+    fn test_auth_challenge_trailing() {
+        let cell = AuthChallenge::try_from_cell(&mut Some(Cell::from_variable(
+            CellHeader::new(0, 130),
+            vec![
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 1, 0, 1, 0, 1,
+            ]
+            .into(),
+        )))
+        .unwrap()
+        .unwrap();
+        assert_eq!(cell.len(), 1);
+        assert_eq!(cell.methods(), [1u16]);
+    }
+
+    #[test]
+    fn test_authenticate_too_long() {
+        let ret = Authenticate::new(0, &[0; 65536 - 4]);
+        assert!(ret.is_err(), "expect error, got {ret:?}");
+    }
+
+    #[test]
+    fn test_authenticate_nonzero_circuit() {
+        let ret = Authenticate::try_from_cell(&mut Some(Cell::from_variable(
+            CellHeader::new(1, 131),
+            vec![0, 0, 0, 2, 0, 1].into(),
+        )));
+        assert!(ret.is_err(), "expect error, got {ret:?}");
+    }
+
+    #[test]
+    fn test_authenticate_trailing() {
+        let cell = Authenticate::try_from_cell(&mut Some(Cell::from_variable(
+            CellHeader::new(0, 131),
+            vec![0, 0, 0, 2, 0, 1, 0, 1].into(),
+        )))
+        .unwrap()
+        .unwrap();
+        assert_eq!(cell.len(), 2);
+        assert_eq!(cell.data(), [0u8, 1]);
+    }
+
     proptest! {
         #[test]
-        fn test_auth_challenge_from_list(challenge: [u8; 32], methods: Vec<u16>) {
+        fn test_auth_challenge_new((challenge, methods) in auth_challenge_strat()) {
             let cell = AuthChallenge::new(&challenge, &methods).unwrap();
+            assert_eq!(*cell.challenge(), challenge);
+            assert_eq!(cell.methods(), methods);
+            assert_eq!(
+                cell.0.data(),
+                challenge
+                    .into_iter()
+                    .chain((methods.len() as u16).to_be_bytes())
+                    .chain(methods.into_iter().flat_map(|v| v.to_be_bytes()))
+                    .collect::<Vec<_>>(),
+                );
+        }
+
+        #[test]
+        fn test_auth_challenge_from_cell((challenge, methods) in auth_challenge_strat()) {
+            let mut data = Vec::with_capacity(34 + methods.len() * 2);
+            data.extend(challenge);
+            data.extend((methods.len() as u16).to_be_bytes());
+            data.extend(methods.iter().flat_map(|v| v.to_be_bytes()));
+
+            let cell = AuthChallenge::try_from_cell(
+                &mut Some(Cell::from_variable(CellHeader::new(0, 130), data.into()))
+            ).unwrap().unwrap();
             assert_eq!(*cell.challenge(), challenge);
             assert_eq!(cell.methods(), methods);
         }
 
         #[test]
-        fn test_auth_challenge_content(challenge: [u8; 32], methods: Vec<u16>) {
-            let data = AuthChallenge::new(&challenge, &methods).unwrap().into_inner();
-            assert_eq!(
-                data.data(),
-                challenge
-                    .into_iter()
-                    .chain((methods.len() as u16).to_be_bytes())
-                    .chain(methods.into_iter().flat_map(|v| v.to_be_bytes())).collect::<Vec<_>>(),
-                );
+        fn test_auth_challenge_truncated(
+            (n, (challenge, methods)) in auth_challenge_strat().prop_flat_map(|(c, v)| (1..34 + v.len() * 2, Just((c, v)))),
+        ) {
+            let mut data = Vec::with_capacity(34 + methods.len() * 2);
+            data.extend(challenge);
+            data.extend((methods.len() as u16).to_be_bytes());
+            data.extend(methods.iter().flat_map(|v| v.to_be_bytes()));
+            data.truncate(n);
+
+            let ret = AuthChallenge::try_from_cell(&mut Some(Cell::from_variable(
+                CellHeader::new(1, 130),
+                data.into(),
+            )));
+            assert!(ret.is_err(), "expect error, got {ret:?}");
         }
 
         #[test]
-        fn test_authenticate(auth_type: u16, data in vec(any::<u8>(), 0..256)) {
+        fn test_authenticate_new((auth_type, data) in authenticate_strat()) {
             let cell = Authenticate::new(auth_type, &data).unwrap();
             assert_eq!(cell.auth_type(), auth_type);
             assert_eq!(cell.data(), data);
+            assert_eq!(
+                cell.0.data(),
+                auth_type
+                    .to_be_bytes()
+                    .into_iter()
+                    .chain((data.len() as u16).to_be_bytes())
+                    .chain(data)
+                    .collect::<Vec<_>>(),
+            );
+        }
+
+        #[test]
+        fn test_authenticate_from_cell((auth_type, data) in authenticate_strat()) {
+            let mut v = Vec::with_capacity(4 + data.len());
+            v.extend(auth_type.to_be_bytes());
+            v.extend((data.len() as u16).to_be_bytes());
+            v.extend(&data);
+
+            let cell = Authenticate::try_from_cell(&mut Some(Cell::from_variable(
+                CellHeader::new(0, 131),
+                v.into(),
+            ))).unwrap().unwrap();
+            assert_eq!(cell.auth_type(), auth_type);
+            assert_eq!(cell.data(), data);
+        }
+
+        #[test]
+        fn test_authenticate_truncated(
+            (n, (auth_type, data)) in authenticate_strat().prop_flat_map(|(t, v)| (1..4 + v.len(), Just((t, v)))),
+        ) {
+            let mut v = Vec::with_capacity(4 + data.len());
+            v.extend(auth_type.to_be_bytes());
+            v.extend((data.len() as u16).to_be_bytes());
+            v.extend(&data);
+            v.truncate(n);
+
+            let ret = Authenticate::try_from_cell(&mut Some(Cell::from_variable(
+                CellHeader::new(0, 131),
+                v.into(),
+            )));
+            assert!(ret.is_err(), "expect error, got {ret:?}");
         }
     }
 }

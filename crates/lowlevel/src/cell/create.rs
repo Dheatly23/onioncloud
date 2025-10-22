@@ -742,3 +742,144 @@ impl CreatedFast {
         self.cell
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+
+    fn create2_strat() -> impl Strategy<Value = (NonZeroU32, u16, Vec<u8>)> {
+        (
+            any::<NonZeroU32>(),
+            any::<u16>(),
+            vec(
+                any::<u8>(),
+                0..=FIXED_CELL_SIZE - size_of::<Create2Header>(),
+            ),
+        )
+    }
+
+    fn created2_strat() -> impl Strategy<Value = (NonZeroU32, Vec<u8>)> {
+        (
+            any::<NonZeroU32>(),
+            vec(
+                any::<u8>(),
+                0..=FIXED_CELL_SIZE - size_of::<Created2Header>(),
+            ),
+        )
+    }
+
+    #[test]
+    fn test_create2_too_long() {
+        let ret = Create2::new(
+            FixedCell::default(),
+            NonZeroU32::new(1).unwrap(),
+            0,
+            &[0; FIXED_CELL_SIZE - size_of::<Create2Header>() + 1],
+        );
+        assert!(ret.is_err(), "expect error, got {ret:?}");
+    }
+
+    #[test]
+    fn test_created2_too_long() {
+        let ret = Created2::new(
+            FixedCell::default(),
+            NonZeroU32::new(1).unwrap(),
+            &[0; FIXED_CELL_SIZE - size_of::<Created2Header>() + 1],
+        );
+        assert!(ret.is_err(), "expect error, got {ret:?}");
+    }
+
+    proptest! {
+        #[test]
+        fn test_create2_new((circuit, ty, payload) in create2_strat()) {
+            let cell = Create2::new(FixedCell::default(), circuit, ty, &payload).unwrap();
+            assert_eq!(cell.circuit, circuit);
+            assert_eq!(cell.handshake_type(), ty);
+            assert_eq!(cell.data(), &payload);
+
+            let cell = Cell::from(cell);
+            assert_eq!(cell.command, 10);
+            assert_eq!(cell.circuit, u32::from(circuit));
+
+            let mut data = Vec::with_capacity(4 + payload.len());
+            data.extend(ty.to_be_bytes());
+            data.extend((payload.len() as u16).to_be_bytes());
+            data.extend_from_slice(&payload);
+            assert_eq!(cell.data()[..data.len()], data);
+        }
+
+        #[test]
+        fn test_create2_from_cell((circuit, ty, payload) in create2_strat()) {
+            let mut cell = FixedCell::default();
+            let v: &mut Create2Cell = transmute_mut!(cell.data_mut());
+            v.header.ty.set(ty);
+            v.header.len.set(payload.len() as _);
+            v.data[..payload.len()].copy_from_slice(&payload);
+
+            let cell = Create2::try_from_cell(
+                &mut Some(Cell::from_fixed(CellHeader::new(circuit.into(), 10), cell.clone()))
+            ).unwrap().unwrap();
+            assert_eq!(cell.circuit, circuit);
+            assert_eq!(cell.handshake_type(), ty);
+            assert_eq!(cell.data(), payload);
+        }
+
+        #[test]
+        fn test_create2_invalid(circuit: NonZeroU32, ty: u16, n in (FIXED_CELL_SIZE - size_of::<Create2Header>() + 1) as u16..) {
+            let mut cell = FixedCell::default();
+            let v: &mut Create2Cell = transmute_mut!(cell.data_mut());
+            v.header.ty.set(ty);
+            v.header.len.set(n);
+
+            let ret = Create2::try_from_cell(
+                &mut Some(Cell::from_fixed(CellHeader::new(circuit.into(), 10), cell.clone()))
+            );
+            assert!(ret.is_err(), "expect error, got {ret:?}");
+        }
+
+        #[test]
+        fn test_created2_new((circuit, payload) in created2_strat()) {
+            let cell = Created2::new(FixedCell::default(), circuit, &payload).unwrap();
+            assert_eq!(cell.circuit, circuit);
+            assert_eq!(cell.data(), &payload);
+
+            let cell = Cell::from(cell);
+            assert_eq!(cell.command, 11);
+            assert_eq!(cell.circuit, u32::from(circuit));
+
+            let mut data = Vec::with_capacity(2 + payload.len());
+            data.extend((payload.len() as u16).to_be_bytes());
+            data.extend_from_slice(&payload);
+            assert_eq!(cell.data()[..data.len()], data);
+        }
+
+        #[test]
+        fn test_created2_from_cell((circuit, payload) in created2_strat()) {
+            let mut cell = FixedCell::default();
+            let v: &mut Created2Cell = transmute_mut!(cell.data_mut());
+            v.header.len.set(payload.len() as _);
+            v.data[..payload.len()].copy_from_slice(&payload);
+
+            let cell = Created2::try_from_cell(
+                &mut Some(Cell::from_fixed(CellHeader::new(circuit.into(), 11), cell.clone()))
+            ).unwrap().unwrap();
+            assert_eq!(cell.circuit, circuit);
+            assert_eq!(cell.data(), payload);
+        }
+
+        #[test]
+        fn test_created2_invalid(circuit: NonZeroU32, n in (FIXED_CELL_SIZE - size_of::<Create2Header>() + 1) as u16..) {
+            let mut cell = FixedCell::default();
+            let v: &mut Created2Cell = transmute_mut!(cell.data_mut());
+            v.header.len.set(n);
+
+            let ret = Created2::try_from_cell(
+                &mut Some(Cell::from_fixed(CellHeader::new(circuit.into(), 11), cell.clone()))
+            );
+            assert!(ret.is_err(), "expect error, got {ret:?}");
+        }
+    }
+}
