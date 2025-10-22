@@ -783,12 +783,30 @@ mod tests {
     }
 
     #[test]
+    fn test_create2_zero_circuit() {
+        let ret = Create2::try_from_cell(&mut Some(Cell::from_fixed(
+            CellHeader::new(0, 10),
+            FixedCell::default(),
+        )));
+        assert!(ret.is_err(), "expect error, got {ret:?}");
+    }
+
+    #[test]
     fn test_created2_too_long() {
         let ret = Created2::new(
             FixedCell::default(),
             NonZeroU32::new(1).unwrap(),
             &[0; FIXED_CELL_SIZE - size_of::<Created2Header>() + 1],
         );
+        assert!(ret.is_err(), "expect error, got {ret:?}");
+    }
+
+    #[test]
+    fn test_created2_zero_circuit() {
+        let ret = Created2::try_from_cell(&mut Some(Cell::from_fixed(
+            CellHeader::new(0, 11),
+            FixedCell::default(),
+        )));
         assert!(ret.is_err(), "expect error, got {ret:?}");
     }
 
@@ -880,6 +898,33 @@ mod tests {
                 &mut Some(Cell::from_fixed(CellHeader::new(circuit.into(), 11), cell.clone()))
             );
             assert!(ret.is_err(), "expect error, got {ret:?}");
+        }
+
+        #[test]
+        fn test_create_fast_new(circuit: NonZeroU32, key: Sha1Output) {
+            let cell = CreateFast::new(FixedCell::default(), circuit, key);
+            assert_eq!(cell.circuit, circuit);
+            assert_eq!(*cell.key(), key);
+
+            let cell = Cell::from(cell);
+            assert_eq!(cell.command, 5);
+            assert_eq!(cell.circuit, u32::from(circuit));
+            assert_eq!(&cell.as_fixed().unwrap().data()[..key.len()], key);
+        }
+
+        #[test]
+        fn test_created_fast_new(circuit: NonZeroU32, key: Sha1Output, derived: Sha1Output) {
+            let cell = CreatedFast::new(FixedCell::default(), circuit, key, derived);
+            assert_eq!(cell.circuit, circuit);
+            assert_eq!(*cell.key(), key);
+            assert_eq!(*cell.derived(), derived);
+
+            let cell = Cell::from(cell);
+            assert_eq!(cell.command, 6);
+            assert_eq!(cell.circuit, u32::from(circuit));
+            let data = cell.as_fixed().unwrap().data();
+            assert_eq!(&data[..key.len()], key);
+            assert_eq!(&data[key.len()..key.len() * 2], derived);
         }
     }
 }
