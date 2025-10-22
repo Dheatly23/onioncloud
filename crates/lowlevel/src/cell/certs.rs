@@ -328,6 +328,17 @@ mod tests {
         vec((any::<u8>(), vec(any::<u8>(), 0..256)), 0..256)
     }
 
+    fn compare_certs(cell: Certs, certs: Vec<(u8, Vec<u8>)>) {
+        let mut it = cell.into_iter();
+        for (i, (t, v)) in certs.into_iter().enumerate() {
+            let Some(j) = it.next() else {
+                panic!("Iteration unexpectedly stops at {i}");
+            };
+            assert_eq!(j.ty, t, "error at index {i}");
+            assert_eq!(j.data, v, "error at index {i}");
+        }
+    }
+
     #[test]
     fn test_certs_too_long() {
         static DATA: &[u8] = &[0; 65536];
@@ -348,17 +359,45 @@ mod tests {
         assert!(ret.is_err(), "expect error, got {ret:?}");
     }
 
+    #[test]
+    fn test_certs_trailing() {
+        let cell = Certs::try_from_cell(&mut Some(Cell::from_variable(
+            CellHeader::new(0, 129),
+            vec![0, 1, 0, 1, 0].into(),
+        )))
+        .unwrap()
+        .unwrap();
+        assert_eq!(cell.len(), 0);
+    }
+
     proptest! {
         #[test]
         fn test_certs_from_list(certs in certs_strat()) {
             let cell = Certs::try_from_list(&certs.iter().map(|(t, v)| Cert::new(*t, &v[..])).collect::<Vec<_>>()).unwrap();
-            assert_eq!(cell.into_iter().map(|v| (v.ty, Vec::from(v.data))).collect::<Vec<_>>(), certs);
+            compare_certs(cell, certs);
         }
 
         #[test]
         fn test_certs_from_iter(certs in certs_strat()) {
             let cell = Certs::try_from_iter(certs.iter().map(|(t, v)| Cert::new(*t, &v[..]))).unwrap();
-            assert_eq!(cell.into_iter().map(|v| (v.ty, Vec::from(v.data))).collect::<Vec<_>>(), certs);
+            compare_certs(cell, certs);
+        }
+
+        #[test]
+        fn test_certs_from_cell(certs in certs_strat()) {
+            let mut v = Vec::with_capacity(1 + certs.iter().map(|(_, v)| 3 + v.len()).sum::<usize>());
+            v.push(certs.len() as u8);
+            for (t, a) in &certs {
+                v.push(*t);
+                v.extend((a.len() as u16).to_be_bytes());
+                v.extend_from_slice(&*a);
+            }
+
+            let cell = Certs::try_from_cell(&mut Some(Cell::from_variable(
+                CellHeader::new(0, 129),
+                v.into(),
+            ))).unwrap().unwrap();
+            compare_certs(cell, certs);
         }
 
         #[test]
@@ -378,6 +417,30 @@ mod tests {
             }
 
             assert_eq!(data, []);
+        }
+
+        #[test]
+        fn test_certs_truncated(
+            (n, certs) in certs_strat().prop_flat_map(|c| (0..1 + c.iter().map(|(_, v)| 3 + v.len()).sum::<usize>(), Just(c))),
+        ) {
+            let mut v = Vec::with_capacity(n);
+            v.push(certs.len() as u8);
+            for (t, a) in certs {
+                v.push(t);
+                v.extend((a.len() as u16).to_be_bytes());
+                v.extend_from_slice(&a);
+                v.truncate(n);
+                if v.len() >= n {
+                    break;
+                }
+            }
+            v.truncate(n);
+
+            let ret = Certs::try_from_cell(&mut Some(Cell::from_variable(
+                CellHeader::new(0, 129),
+                v.into(),
+            )));
+            assert!(ret.is_err(), "expect error, got {ret:?}");
         }
     }
 }
