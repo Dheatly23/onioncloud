@@ -384,7 +384,7 @@ impl<'a>
                                             0,
                                             input.peer_addr().ip(),
                                             [peer_addr],
-                                        ))
+                                        )?)
                                         .try_into()?,
                                 );
                                 continue;

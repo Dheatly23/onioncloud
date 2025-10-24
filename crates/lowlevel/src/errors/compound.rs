@@ -82,6 +82,8 @@ pub enum UserControllerError {
     CertTypeError(#[from] super::CertTypeError),
     #[error(transparent)]
     NetinfoError(#[from] super::NetinfoError),
+    #[error(transparent)]
+    CellLengthOverflowError(#[from] super::CellLengthOverflowError),
 }
 
 remap! {
@@ -117,4 +119,6 @@ pub enum DirControllerError {
     ChannelClosedError(#[from] super::ChannelClosedError),
     #[error(transparent)]
     CircuitProtocolError(#[from] super::CircuitProtocolError),
+    #[error(transparent)]
+    CellLengthOverflowError(#[from] super::CellLengthOverflowError),
 }

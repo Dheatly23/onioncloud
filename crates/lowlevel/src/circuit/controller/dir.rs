@@ -707,9 +707,9 @@ fn read_handler(
                 let cell = cfg.cache.cache(cell);
                 let reason = cell.reason();
                 debug!(id, %reason, "peer is closing stream");
-                match stream.send(Cached::map(cell, |c| {
-                    c.try_into_relay(cfg.circ_id, RelayVersion::V0).unwrap()
-                })) {
+                match stream.send(Cached::try_map(cell, |c, _| {
+                    c.try_into_relay(cfg.circ_id, RelayVersion::V0)
+                })?) {
                     Ok(()) => (),
                     Err(TrySendError::Full(_)) => warn!(
                         id,
@@ -832,8 +832,7 @@ fn write_handler(
         // Prepend RELAY_END cell
         found = Some(
             RelayEnd::new(cfg.cache.get_cached(), id, reason)
-                .try_into_relay(cfg.circ_id, RelayVersion::V0)
-                .unwrap(),
+                .try_into_relay(cfg.circ_id, RelayVersion::V0)?,
         );
         break;
     }
@@ -855,8 +854,7 @@ fn write_handler(
 
                 found = Some(
                     RelayBeginDir::new(cfg.cache.get_cached(), m.id.try_into().unwrap())
-                        .try_into_relay(cfg.circ_id, RelayVersion::V0)
-                        .unwrap(),
+                        .try_into_relay(cfg.circ_id, RelayVersion::V0)?,
                 );
 
                 // Store handle to be resolved later.
@@ -880,8 +878,7 @@ fn write_handler(
         // Prepend RELAY_SENDME cell
         found = Some(
             RelaySendme::from_data(cfg.cache.get_cached(), data)
-                .try_into_relay(cfg.circ_id, RelayVersion::V0)
-                .unwrap(),
+                .try_into_relay(cfg.circ_id, RelayVersion::V0)?,
         );
 
         this.backward_data_count = this
@@ -911,7 +908,7 @@ fn write_handler(
                 continue;
             }
 
-            Some(cell.try_into_relay(cfg.circ_id, RelayVersion::V0).unwrap())
+            Some(cell.try_into_relay(cfg.circ_id, RelayVersion::V0)?)
         } else {
             cell
         };

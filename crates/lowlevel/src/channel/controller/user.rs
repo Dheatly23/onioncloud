@@ -497,7 +497,7 @@ impl InitState {
                                     0,
                                     input.peer_addr().ip(),
                                     [peer_addr],
-                                )),
+                                )?),
                                 &link_cfg,
                             )?);
                         }

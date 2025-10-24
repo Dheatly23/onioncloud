@@ -167,29 +167,6 @@ impl<T: ?Sized> Addr<T> {
     }
 }
 
-fn write_addr(data: &mut [u8], addr: IpAddr) -> Option<&mut [u8]> {
-    Some(match addr {
-        IpAddr::V4(v) => {
-            let (o, rest) = Addr::<[u8; 4]>::mut_from_prefix(data).ok()?;
-            *o = Addr {
-                ty: 4,
-                length: 4,
-                data: v.octets(),
-            };
-            rest
-        }
-        IpAddr::V6(v) => {
-            let (o, rest) = Addr::<[u8; 16]>::mut_from_prefix(data).ok()?;
-            *o = Addr {
-                ty: 6,
-                length: 16,
-                data: v.octets(),
-            };
-            rest
-        }
-    })
-}
-
 /// Represents a NETINFO cell.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Netinfo(FixedCell);
@@ -258,7 +235,11 @@ impl Netinfo {
     /// - `cell` : Cached [`FixedCell`].
     /// - `time` : Timestamp.
     /// - `peer_addr` : Peer IP address.
-    /// - `this_addr` : This IP addresses. Excessive addresses will be discared.
+    /// - `this_addr` : This IP addresses.
+    ///
+    /// # Error
+    ///
+    /// Errors if data does not fit the cell.
     ///
     /// # Example
     ///
@@ -266,14 +247,14 @@ impl Netinfo {
     /// use onioncloud_lowlevel::cell::FixedCell;
     /// use onioncloud_lowlevel::cell::netinfo::Netinfo;
     ///
-    /// let cell = Netinfo::new(FixedCell::default(), 0, [0; 4].into(), []);
+    /// let cell = Netinfo::new(FixedCell::default(), 0, [0; 4].into(), []).unwrap();
     /// ```
     pub fn new(
         mut cell: FixedCell,
         time: u32,
         peer_addr: IpAddr,
         this_addr: impl IntoIterator<Item = IpAddr>,
-    ) -> Self {
+    ) -> Result<Self, errors::CellLengthOverflowError> {
         fn write_header(
             data: &mut [u8; FIXED_CELL_SIZE],
             time: u32,
@@ -289,25 +270,45 @@ impl Netinfo {
             header.peer_addr_data.part2_mut()
         }
 
+        fn write_addr(
+            data: &mut [u8],
+            addr: IpAddr,
+        ) -> Result<&mut [u8], errors::CellLengthOverflowError> {
+            Ok(match addr {
+                IpAddr::V4(v) => {
+                    let (o, ret) = Addr::<[u8; 4]>::mut_from_prefix(data)
+                        .map_err(|_| errors::CellLengthOverflowError)?;
+                    *o = Addr {
+                        ty: 4,
+                        length: 4,
+                        data: v.octets(),
+                    };
+                    ret
+                }
+                IpAddr::V6(v) => {
+                    let (o, ret) = Addr::<[u8; 16]>::mut_from_prefix(data)
+                        .map_err(|_| errors::CellLengthOverflowError)?;
+                    *o = Addr {
+                        ty: 6,
+                        length: 16,
+                        data: v.octets(),
+                    };
+                    ret
+                }
+            })
+        }
+
         let header = write_header(cell.data_mut(), time, peer_addr);
         let mut data = &mut header.data;
         let mut n = 0u8;
         for addr in this_addr {
-            let Some(s) = write_addr(data, addr) else {
-                break;
-            };
-            data = s;
-
-            n = match n.checked_add(1) {
-                Some(v) => v,
-                // Should be unlikely, but better be safe
-                None => break,
-            };
+            n = n.checked_add(1).ok_or(errors::CellLengthOverflowError)?;
+            data = write_addr(data, addr)?;
         }
 
         header.n_addrs = n;
         // SAFETY: Data is valid
-        unsafe { Self::from_cell(cell) }
+        unsafe { Ok(Self::from_cell(cell)) }
     }
 
     /// Gets timestamp.
@@ -348,7 +349,7 @@ impl Netinfo {
     /// use onioncloud_lowlevel::cell::FixedCell;
     /// use onioncloud_lowlevel::cell::netinfo::Netinfo;
     ///
-    /// let cell = Netinfo::new(FixedCell::default(), 0, [0; 4].into(), [Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()]);
+    /// let cell = Netinfo::new(FixedCell::default(), 0, [0; 4].into(), [Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()]).unwrap();
     /// for addr in cell.this_addrs() {
     ///     println!("{addr}");
     /// }
@@ -441,15 +442,13 @@ mod tests {
 
     #[test]
     fn test_netinfo_too_many() {
-        let cell = Netinfo::new(
+        let ret = Netinfo::new(
             FixedCell::default(),
             0,
             Ipv4Addr::UNSPECIFIED.into(),
             repeat(Ipv4Addr::UNSPECIFIED.into()),
         );
-
-        // 1000 should be way too many
-        assert!(cell.this_addrs().count() < 1000);
+        assert!(ret.is_err(), "expect error, got {ret:?}");
     }
 
     proptest! {
@@ -460,7 +459,7 @@ mod tests {
                 time,
                 other,
                 this.iter().copied(),
-            );
+            ).unwrap();
 
             assert_eq!(cell.time(), time);
             assert_eq!(cell.peer_addr(), Some(other));
