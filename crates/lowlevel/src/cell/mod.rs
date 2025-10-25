@@ -19,6 +19,7 @@ use futures_io::AsyncRead;
 use zerocopy::byteorder::big_endian::{U16, U32};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
+use crate::cache::{Cachable, CellCache};
 use crate::{errors, util};
 
 /// Size of [`FixedCell`] content.
@@ -64,6 +65,12 @@ impl<'a> TryFrom<&'a [u8]> for FixedCell {
             .and_then(|v| <&[u8; FIXED_CELL_SIZE]>::try_from(v).ok())
             .map(|v| Self::new(Box::new(*v)))
             .ok_or(errors::InvalidLength)
+    }
+}
+
+impl Cachable for FixedCell {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        cache.cache_cell(self);
     }
 }
 
@@ -125,6 +132,14 @@ impl From<Vec<u8>> for VariableCell {
     fn from(v: Vec<u8>) -> Self {
         assert!(v.len() < 65536, "variable cell length is too long!");
         Self::new(v.into_boxed_slice())
+    }
+}
+
+impl Cachable for VariableCell {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        if let Ok(cell) = self.try_into_fixed() {
+            cell.cache(cache);
+        }
     }
 }
 
@@ -218,15 +233,11 @@ impl AsMut<[u8]> for Cell {
     }
 }
 
-impl crate::cache::Cachable for Cell {
-    fn maybe_into_fixed(self) -> Option<FixedCell> {
-        self.into_fixed().ok()
-    }
-}
-
-impl crate::cache::Cachable for Option<Cell> {
-    fn maybe_into_fixed(self) -> Option<FixedCell> {
-        self?.maybe_into_fixed()
+impl Cachable for Cell {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        if let CellData::Fixed(cell) = self.data {
+            cell.cache(cache);
+        }
     }
 }
 

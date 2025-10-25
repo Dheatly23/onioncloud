@@ -20,7 +20,7 @@ use zerocopy::{
 use super::{
     Cell, CellHeader, CellLike, CellRef, FIXED_CELL_SIZE, FixedCell, TryFromCell, to_fixed,
 };
-use crate::cache::Cachable;
+use crate::cache::{Cachable, Cached, CellCache};
 use crate::errors;
 use crate::private::Sealed;
 
@@ -85,6 +85,12 @@ impl From<Relay> for FixedCell {
     }
 }
 
+impl Cachable for Relay {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.cell.cache(cache);
+    }
+}
+
 impl TryFromCell for Relay {
     fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, errors::CellFormatError> {
         let Some(Cell {
@@ -111,12 +117,6 @@ impl CellLike for Relay {
 
     fn cell(&self) -> CellRef<'_> {
         CellRef::Fixed(&self.cell)
-    }
-}
-
-impl Cachable for Option<Relay> {
-    fn maybe_into_fixed(self) -> Option<FixedCell> {
-        self?.maybe_into_fixed()
     }
 }
 
@@ -278,6 +278,12 @@ impl From<RelayEarly> for FixedCell {
     }
 }
 
+impl Cachable for RelayEarly {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.cell.cache(cache);
+    }
+}
+
 impl TryFromCell for RelayEarly {
     fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, errors::CellFormatError> {
         let Some(Cell {
@@ -304,12 +310,6 @@ impl CellLike for RelayEarly {
 
     fn cell(&self) -> CellRef<'_> {
         CellRef::Fixed(&self.cell)
-    }
-}
-
-impl Cachable for Option<RelayEarly> {
-    fn maybe_into_fixed(self) -> Option<FixedCell> {
-        self?.maybe_into_fixed()
     }
 }
 
@@ -449,6 +449,12 @@ impl<'a> From<&'a mut RelayWrapper> for &'a mut FixedCell {
     fn from(v: &'a mut RelayWrapper) -> Self {
         // SAFETY: FixedCell can be transparently transmuted to RelayWrapper
         unsafe { transmute(v) }
+    }
+}
+
+impl Cachable for RelayWrapper {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.0.cache(cache);
     }
 }
 
@@ -649,64 +655,71 @@ pub trait IntoRelay: Sized {
     ) -> Result<RelayEarly, errors::CellLengthOverflowError> {
         self.try_into_relay(circuit, version).map(RelayEarly::from)
     }
+
+    /// Same as [`try_into_relay`], but with [`Cached`].
+    fn try_into_relay_cached<C: CellCache>(
+        this: Cached<Self, C>,
+        circuit: NonZeroU32,
+        version: RelayVersion,
+    ) -> Result<Cached<Relay, C>, errors::CellLengthOverflowError>
+    where
+        Self: Cachable;
+
+    /// Same as [`try_into_relay_early`], but with [`Cached`].
+    fn try_into_relay_early_cached<C: CellCache>(
+        this: Cached<Self, C>,
+        circuit: NonZeroU32,
+        version: RelayVersion,
+    ) -> Result<Cached<RelayEarly, C>, errors::CellLengthOverflowError>
+    where
+        Self: Cachable,
+    {
+        Ok(Cached::map_into(Self::try_into_relay_cached(
+            this, circuit, version,
+        )?))
+    }
 }
 
-fn with_cmd_stream(
-    mut data: RelayWrapper,
+fn set_cmd_stream(
     orig_version: Option<RelayVersion>,
     version: RelayVersion,
     cmd: u8,
     stream: u16,
-    circuit: NonZeroU32,
-) -> Result<Relay, errors::CellLengthOverflowError> {
-    Ok(match version {
+    data: &mut RelayWrapper,
+) -> Result<(), errors::CellLengthOverflowError> {
+    match version {
         RelayVersion::V0 => {
             match orig_version {
-                None => v0::to_v0(&mut data)?,
+                None => v0::to_v0(data)?,
                 Some(RelayVersion::V0) => (),
-                Some(RelayVersion::V1) => v1::v1_to_v0(&mut data)?,
+                Some(RelayVersion::V1) => v1::v1_to_v0(data)?,
             }
-            with_cmd_stream_v0(data, cmd, stream, circuit)
+            set_cmd_stream_v0(cmd, stream, data)
         }
         RelayVersion::V1 => {
             match orig_version {
-                None => v1::to_v1(&mut data)?,
-                Some(RelayVersion::V0) => v1::v0_to_v1(&mut data)?,
+                None => v1::to_v1(data)?,
+                Some(RelayVersion::V0) => v1::v0_to_v1(data)?,
                 Some(RelayVersion::V1) => (),
             }
-            with_cmd_stream_v1(data, cmd, stream, circuit)
+            set_cmd_stream_v1(cmd, stream, data)
         }
-    })
+    }
+    Ok(())
 }
 
-fn with_cmd_stream_v0(mut data: RelayWrapper, cmd: u8, stream: u16, circuit: NonZeroU32) -> Relay {
+fn set_cmd_stream_v0(cmd: u8, stream: u16, data: &mut RelayWrapper) {
     use v0::RelayExt as _;
     data.set_command(cmd);
     data.set_stream(stream);
     data.fill_padding();
-    data.into_relay(circuit)
 }
 
-fn with_cmd_stream_v1(mut data: RelayWrapper, cmd: u8, stream: u16, circuit: NonZeroU32) -> Relay {
+fn set_cmd_stream_v1(cmd: u8, stream: u16, data: &mut RelayWrapper) {
     use v1::RelayExt as _;
     data.set_command(cmd);
     data.set_stream(stream);
     data.fill_padding();
-    data.into_relay(circuit)
-}
-
-fn get_stream_if_command_match(
-    relay: &Option<Relay>,
-    version: RelayVersion,
-    cmd: u8,
-) -> Result<Option<NonZeroU16>, errors::CellFormatError> {
-    NonZeroU16::new(match (relay, version) {
-        (Some(r), RelayVersion::V0) if v0::RelayExt::command(r) == cmd => v0::RelayExt::stream(r),
-        (Some(r), RelayVersion::V1) if v1::RelayExt::command(r) == cmd => v1::RelayExt::stream(r),
-        _ => return Ok(None),
-    })
-    .ok_or(errors::CellFormatError)
-    .map(Some)
 }
 
 /// Version 0.0.1

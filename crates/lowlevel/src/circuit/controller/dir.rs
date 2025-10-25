@@ -707,9 +707,11 @@ fn read_handler(
                 let cell = cfg.cache.cache(cell);
                 let reason = cell.reason();
                 debug!(id, %reason, "peer is closing stream");
-                match stream.send(Cached::try_map(cell, |c, _| {
-                    c.try_into_relay(cfg.circ_id, RelayVersion::V0)
-                })?) {
+                match stream.send(<_>::try_into_relay_cached(
+                    cell,
+                    cfg.circ_id,
+                    RelayVersion::V0,
+                )?) {
                     Ok(()) => (),
                     Err(TrySendError::Full(_)) => warn!(
                         id,

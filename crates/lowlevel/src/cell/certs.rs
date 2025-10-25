@@ -1,6 +1,7 @@
 use zerocopy::byteorder::big_endian::U16;
 use zerocopy::{FromBytes, Immutable, KnownLayout, SplitAt, Unaligned};
 
+use crate::cache::{Cachable, CellCache};
 use crate::cell::{
     Cell, CellHeader, CellLike, CellRef, TryFromCell, VariableCell, to_variable_with,
 };
@@ -122,6 +123,12 @@ pub struct Certs(VariableCell);
 impl From<Certs> for Cell {
     fn from(v: Certs) -> Cell {
         Cell::from_variable(CellHeader::new(0, Certs::ID), v.into_inner())
+    }
+}
+
+impl Cachable for Certs {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.0.cache(cache);
     }
 }
 

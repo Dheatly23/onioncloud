@@ -9,10 +9,10 @@ use zerocopy::{
 };
 
 use super::{
-    IntoRelay, Relay, RelayV001, RelayVersion, RelayWrapper, TryFromRelay, take_if_nonzero_stream,
-    v0, v1, with_cmd_stream,
+    IntoRelay, Relay, RelayV001, RelayVersion, RelayWrapper, TryFromRelay, set_cmd_stream,
+    take_if_nonzero_stream, v0, v1,
 };
-use crate::cache::Cachable;
+use crate::cache::{Cachable, Cached, CellCache};
 use crate::cell::{FIXED_CELL_SIZE, FixedCell};
 use crate::errors;
 
@@ -199,8 +199,8 @@ impl AsRef<FixedCell> for RelayExtend2 {
 }
 
 impl Cachable for RelayExtend2 {
-    fn maybe_into_fixed(self) -> Option<FixedCell> {
-        Some(self.data.into())
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.data.cache(cache);
     }
 }
 
@@ -235,18 +235,33 @@ impl TryFromRelay for RelayExtend2 {
 
 impl IntoRelay for RelayExtend2 {
     fn try_into_relay(
-        self,
+        mut self,
         circuit: NonZeroU32,
         version: RelayVersion,
     ) -> Result<Relay, errors::CellLengthOverflowError> {
-        with_cmd_stream(
-            self.data,
+        set_cmd_stream(
             self.version,
             version,
             Self::ID,
             self.stream.into(),
-            circuit,
-        )
+            &mut self.data,
+        )?;
+        Ok(self.data.into_relay(circuit))
+    }
+
+    fn try_into_relay_cached<C: CellCache>(
+        mut this: Cached<Self, C>,
+        circuit: NonZeroU32,
+        version: RelayVersion,
+    ) -> Result<Cached<Relay, C>, errors::CellLengthOverflowError> {
+        set_cmd_stream(
+            this.version,
+            version,
+            Self::ID,
+            this.stream.into(),
+            &mut this.data,
+        )?;
+        Ok(Cached::map(this, |v| v.data.into_relay(circuit)))
     }
 }
 
@@ -522,8 +537,8 @@ impl AsRef<FixedCell> for RelayExtended2 {
 }
 
 impl Cachable for RelayExtended2 {
-    fn maybe_into_fixed(self) -> Option<FixedCell> {
-        Some(self.data.into())
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.data.cache(cache);
     }
 }
 
@@ -544,18 +559,33 @@ impl TryFromRelay for RelayExtended2 {
 
 impl IntoRelay for RelayExtended2 {
     fn try_into_relay(
-        self,
+        mut self,
         circuit: NonZeroU32,
         version: RelayVersion,
     ) -> Result<Relay, errors::CellLengthOverflowError> {
-        with_cmd_stream(
-            self.data,
+        set_cmd_stream(
             self.version,
             version,
             Self::ID,
             self.stream.into(),
-            circuit,
-        )
+            &mut self.data,
+        )?;
+        Ok(self.data.into_relay(circuit))
+    }
+
+    fn try_into_relay_cached<C: CellCache>(
+        mut this: Cached<Self, C>,
+        circuit: NonZeroU32,
+        version: RelayVersion,
+    ) -> Result<Cached<Relay, C>, errors::CellLengthOverflowError> {
+        set_cmd_stream(
+            this.version,
+            version,
+            Self::ID,
+            this.stream.into(),
+            &mut this.data,
+        )?;
+        Ok(Cached::map(this, |v| v.data.into_relay(circuit)))
     }
 }
 

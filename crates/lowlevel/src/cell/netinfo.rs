@@ -9,6 +9,7 @@ use zerocopy::{
 use super::{
     Cell, CellHeader, CellLike, CellRef, FIXED_CELL_SIZE, FixedCell, TryFromCell, to_fixed_with,
 };
+use crate::cache::{Cachable, CellCache};
 use crate::errors;
 
 /// NETINFO header.
@@ -180,6 +181,12 @@ impl From<Netinfo> for Cell {
 impl From<Netinfo> for FixedCell {
     fn from(v: Netinfo) -> FixedCell {
         v.into_inner()
+    }
+}
+
+impl Cachable for Netinfo {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.0.cache(cache);
     }
 }
 

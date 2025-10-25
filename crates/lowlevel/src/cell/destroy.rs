@@ -4,6 +4,7 @@ use std::num::NonZeroU32;
 use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes, Unaligned, try_transmute};
 
 use super::{Cell, CellHeader, CellLike, CellRef, FixedCell, TryFromCell, to_fixed};
+use crate::cache::{Cachable, CellCache};
 use crate::errors;
 
 /// Represents a DESTROY cell.
@@ -25,6 +26,12 @@ impl From<Destroy> for Cell {
 impl From<Destroy> for FixedCell {
     fn from(v: Destroy) -> FixedCell {
         v.into_inner()
+    }
+}
+
+impl Cachable for Destroy {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.cell.cache(cache);
     }
 }
 

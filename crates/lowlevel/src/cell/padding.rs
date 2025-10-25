@@ -8,6 +8,7 @@ use super::{
     Cell, CellHeader, CellLike, CellRef, FIXED_CELL_SIZE, FixedCell, TryFromCell, VariableCell,
     to_fixed, to_fixed_with, to_variable,
 };
+use crate::cache::{Cachable, CellCache};
 use crate::errors;
 
 /// Represents a PADDING cell.
@@ -35,6 +36,12 @@ impl From<Padding> for Cell {
 impl From<Padding> for FixedCell {
     fn from(v: Padding) -> FixedCell {
         v.into_inner()
+    }
+}
+
+impl Cachable for Padding {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.0.cache(cache);
     }
 }
 
@@ -118,6 +125,12 @@ impl AsMut<VariableCell> for VPadding {
 impl From<VPadding> for Cell {
     fn from(v: VPadding) -> Cell {
         Cell::from_variable(CellHeader::new(0, VPadding::ID), v.into_inner())
+    }
+}
+
+impl Cachable for VPadding {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.0.cache(cache);
     }
 }
 

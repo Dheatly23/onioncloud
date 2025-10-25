@@ -5,6 +5,7 @@ use zerocopy::FromBytes;
 use zerocopy::byteorder::big_endian::U16;
 
 use super::{Cell, CellHeader, CellLike, CellRef, TryFromCell, VariableCell, to_variable_with};
+use crate::cache::{Cachable, CellCache};
 use crate::errors;
 
 /// Represents a VERSIONS cell.
@@ -26,6 +27,12 @@ impl AsMut<[U16]> for Versions {
 impl From<Versions> for Cell {
     fn from(v: Versions) -> Cell {
         Cell::from_variable(CellHeader::new(0, Versions::ID), v.into_inner())
+    }
+}
+
+impl Cachable for Versions {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.0.cache(cache);
     }
 }
 

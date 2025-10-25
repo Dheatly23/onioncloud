@@ -4,10 +4,12 @@ use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::hash::{Hash, Hasher};
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering::*};
 
 use crossbeam_queue::ArrayQueue;
+use scopeguard::guard;
 
 use crate::cell::FixedCell;
 
@@ -100,13 +102,14 @@ pub trait CellCacheExt: CellCache {
     where
         T: Cachable,
     {
-        if let Some(cell) = cell.maybe_into_fixed() {
-            self.cache_cell(cell);
-        }
+        cell.cache(self);
     }
 }
 
 impl<T: ?Sized + CellCache> CellCacheExt for T {}
+
+/// Dynamic cell cache type.
+pub type DynCache = Arc<dyn CellCache + Send + Sync>;
 
 /// Null cell cache provider.
 ///
@@ -197,16 +200,26 @@ impl CellCache for StandardCellCache {
 
 /// Trait for cacheable types.
 pub trait Cachable {
-    /// Maybe unwraps self into [`FixedCell`].
+    /// Cache and destroy `self`.
     ///
-    /// If it returns [`None`], then the internal value is not cachable.
-    fn maybe_into_fixed(self) -> Option<FixedCell>;
+    fn cache<C: CellCache + ?Sized>(self, cache: &C);
 }
 
-/// Auto-impl for [`Into`].
-impl<T: Into<FixedCell>> Cachable for T {
-    fn maybe_into_fixed(self) -> Option<FixedCell> {
-        Some(self.into())
+/// Auto-impl for [`Option`].
+impl<T: Cachable> Cachable for Option<T> {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        if let Some(v) = self {
+            v.cache(cache);
+        }
+    }
+}
+
+/// Auto-impl for [`Vec`].
+impl<T: Cachable> Cachable for Vec<T> {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        for v in self {
+            v.cache(cache);
+        }
     }
 }
 
@@ -214,20 +227,18 @@ impl<T: Into<FixedCell>> Cachable for T {
 ///
 /// When it drops, automatically caches cell.
 #[derive(Clone)]
-pub struct Cached<T: Cachable, C: CellCache> {
+pub struct Cached<T: Cachable, C: CellCache = DynCache> {
     cache: ManuallyDrop<C>,
     cell: ManuallyDrop<T>,
 }
 
 impl<T: Cachable, C: CellCache> Drop for Cached<T, C> {
     fn drop(&mut self) {
-        // SAFETY: cell will not be accessed nor moved.
-        let cell = unsafe { ManuallyDrop::take(&mut self.cell) };
-        if let Some(cell) = cell.maybe_into_fixed() {
-            self.cache.cache_cell(cell);
-        }
         // SAFETY: cache will not be accessed nor moved.
-        unsafe { ManuallyDrop::drop(&mut self.cache) }
+        let mut this = guard(self, |this| unsafe { ManuallyDrop::drop(&mut this.cache) });
+        // SAFETY: cell will not be accessed nor moved.
+        let cell = unsafe { ManuallyDrop::take(&mut this.cell) };
+        cell.cache(&this.cache);
     }
 }
 
@@ -429,7 +440,7 @@ impl<T: Cachable, C: CellCache> Cached<T, C> {
     ///
     /// ```
     /// use onioncloud_lowlevel::cell::FixedCell;
-    /// use onioncloud_lowlevel::cache::{Cached, CellCache, StandardCellCache};
+    /// use onioncloud_lowlevel::cache::{Cached, CellCache, CellCacheExt, StandardCellCache};
     ///
     /// let cell = Cached::new(StandardCellCache::default(), FixedCell::default());
     ///
@@ -439,7 +450,7 @@ impl<T: Cachable, C: CellCache> Cached<T, C> {
     ///         Ok(cell)
     ///     } else {
     ///         // Manually cache
-    ///         cache.cache_cell(cell);
+    ///         cache.discard(cell);
     ///
     ///         Err(())
     ///     }
@@ -489,7 +500,7 @@ mod tests {
     use super::*;
 
     use std::iter::repeat_with;
-    use std::sync::{Arc, Barrier};
+    use std::sync::Barrier;
     use std::thread::spawn;
 
     const N_THREADS: usize = 12;

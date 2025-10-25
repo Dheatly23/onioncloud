@@ -10,6 +10,7 @@ use super::{
     Cell, CellHeader, CellLike, CellRef, FIXED_CELL_SIZE, FixedCell, TryFromCell, to_fixed,
     to_fixed_with,
 };
+use crate::cache::{Cachable, CellCache};
 use crate::crypto::Sha1Output;
 use crate::errors;
 
@@ -85,6 +86,12 @@ impl AsRef<[u8]> for Create2 {
 impl AsMut<[u8]> for Create2 {
     fn as_mut(&mut self) -> &mut [u8] {
         self.data_mut()
+    }
+}
+
+impl Cachable for Create2 {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.cell.cache(cache);
     }
 }
 
@@ -327,6 +334,12 @@ impl From<Created2> for FixedCell {
     }
 }
 
+impl Cachable for Created2 {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.cell.cache(cache);
+    }
+}
+
 impl TryFromCell for Created2 {
     fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, errors::CellFormatError> {
         let Some(Cell {
@@ -548,6 +561,12 @@ impl From<CreateFast> for FixedCell {
     }
 }
 
+impl Cachable for CreateFast {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.cell.cache(cache);
+    }
+}
+
 impl TryFromCell for CreateFast {
     fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, errors::CellFormatError> {
         let Some(Cell {
@@ -653,6 +672,12 @@ impl From<CreatedFast> for Cell {
 impl From<CreatedFast> for FixedCell {
     fn from(v: CreatedFast) -> FixedCell {
         v.into_inner()
+    }
+}
+
+impl Cachable for CreatedFast {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.cell.cache(cache);
     }
 }
 
