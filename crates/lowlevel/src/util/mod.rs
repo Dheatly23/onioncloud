@@ -11,7 +11,7 @@ use std::io::{Error as IoError, ErrorKind, Read, Result as IoResult, Write};
 use std::mem::size_of;
 use std::pin::Pin;
 use std::task::Poll::*;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 use base64ct::{Base64Url, Encoding};
@@ -24,6 +24,13 @@ use scopeguard::guard_on_unwind;
 use crate::crypto::EdPublicKey;
 use crate::runtime::{Runtime, Timer};
 pub use buffer::*;
+
+pub(crate) fn set_option_waker(waker: &mut Option<Waker>, cx: &mut Context<'_>) {
+    match waker {
+        Some(w) => w.clone_from(cx.waker()),
+        w @ None => *w = Some(cx.waker().clone()),
+    }
+}
 
 pub(crate) fn wrap_eof(v: IoResult<usize>) -> IoResult<usize> {
     match v {
