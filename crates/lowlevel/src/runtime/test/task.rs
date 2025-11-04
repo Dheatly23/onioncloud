@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering::*;
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicUsize};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
-use tracing::{Span, info_span};
+use tracing::info_span;
 
 use crate::util::set_option_waker;
 
@@ -38,7 +38,7 @@ impl Tasks {
     }
 
     pub(super) fn is_task_awake(&self, ix: usize) -> bool {
-        self.wakers[ix / 16].is_wake((ix % 16) as _)
+        self.wakers[ix / 16].is_wake_flipped((ix % 16) as _)
     }
 
     pub(super) fn run_task(&mut self, ix: usize) -> bool {
@@ -134,10 +134,10 @@ impl TestWaker {
     fn take_wake_at_flipped(&self, ix: u8) -> bool {
         assert!(ix < 16, "{ix} >= 16");
         let m = 1 << ix;
-        self.data[!self.count.load(Acquire) & 1].fetch_and(!m, AcqRel) & m != 0
+        self.data[self.count.load(Acquire) & 1].fetch_and(!m, AcqRel) & m != 0
     }
 
-    fn is_wake(&self, ix: u8) -> bool {
+    fn is_wake_flipped(&self, ix: u8) -> bool {
         assert!(ix < 16, "{ix} >= 16");
         self.data[self.count.load(Acquire) & 1].load(Acquire) & 1 << ix != 0
     }
@@ -238,6 +238,32 @@ impl TestWakerWrapper {
     }
 }
 
+/// Handle for task.
+///
+/// `await`ing it returns the spawned task's return value.
+///
+/// # Example
+///
+/// ```
+/// use onioncloud_lowlevel::runtime::Runtime;
+/// use onioncloud_lowlevel::runtime::test::TestExecutor;
+///
+/// let mut exec = TestExecutor::default();
+///
+/// let rt = exec.runtime().clone();
+/// exec.runtime().spawn(async move {
+///     let v = (0..10).map(|i| rt.spawn(async move {
+///         println!("inner {i}");
+///         i * 2
+///     })).collect::<Vec<_>>();
+///
+///     for i in v {
+///         let i = i.await;
+///         println!("outer {i}");
+///     }
+/// });
+/// exec.run_tasks_until_finished();
+/// ```
 pub struct Handle<T> {
     inner: Arc<InnerHandle<T>>,
 }
@@ -256,7 +282,7 @@ impl<T: Send> Future for Handle<T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
         let inner = &*Pin::into_inner(self).inner;
-        let flags = inner.flags.fetch_and(2, AcqRel);
+        let mut flags = inner.flags.swap(0, AcqRel);
 
         let mut registered = false;
         loop {
@@ -270,12 +296,11 @@ impl<T: Send> Future for Handle<T> {
             }
 
             registered = true;
-            debug_assert!(flags & 2 != 0, "{flags} & 2 == 0");
 
             // SAFETY: Waker is not being read.
             unsafe { set_option_waker(&mut *inner.waker.get(), cx) }
 
-            let flags = inner.flags.fetch_add(2, AcqRel);
+            flags = inner.flags.swap(2, AcqRel);
             debug_assert!(flags & 2 == 0, "{flags} & 2 != 0");
         }
     }

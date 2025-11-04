@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io::{ErrorKind, IoSlice, IoSliceMut, Read as _, Result as IoResult, Write as _};
+use std::marker::PhantomPinned;
 use std::net::SocketAddr;
 use std::ops::DerefMut;
 use std::pin::Pin;
@@ -10,6 +11,7 @@ use std::task::{Context, Poll, Waker};
 use futures_core::ready;
 use futures_io::{AsyncRead, AsyncWrite};
 use parking_lot::{Mutex, MutexGuard};
+use pin_project::pin_project;
 
 use crate::private::Sealed;
 use crate::runtime::Stream;
@@ -44,7 +46,7 @@ impl OpenSocket {
     }
 }
 
-#[derive(Default)]
+/// Handle for runtime sockets.
 pub struct Sockets {
     sockets: Vec<SocketInner>,
 }
@@ -71,6 +73,18 @@ struct OpenSocketInner {
 }
 
 impl Sockets {
+    #[inline]
+    pub(super) fn new() -> Self {
+        Self {
+            sockets: Vec::new(),
+        }
+    }
+
+    /// Handle pending sockets.
+    ///
+    /// # Parameters
+    ///
+    /// - `f` : Function that receives list of [`SocketAddr`] and returns either [`OpenSocket`] or error.
     pub fn handle_new_sockets(
         &mut self,
         mut f: impl FnMut(usize, &[SocketAddr]) -> Result<OpenSocket, ErrorKind>,
@@ -103,10 +117,12 @@ impl Sockets {
         }
     }
 
+    /// Gets number of sockets (including pending).
     pub fn len(&self) -> usize {
         self.sockets.len()
     }
 
+    /// Gets reference to socket.
     pub fn get(&mut self, ix: usize) -> SocketRef<'_> {
         SocketRef(match &mut self.sockets[ix] {
             SocketInner::Open(v) => v,
@@ -115,6 +131,7 @@ impl Sockets {
     }
 }
 
+/// Reference to a socket.
 pub struct SocketRef<'a>(&'a mut OpenSocketInner);
 
 impl SocketRef<'_> {
@@ -152,9 +169,11 @@ impl SocketRef<'_> {
     }
 }
 
+/// A test socket.
 pub struct TestSocket {
     ix: usize,
     sockets: Arc<Mutex<Sockets>>,
+    _pinned: PhantomPinned,
 }
 
 impl Sealed for TestSocket {}
@@ -271,6 +290,7 @@ impl Stream for TestSocket {
     }
 }
 
+#[pin_project]
 pub(super) struct SocketConnectFut(Option<TestSocket>);
 
 impl From<TestSocket> for SocketConnectFut {
@@ -282,8 +302,11 @@ impl From<TestSocket> for SocketConnectFut {
 impl Future for SocketConnectFut {
     type Output = IoResult<TestSocket>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let Some(TestSocket { ix, ref sockets }) = self.0 else {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let Some(TestSocket {
+            ix, ref sockets, ..
+        }) = self.0
+        else {
             panic!("future polled after finished")
         };
         let mut guard = sockets.lock();
@@ -295,7 +318,7 @@ impl Future for SocketConnectFut {
             }
             _ => {
                 drop(guard);
-                Poll::Ready(Ok(self.0.take().unwrap()))
+                Poll::Ready(Ok(self.project().0.take().unwrap()))
             }
         }
     }
@@ -312,5 +335,6 @@ pub(super) fn create_socket(this: &Arc<Mutex<Sockets>>, addrs: &[SocketAddr]) ->
     TestSocket {
         ix,
         sockets: this.clone(),
+        _pinned: PhantomPinned,
     }
 }

@@ -52,7 +52,6 @@ impl Debug for TestRuntime {
     }
 }
 
-#[derive(Default)]
 struct RuntimeInner {
     pending: Mutex<Vec<Pin<Box<dyn Send + Future<Output = ()>>>>>,
 
@@ -113,49 +112,165 @@ impl Default for TestExecutor {
     fn default() -> Self {
         Self {
             tasks: Default::default(),
-            rt: TestRuntime(Default::default()),
+            rt: TestRuntime(Arc::new(RuntimeInner {
+                pending: Default::default(),
+                timers: Default::default(),
+                sockets: Arc::new(Mutex::new(socket::Sockets::new())),
+            })),
         }
     }
 }
 
 impl TestExecutor {
+    /// Gets reference to runtime.
     pub fn runtime(&self) -> &TestRuntime {
         &self.rt
     }
 
+    /// Gets the number of tasks (alive or finished).
     pub fn task_len(&self) -> usize {
         self.tasks.len()
     }
 
+    /// Checks if task finished.
+    ///
+    /// # Parameters
+    ///
+    /// - `ix` : Index of task. Must be in range of 0 - [`task_len`].
+    ///
+    /// # Return
+    ///
+    /// Returns [`true`] if task is finished.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::runtime::Runtime;
+    /// use onioncloud_lowlevel::runtime::test::TestExecutor;
+    ///
+    /// let mut exec = TestExecutor::default();
+    ///
+    /// // Task is not yet registered
+    /// exec.runtime().spawn(async { println!("test") });
+    /// assert_eq!(exec.task_len(), 0);
+    ///
+    /// // Task is registered but not yet running
+    /// exec.register_pending_tasks();
+    /// assert_eq!(exec.task_len(), 1);
+    /// assert!(!exec.is_task_finished(0));
+    ///
+    /// // Task is finished
+    /// exec.run_tasks();
+    /// assert!(exec.is_task_finished(0));
+    /// ```
     pub fn is_task_finished(&self, ix: usize) -> bool {
         self.tasks.is_task_finished(ix)
     }
 
+    /// Checks if task is woken.
+    ///
+    /// # Parameters
+    ///
+    /// - `ix` : Index of task. Must be in range of 0 - [`task_len`].
+    ///
+    /// # Return
+    ///
+    /// Returns [`true`] if task is awake and will be run.
     pub fn is_task_awake(&self, ix: usize) -> bool {
         self.tasks.is_task_awake(ix)
     }
 
+    /// Advance time.
+    ///
+    /// # Parameters
+    ///
+    /// - `delta` : Duration to advance time by.
     pub fn advance_time(&mut self, delta: Duration) {
         self.rt.0.timers.advance_time(delta);
     }
 
+    /// Gets reference to [`Sockets`].
     pub fn sockets(&mut self) -> impl '_ + DerefMut<Target = Sockets> {
         self.rt.0.sockets.lock()
     }
 
+    /// Registers pending tasks.
+    ///
+    /// # Return
+    ///
+    /// Returns number of pending tasks.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::runtime::Runtime;
+    /// use onioncloud_lowlevel::runtime::test::TestExecutor;
+    ///
+    /// let mut exec = TestExecutor::default();
+    ///
+    /// exec.runtime().spawn(async { println!("test") });
+    /// assert_eq!(exec.task_len(), 0);
+    /// exec.register_pending_tasks();
+    /// assert_eq!(exec.task_len(), 1);
+    /// ```
+    pub fn register_pending_tasks(&mut self) -> usize {
+        let pending = take(&mut *self.rt.0.pending.lock());
+        let len = pending.len();
+        self.tasks.add_pending(pending);
+        len
+    }
+
+    /// Run a single task.
+    ///
+    /// # Parameters
+    ///
+    /// - `ix` : Index of task. Must be in range of 0 - [`task_len`].
+    ///
+    /// # Return
+    ///
+    /// Returns [`true`] if task is ran.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::runtime::Runtime;
+    /// use onioncloud_lowlevel::runtime::test::TestExecutor;
+    ///
+    /// let mut exec = TestExecutor::default();
+    ///
+    /// exec.runtime().spawn(async { println!("test") });
+    /// exec.register_pending_tasks();
+    /// assert!(exec.run_task(0));
+    /// ```
     #[instrument(skip(self))]
     pub fn run_task(&mut self, ix: usize) -> bool {
         self.rt.0.timers.wake_timers();
-        let pending = take(&mut *self.rt.0.pending.lock());
-        self.tasks.add_pending(pending);
+        self.register_pending_tasks();
         self.tasks.run_task(ix)
     }
 
+    /// Run tasks. Emulates a single event loop step.
+    ///
+    /// # Return
+    ///
+    /// Returns [`true`] if any task is ran.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::runtime::Runtime;
+    /// use onioncloud_lowlevel::runtime::test::TestExecutor;
+    ///
+    /// let mut exec = TestExecutor::default();
+    ///
+    /// exec.runtime().spawn(async { println!("test") });
+    /// assert!(exec.run_tasks());
+    /// assert!(!exec.run_tasks());
+    /// ```
     #[instrument(skip_all)]
     pub fn run_tasks(&mut self) -> bool {
         self.rt.0.timers.wake_timers();
-        let pending = take(&mut *self.rt.0.pending.lock());
-        self.tasks.add_pending(pending);
+        self.register_pending_tasks();
         let ret = self.tasks.run_tasks();
         trace!("run {ret} tasks");
         ret != 0
@@ -168,12 +283,10 @@ impl TestExecutor {
             let _scope = info_span!("loop", i).entered();
 
             self.rt.0.timers.advance_and_wake_timers();
-            let pending = take(&mut *self.rt.0.pending.lock());
-            let pending_len = pending.len();
-            self.tasks.add_pending(pending);
+            let pending = self.register_pending_tasks();
             let active = self.tasks.task_count();
             let run = self.tasks.run_tasks();
-            trace!(pending = pending_len, active, run, "finished loop");
+            trace!(pending, active, run, "finished loop");
             i = i.wrapping_add(1);
 
             if f(self, run) {
@@ -182,6 +295,25 @@ impl TestExecutor {
         }
     }
 
+    /// Run tasks until all tasks finished.
+    ///
+    /// # Panic
+    ///
+    /// Panics if tasks deadlocks (no task can make progress).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::runtime::Runtime;
+    /// use onioncloud_lowlevel::runtime::test::TestExecutor;
+    ///
+    /// let mut exec = TestExecutor::default();
+    ///
+    /// for i in 0..10 {
+    ///     exec.runtime().spawn(async move { println!("test {i}") });
+    /// }
+    /// exec.run_tasks_until_finished();
+    /// ```
     #[instrument(skip_all)]
     pub fn run_tasks_until_finished(&mut self) {
         self.run_tasks_until(|this, run| {
@@ -199,6 +331,20 @@ impl TestExecutor {
         })
     }
 
+    /// Spawns a task and run it until it finished.
+    ///
+    /// # Panic
+    ///
+    /// Panics if tasks deadlocks (no task can make progress).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::runtime::Runtime;
+    /// use onioncloud_lowlevel::runtime::test::TestExecutor;
+    ///
+    /// TestExecutor::default().spawn_blocking(async { println!("test") });
+    /// ```
     #[instrument(skip_all)]
     pub fn spawn_blocking(&mut self, fut: impl 'static + Send + Future<Output = ()>) {
         let id = self.tasks.len();
@@ -212,6 +358,13 @@ impl TestExecutor {
                     true
                 } else {
                     error!("runtime deadlocks");
+
+                    for i in 0..this.tasks.len() {
+                        if !this.tasks.is_task_finished(i) {
+                            error!("task {i} deadlocks");
+                        }
+                    }
+
                     panic!("runtime deadlocks");
                 }
             } else {
@@ -269,6 +422,39 @@ mod tests {
                 });
             }
         }
+
+        exec.run_tasks_until_finished();
+    }
+
+    #[test]
+    #[instrument]
+    fn test_task_handle() {
+        let mut exec = TestExecutor::default();
+
+        let rt = exec.runtime().clone();
+        exec.runtime().spawn(async move {
+            let (send, recv) = rt.spsc_make::<u64>(2);
+            let handle = rt.spawn(async move {
+                let mut acc = 0;
+                let mut recv = pin!(recv);
+                while let Some(i) = recv.next().await {
+                    info!("received {i}");
+                    acc += i;
+                }
+                acc
+            });
+
+            let mut acc = 0;
+            let mut send = pin!(send);
+            for i in 0..10 {
+                info!("send {i}");
+                send.feed(i).await.unwrap();
+                acc += i;
+            }
+            send.close().await.unwrap();
+
+            assert_eq!(acc, handle.await);
+        });
 
         exec.run_tasks_until_finished();
     }
