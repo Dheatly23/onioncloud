@@ -21,13 +21,13 @@ pub trait Runtime: crate::private::Sealed + Send {
     /// Socket stream type.
     type Stream: Stream;
     /// SPSC sender type.
-    type SPSCSender<T: 'static + Send>: Send + Sink<T, Error = SendError<T>>;
+    type SPSCSender<T: 'static + Send>: PipeSender<T>;
     /// SPSC receiver type.
-    type SPSCReceiver<T: 'static + Send>: Send + FuturesStream<Item = T>;
+    type SPSCReceiver<T: 'static + Send>: PipeReceiver<T>;
     /// MPSC sender type.
-    type MPSCSender<T: 'static + Send>: Send + Clone + Sink<T, Error = SendError<T>>;
+    type MPSCSender<T: 'static + Send>: PipeSender<T> + Clone;
     /// MPSC receiver type.
-    type MPSCReceiver<T: 'static + Send>: Send + FuturesStream<Item = T>;
+    type MPSCReceiver<T: 'static + Send>: PipeReceiver<T>;
 
     /// Get current time.
     fn get_time(&self) -> Instant {
@@ -84,4 +84,46 @@ impl<T> SendError<T> {
     pub(crate) fn from_flume(v: flume::SendError<T>) -> Self {
         Self(v.0)
     }
+
+    /// Unwraps into inner value.
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+/// Try send error type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrySendError<T> {
+    /// Channel disconnected.
+    Disconnected(T),
+    /// Channel is not ready,
+    NotReady(T),
+}
+
+impl<T> From<SendError<T>> for TrySendError<T> {
+    fn from(v: SendError<T>) -> Self {
+        Self::Disconnected(v.0)
+    }
+}
+
+impl<T> TrySendError<T> {
+    /// Unwraps into inner value.
+    pub fn into_inner(self) -> T {
+        match self {
+            Self::Disconnected(v) => v,
+            Self::NotReady(v) => v,
+        }
+    }
+}
+
+/// Trait for pipe sender.
+pub trait PipeSender<T>: crate::private::Sealed + Send + Sink<T, Error = SendError<T>> {
+    /// Checks if pipe is disconnected.
+    fn is_disconnected(&self) -> bool;
+}
+
+/// Trait for pipe receiver.
+pub trait PipeReceiver<T>: crate::private::Sealed + Send + FuturesStream<Item = T> {
+    /// Checks if pipe is disconnected.
+    fn is_disconnected(&self) -> bool;
 }

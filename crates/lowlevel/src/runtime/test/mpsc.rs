@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 use pin_project::{pin_project, pinned_drop};
 
 use crate::private::Sealed;
-use crate::runtime::SendError;
+use crate::runtime::{PipeReceiver, PipeSender, SendError};
 use crate::util::set_option_waker;
 
 struct MPSCPipeInner<T> {
@@ -195,6 +195,16 @@ impl<T: Send> Sink<T> for MPSCPipeSender<T> {
     }
 }
 
+impl<T: Send> PipeSender<T> for MPSCPipeSender<T> {
+    fn is_disconnected(&self) -> bool {
+        let Some(inner) = self.inner else { return true };
+        // SAFETY: This is originally created from Box.
+        let inner = unsafe { inner.as_ref() };
+
+        inner.receiver.load(Acquire) == 0
+    }
+}
+
 impl<T> Debug for MPSCPipeSender<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.write_str("MPSCPipeSender")
@@ -246,6 +256,15 @@ impl<T: Send> Stream for MPSCPipeReceiver<T> {
             set_option_waker(&mut guard.recv_waker, cx);
             Poll::Pending
         }
+    }
+}
+
+impl<T: Send> PipeSender<T> for MPSCPipeReceiver<T> {
+    fn is_disconnected(&self) -> bool {
+        // SAFETY: This is originally created from Box.
+        let inner = unsafe { self.0.as_ref() };
+
+        inner.senders.load(Acquire) == 0
     }
 }
 

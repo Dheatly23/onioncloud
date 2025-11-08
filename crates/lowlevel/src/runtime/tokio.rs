@@ -5,8 +5,9 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
-use flume::r#async::{RecvStream, SendSink as FlumeSendSink};
+use flume::r#async::{RecvStream as FlumeRecvStream, SendSink as FlumeSendSink};
 use flume::{bounded, unbounded};
+use futures_core::stream::Stream as FutStream;
 use futures_io::{AsyncRead, AsyncWrite};
 use futures_sink::Sink;
 use pin_project::pin_project;
@@ -17,7 +18,7 @@ use tokio::time::{Instant as TokioInstant, Sleep, sleep_until};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 use tracing::{Instrument, Span, trace_span};
 
-use super::{Runtime, SendError, Stream, Timer};
+use super::{PipeReceiver, PipeSender, Runtime, SendError, Stream, Timer};
 use crate::private::{SealWrap, Sealed};
 
 type TokioStream = Compat<BufStream<TcpStream>>;
@@ -33,9 +34,9 @@ impl Runtime for TokioRuntime {
     type Timer = SealWrap<Sleep>;
     type Stream = SealWrap<TokioStream>;
     type SPSCSender<T: 'static + Send> = SendSink<T>;
-    type SPSCReceiver<T: 'static + Send> = RecvStream<'static, T>;
+    type SPSCReceiver<T: 'static + Send> = RecvStream<T>;
     type MPSCSender<T: 'static + Send> = SendSink<T>;
-    type MPSCReceiver<T: 'static + Send> = RecvStream<'static, T>;
+    type MPSCReceiver<T: 'static + Send> = RecvStream<T>;
 
     fn spawn<F>(&self, fut: F) -> Self::Task<F::Output>
     where
@@ -66,7 +67,7 @@ impl Runtime for TokioRuntime {
         } else {
             bounded(size)
         };
-        (send.into_sink().into(), recv.into_stream())
+        (send.into_sink().into(), recv.into_stream().into())
     }
 
     fn mpsc_make<T: 'static + Send>(
@@ -78,7 +79,7 @@ impl Runtime for TokioRuntime {
         } else {
             bounded(size)
         };
-        (send.into_sink().into(), recv.into_stream())
+        (send.into_sink().into(), recv.into_stream().into())
     }
 }
 
@@ -161,6 +162,8 @@ impl Stream for SealWrap<TokioStream> {
 #[derive(Debug)]
 pub struct SendSink<T: 'static + Send>(#[pin] pub FlumeSendSink<'static, T>);
 
+impl<T: 'static + Send> Sealed for SendSink<T> {}
+
 impl<T: 'static + Send> Clone for SendSink<T> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
@@ -212,5 +215,53 @@ impl<T: 'static + Send> Sink<T> for SendSink<T> {
             .0
             .poll_close(cx)
             .map_err(SendError::from_flume)
+    }
+}
+
+impl<T: 'static + Send> PipeSender<T> for SendSink<T> {
+    fn is_disconnected(&self) -> bool {
+        self.0.is_disconnected()
+    }
+}
+
+#[pin_project]
+#[derive(Debug)]
+pub struct RecvStream<T: 'static + Send>(#[pin] pub FlumeRecvStream<'static, T>);
+
+impl<T: 'static + Send> Sealed for RecvStream<T> {}
+
+impl<T: 'static + Send> Clone for RecvStream<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+
+    fn clone_from(&mut self, src: &Self) {
+        self.0.clone_from(&src.0);
+    }
+}
+
+impl<T: 'static + Send> From<FlumeRecvStream<'static, T>> for RecvStream<T> {
+    fn from(v: FlumeRecvStream<'static, T>) -> Self {
+        Self(v)
+    }
+}
+
+impl<T: 'static + Send> From<RecvStream<T>> for FlumeRecvStream<'static, T> {
+    fn from(v: RecvStream<T>) -> Self {
+        v.0
+    }
+}
+
+impl<T: 'static + Send> FutStream for RecvStream<T> {
+    type Item = T;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.project().0.poll_next(cx)
+    }
+}
+
+impl<T: 'static + Send> PipeReceiver<T> for RecvStream<T> {
+    fn is_disconnected(&self) -> bool {
+        self.0.is_disconnected()
     }
 }

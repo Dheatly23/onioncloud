@@ -17,13 +17,19 @@ use crate::private::Sealed;
 use crate::runtime::Stream;
 use crate::util::set_option_waker;
 
+/// Open socket configuration.
+#[non_exhaustive]
 pub struct OpenSocket {
+    /// Initial send buffer data.
     pub send: VecDeque<u8>,
+    /// Marks send buffer to no longer send any more data.
     pub send_eof: bool,
+    /// Address associated with socket.
     pub addr: SocketAddr,
 }
 
 impl OpenSocket {
+    /// Create new [`OpenSocket`].
     #[inline]
     pub fn new(addr: SocketAddr) -> Self {
         Self {
@@ -33,12 +39,14 @@ impl OpenSocket {
         }
     }
 
+    /// Sets initial data to be sent.
     #[inline]
     pub fn with_send(mut self, value: VecDeque<u8>) -> Self {
         self.send = value;
         self
     }
 
+    /// Marks send buffer to be closed.
     #[inline]
     pub fn with_send_eof(mut self, value: bool) -> Self {
         self.send_eof = value;
