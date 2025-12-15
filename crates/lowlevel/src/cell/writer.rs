@@ -5,7 +5,7 @@ use zerocopy::byteorder::big_endian::U16;
 
 use super::dispatch::{CellType, WithCellConfig};
 use super::{CellHeader, CellHeaderBig, CellHeaderSmall, CellLike, CellRef};
-use crate::cache::{Cachable, Cached, CellCache};
+use crate::cache::{Cachable, Cached, CellCache, CellCacheExt as _};
 use crate::errors;
 use crate::util::sans_io::Handle;
 use crate::util::wrap_eof;
@@ -23,6 +23,12 @@ enum CellWriterIndex {
     CellSize(U16, u8),
     Data(usize),
     End,
+}
+
+impl<C: Cachable> Cachable for CellWriter<C> {
+    fn cache<CC: CellCache + ?Sized>(self, cache: &CC) {
+        self.cell.cache(cache);
+    }
 }
 
 impl<C: CellLike> CellWriter<C> {
@@ -158,6 +164,22 @@ impl<C: CellLike> Handle<&mut dyn Write> for CellWriter<C> {
         if let Some(cell) = self.cell.as_ref() {
             write_cell(writer, cell, &mut self.index)?;
             self.cell = None;
+        }
+
+        Ok(())
+    }
+}
+
+/// Handle a [`Write`] stream, but with [`CellCache`].
+///
+/// This allows for [`CellWriter`] to borrow [`CellCache`] instead of carrying a [`Cached`] cell.
+impl<C: CellLike + Cachable, CC: CellCache> Handle<(&mut dyn Write, CC)> for CellWriter<C> {
+    type Return = IoResult<()>;
+
+    fn handle(&mut self, (writer, cache): (&mut dyn Write, CC)) -> Self::Return {
+        if let Some(cell) = self.cell.as_ref() {
+            write_cell(writer, cell, &mut self.index)?;
+            cache.discard(self.cell.take());
         }
 
         Ok(())

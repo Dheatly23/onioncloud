@@ -7,6 +7,7 @@ use zerocopy::{transmute_mut, transmute_ref};
 use super::{
     Cell, CellHeader, CellHeaderBig, CellHeaderSmall, FIXED_CELL_SIZE, FixedCell, VariableCell,
 };
+use crate::cache::{Cachable, CellCache};
 use crate::util::sans_io::Handle;
 use crate::util::wrap_eof;
 
@@ -15,6 +16,12 @@ pub struct FixedCellReader {
     header: CellHeader,
     data: Option<FixedCell>,
     index: usize,
+}
+
+impl Cachable for FixedCellReader {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.data.cache(cache);
+    }
 }
 
 impl FixedCellReader {

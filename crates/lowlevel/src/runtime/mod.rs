@@ -13,7 +13,7 @@ use futures_io::{AsyncRead, AsyncWrite};
 use futures_sink::Sink;
 
 /// Trait for a runtime.
-pub trait Runtime: crate::private::Sealed + Send {
+pub trait Runtime: crate::private::Sealed + Send + Sync {
     /// Handle for task.
     type Task<T: Send>: Future<Output = T> + Send;
     /// Timer type.

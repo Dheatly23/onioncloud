@@ -1,12 +1,15 @@
 mod buffer;
 pub mod cell_map;
-pub mod channel;
-pub mod circuit;
+//pub mod channel;
+//pub mod circuit;
 pub mod sans_io;
 
+use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
+use std::convert::{AsMut, AsRef};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::future::{Future, poll_fn};
+use std::hash::{Hash, Hasher};
 use std::io::{Error as IoError, ErrorKind, Read, Result as IoResult, Write};
 use std::mem::size_of;
 use std::pin::Pin;
@@ -21,6 +24,7 @@ use futures_io::{AsyncRead, AsyncWrite};
 use pin_project::pin_project;
 use scopeguard::guard_on_unwind;
 
+use crate::cache::{Cachable, CellCache};
 use crate::crypto::EdPublicKey;
 use crate::runtime::{Runtime, Timer};
 pub use buffer::*;
@@ -433,6 +437,149 @@ pub(crate) fn option_ord_min<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 
 pub(crate) const fn c_max_usize(a: usize, b: usize) -> usize {
     if a >= b { a } else { b }
+}
+
+/// Data type wrapping data with  generational reference.
+pub struct GenerationalData<T: ?Sized> {
+    /// Generation value.
+    pub generation: u64,
+
+    /// Wrapped value.
+    pub inner: T,
+}
+
+impl<T: Clone> Clone for GenerationalData<T> {
+    fn clone(&self) -> Self {
+        Self::new(self.inner.clone(), self.generation)
+    }
+
+    fn clone_from(&mut self, src: &Self) {
+        self.inner.clone_from(&src.inner);
+        self.generation = src.generation;
+    }
+}
+
+impl<T: Copy> Copy for GenerationalData<T> {}
+
+impl<T: ?Sized + Hash> Hash for GenerationalData<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.inner.hash(state);
+        self.generation.hash(state);
+    }
+}
+
+impl<R: ?Sized, T: ?Sized + PartialEq<R>> PartialEq<GenerationalData<R>> for GenerationalData<T> {
+    fn eq(&self, rhs: &GenerationalData<R>) -> bool {
+        self.inner.eq(&rhs.inner) && self.generation == rhs.generation
+    }
+}
+
+impl<T: ?Sized + Eq> Eq for GenerationalData<T> {}
+
+impl<R: ?Sized, T: ?Sized + PartialOrd<R>> PartialOrd<GenerationalData<R>> for GenerationalData<T> {
+    fn partial_cmp(&self, rhs: &GenerationalData<R>) -> Option<Ordering> {
+        self.inner
+            .partial_cmp(&rhs.inner)
+            .map(|v| v.then_with(|| self.generation.cmp(&rhs.generation)))
+    }
+}
+
+impl<T: ?Sized + Ord> Ord for GenerationalData<T> {
+    fn cmp(&self, rhs: &Self) -> Ordering {
+        self.inner
+            .cmp(&rhs.inner)
+            .then_with(|| self.generation.cmp(&rhs.generation))
+    }
+}
+
+impl<T: ?Sized + Debug> Debug for GenerationalData<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("GenerationalData")
+            .field("generation", &self.generation)
+            .field("inner", &&self.inner)
+            .finish()
+    }
+}
+
+impl<T: ?Sized + Display> Display for GenerationalData<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{} generation {:016x}", &self.inner, self.generation)
+    }
+}
+
+impl<T: ?Sized> AsRef<T> for GenerationalData<T> {
+    #[inline]
+    fn as_ref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T: ?Sized> AsMut<T> for GenerationalData<T> {
+    #[inline]
+    fn as_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+}
+
+impl<T: Cachable> Cachable for GenerationalData<T> {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.inner.cache(cache);
+    }
+}
+
+impl<T> GenerationalData<T> {
+    /// Create new [`GenerationalData`].
+    #[inline]
+    pub const fn new(value: T, generation: u64) -> Self {
+        Self {
+            generation,
+            inner: value,
+        }
+    }
+
+    /// Unwraps into inner value.
+    #[inline(always)]
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+}
+
+impl<T: ?Sized> GenerationalData<T> {
+    /// Gets generation value.
+    #[inline(always)]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Sets generation value.
+    #[inline(always)]
+    pub const fn set_generation(&mut self, generation: u64) {
+        self.generation = generation;
+    }
+
+    /// Gets reference to inner.
+    #[inline(always)]
+    pub const fn as_ref(&self) -> &T {
+        &self.inner
+    }
+
+    /// Gets mutable reference to inner.
+    #[inline(always)]
+    pub const fn as_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
+    /// Maps inner value.
+    #[inline(always)]
+    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> GenerationalData<R>
+    where
+        T: Sized,
+    {
+        GenerationalData {
+            generation: self.generation,
+            inner: f(self.inner),
+        }
+    }
 }
 
 #[cfg(test)]

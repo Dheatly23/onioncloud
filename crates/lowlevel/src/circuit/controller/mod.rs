@@ -1,13 +1,14 @@
 pub mod dir;
 
 use std::fmt::{Debug, Display};
-use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::num::NonZeroU16;
 
 use super::{CircuitInput, CircuitOutput};
 use crate::cell::destroy::DestroyReason;
-use crate::util::cell_map::CellMap;
-use crate::util::sans_io::event::{ChildCellMsg, ControlMsg, ParentCellMsg, Timeout};
+use crate::runtime::Runtime;
+use crate::util::sans_io::event::{
+    ChannelClosed, ChildCellMsg, ControlMsg, ParentCellMsg, Timeout,
+};
 use crate::util::sans_io::{CellMsgPause, Handle};
 
 /// Trait for a circuit controller.
@@ -37,21 +38,29 @@ use crate::util::sans_io::{CellMsgPause, Handle};
 ///   Stream cell message handler. Returns [`CellMsgPause`] to pause next cell message handling.
 pub trait CircuitController:
     Send
-    + for<'a> Handle<
+    + for<'a, 'b> Handle<
         (
-            CircuitInput<'a, Self::Cell>,
-            &'a mut CellMap<Self::StreamCell, Self::StreamMeta>,
+            &'a Self::Runtime,
+            CircuitInput<'a, 'b, Self::Runtime, Self::StreamCell, Self::Cell, Self::StreamMeta>,
         ),
         Return = Result<CircuitOutput, Self::Error>,
     > + Handle<Timeout, Return = Result<(), Self::Error>>
     + Handle<ControlMsg<Self::ControlMsg>, Return = Result<(), Self::Error>>
     + Handle<ChildCellMsg<Self::StreamCell>, Return = Result<CellMsgPause, Self::Error>>
     + Handle<ParentCellMsg<Self::Cell>, Return = Result<CellMsgPause, Self::Error>>
+    + for<'a> Handle<
+        ChannelClosed<'a, NonZeroU16, Self::StreamCell, Self::StreamMeta>,
+        Return = Result<(), Self::Error>,
+    >
 {
+    /// Runtime.
+    type Runtime: 'static + Runtime;
     /// Controller configuration.
     type Config: 'static + Send + Sync;
     /// Error type.
     type Error: 'static + Debug + Display + Send + Sync;
+    /// Circuit ID.
+    type CircID: 'static + Send + Sync + Debug + Display;
     /// Control message.
     type ControlMsg: 'static + Send;
     /// Cell type from channel controller.
@@ -72,7 +81,7 @@ pub trait CircuitController:
     }
 
     /// Create new [`CircuitController`].
-    fn new(cfg: Arc<dyn Send + Sync + AsRef<Self::Config>>, circ_id: NonZeroU32) -> Self;
+    fn new(cfg: Self::Config, circ_id: Self::CircID) -> Self;
 
     /// Set link version.
     ///

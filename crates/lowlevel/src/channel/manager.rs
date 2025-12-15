@@ -1,17 +1,12 @@
-use std::collections::hash_map::{Entry, HashMap};
 use std::future::Future;
 use std::io::{Error as IoError, ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::Poll::*;
 use std::task::{Context, Poll};
-use std::time::Instant;
 
-use flume::r#async::RecvStream;
-use flume::{Receiver, Sender, bounded};
 use futures_core::Stream as _;
-use futures_util::select_biased;
+use futures_util::{FutureExt as _, SinkExt as _, select_biased};
 use pin_project::pin_project;
 use rustls::Error as RustlsError;
 use rustls::client::ClientConnection;
@@ -19,210 +14,49 @@ use scopeguard::guard;
 use tracing::{Span, debug, debug_span, error, info, instrument, trace, warn};
 
 use super::controller::ChannelController;
-use super::{ChannelConfig, ChannelInput, Stream};
-use crate::crypto::relay::RelayId;
+use super::{ChannelConfig, ChannelInput, CircMap, Stream};
 use crate::crypto::tls::setup_client;
 use crate::errors;
-use crate::runtime::{Runtime, Stream as RTStream};
-use crate::util::cell_map::CellMap;
-use crate::util::sans_io::event::{ChildCellMsg, ControlMsg, Timeout};
+use crate::runtime::{Runtime, SendError, Stream as RTStream};
+use crate::util::sans_io::event::{ChannelClosed, ChildCellMsg, ControlMsg, Timeout};
 use crate::util::{
     AsyncReadWrapper, AsyncWriteWrapper, FutureRepollable, TimerManager, print_hex, print_list,
 };
 
-struct ChannelInner<C: ChannelController> {
-    sender: Sender<C::ControlMsg>,
-    receiver: Receiver<C::ControlMsg>,
-    config: C::Config,
-}
-
-impl<C: ChannelController> AsRef<C::Config> for ChannelInner<C> {
-    fn as_ref(&self) -> &C::Config {
-        &self.config
-    }
-}
-
-#[pin_project]
-struct Channel<R: Runtime, C: ChannelController, M> {
+#[pin_project(!Unpin)]
+struct Channel<C: ChannelController> {
     #[pin]
-    handle: FutureRepollable<R::Task<bool>>,
-    inner: Arc<ChannelInner<C>>,
+    handle: FutureRepollable<<C::Runtime as Runtime>::Task<bool>>,
     #[pin]
-    meta: M,
+    send_ctrl: <C::Runtime as Runtime>::SPSCSender<C::ControlMsg>,
 }
 
 /// A reference to channel.
-///
-/// Use [`ChannelManager::get`] to create it.
-pub struct ChannelRef<'a, R: Runtime, C: ChannelController, M> {
-    inner: Pin<&'a mut Channel<R, C, M>>,
-    runtime: &'a R,
+pub struct ChannelRef<'a, C: ChannelController> {
+    inner: Pin<&'a mut Channel<C>>,
 }
 
-/// A removed channel.
-///
-/// Typically created by [`ChannelManager::remove`],
-/// it can be used to do finalization outside channel manager.
-pub struct ChannelRemoved<R: Runtime, C: ChannelController, M>(Pin<Box<Channel<R, C, M>>>);
-
-/// Channel manager.
-///
-/// Manages multiple channels, each running in separate task.
-/// It is recommended to create dedicated task to manage [`ChannelManager`]
-/// and communicate to it via channels.
-pub struct ChannelManager<R: Runtime, C: ChannelController, M = ()> {
-    runtime: R,
-    #[allow(clippy::type_complexity)]
-    channels: HashMap<RelayId, Pin<Box<Channel<R, C, M>>>>,
-}
-
-impl<R: Runtime, C: ChannelController, M> ChannelManager<R, C, M> {
-    /// Create new [`ChannelManager`].
-    pub fn new(runtime: R) -> Self {
-        Self {
-            runtime,
-            channels: HashMap::new(),
-        }
-    }
-
-    /// Get reference to channel.
-    pub fn get<'a>(&'a mut self, peer: &RelayId) -> Option<ChannelRef<'a, R, C, M>> {
-        self.channels.get_mut(peer).map(|v| ChannelRef {
-            inner: v.as_mut(),
-            runtime: &self.runtime,
-        })
-    }
-
-    /// Checks if channel with peer ID exists.
-    ///
-    /// Note that it doesn't check if channel is running.
-    pub fn has(&self, peer: &RelayId) -> bool {
-        self.channels.contains_key(peer)
-    }
-
-    /// Open new channel if it doesn't exist.
-    ///
-    /// # Parameters
-    /// - `cfg` : Channel configuration.
-    /// - `meta` : Metadata associated with channel.
-    pub fn create(&mut self, cfg: C::Config, meta: M) -> ChannelRef<'_, R, C, M>
-    where
-        R: 'static + Clone,
-        C: 'static,
-    {
-        let v = self.channels.entry(*cfg.peer_id()).or_insert_with(|| {
-            let (sender, receiver) = bounded(0);
-            let inner = Arc::new(ChannelInner {
-                config: cfg,
-                sender,
-                receiver,
-            });
-
-            Box::pin(Channel {
-                handle: self
-                    .runtime
-                    .spawn(handle_channel(self.runtime.clone(), inner.clone()))
-                    .into(),
-                inner,
-                meta,
-            })
-        });
-
-        ChannelRef {
-            inner: v.as_mut(),
-            runtime: &self.runtime,
-        }
-    }
-
-    /// Remove channel from manager.
-    ///
-    /// Make sure channel has stopped running before removing (use [`ChannelRef::completion`] or [`ChannelRemoved::completion`] to wait).
-    pub fn remove(&mut self, peer: &RelayId) -> Option<ChannelRemoved<R, C, M>> {
-        self.channels.remove(peer).map(ChannelRemoved)
-    }
-
-    /// Insert existing stream to manager if it doesn't exist.
-    ///
-    /// Useful for relays where connection comes from outside.
-    ///
-    /// # Parameters
-    /// - `stream` : Network stream.
-    /// - `cfg` : Channel configuration.
-    /// - `meta` : Metadata associated with channel.
-    pub fn insert(
-        &mut self,
-        stream: R::Stream,
-        cfg: C::Config,
-        meta: M,
-    ) -> IoResult<ChannelRef<'_, R, C, M>>
-    where
-        R: 'static + Clone,
-        C: 'static,
-    {
-        let v = match self.channels.entry(*cfg.peer_id()) {
-            Entry::Occupied(e) => {
-                drop((stream, cfg, meta));
-                e.into_mut()
-            }
-            Entry::Vacant(e) => {
-                let (sender, receiver) = bounded(0);
-                let inner = Arc::new(ChannelInner {
-                    config: cfg,
-                    sender,
-                    receiver,
-                });
-                let peer_addr = stream.peer_addr()?;
-
-                e.insert(Box::pin(Channel {
-                    handle: self
-                        .runtime
-                        .spawn(handle_stream(
-                            self.runtime.clone(),
-                            inner.clone(),
-                            stream,
-                            peer_addr,
-                        ))
-                        .into(),
-                    inner,
-                    meta,
-                }))
-            }
-        };
-
-        Ok(ChannelRef {
-            inner: v.as_mut(),
-            runtime: &self.runtime,
-        })
-    }
-}
-
-impl<R: Runtime, C: ChannelController, M> Channel<R, C, M> {
-    /// Gets reference to channel metadata.
-    fn meta(self: Pin<&mut Self>) -> Pin<&mut M> {
-        self.project().meta
-    }
-
-    /// Gets reference to channel configuration.
-    fn config(&self) -> &C::Config {
-        &self.inner.config
-    }
-
+impl<C: ChannelController> Channel<C> {
     /// Send a control message.
     async fn send_control(
         self: Pin<&mut Self>,
         msg: C::ControlMsg,
     ) -> Result<(), errors::SendControlMsgError> {
-        let this = self.project();
+        let mut this = self.project();
 
         select_biased! {
-            res = this.handle => Err(if res {
+            res = this.handle.as_mut() => Err(if res {
                 errors::SendControlMsgError::HandleFinalized
             } else {
                 errors::HandleError.into()
             }),
-            res = this.inner.sender.send_async(msg) => {
-                assert!(res.is_ok(), "receiver somehow got closed");
-                Ok(())
+            res = this.send_ctrl.send(msg).fuse() => match res {
+                Err(_) => Err(if this.handle.await {
+                    errors::SendControlMsgError::HandleFinalized
+                } else {
+                    errors::HandleError.into()
+                }),
+                Ok(_) => Ok(()),
             },
         }
     }
@@ -249,74 +83,9 @@ impl<R: Runtime, C: ChannelController, M> Channel<R, C, M> {
             Err(errors::HandleError)
         }
     }
-
-    /// Restarts controller if stopped.
-    ///
-    /// Sometimes it's useful to reuse state.
-    pub fn restart(self: Pin<&mut Self>, r: &R) -> bool
-    where
-        R: 'static + Clone,
-        C: 'static,
-    {
-        let mut this = self.project();
-
-        if !this.handle.is_finished() {
-            return false;
-        }
-
-        this.handle.as_mut().set(
-            r.spawn(handle_channel(r.clone(), this.inner.clone()))
-                .into(),
-        );
-        true
-    }
-
-    /// Restarts controller if stopped (with attached stream).
-    pub fn restart_with(self: Pin<&mut Self>, r: &R, stream: R::Stream) -> bool
-    where
-        R: 'static + Clone,
-        C: 'static,
-    {
-        let mut this = self.project();
-
-        if !this.handle.is_finished() {
-            return false;
-        }
-
-        let peer_addr = match stream.peer_addr() {
-            Ok(v) => v,
-            Err(e) => {
-                error!(error = %e, "cannot get peer address");
-                return false;
-            }
-        };
-
-        this.handle.as_mut().set(
-            r.spawn(handle_stream(
-                r.clone(),
-                this.inner.clone(),
-                stream,
-                peer_addr,
-            ))
-            .into(),
-        );
-        true
-    }
 }
 
-impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
-    /// Gets reference to channel metadata.
-    #[inline(always)]
-    pub fn meta(&mut self) -> Pin<&mut M> {
-        self.inner.as_mut().meta()
-    }
-
-    /// Gets reference to channel configuration.
-    #[inline(always)]
-    pub fn config(&self) -> &C::Config {
-        self.inner.config()
-    }
-
+impl<C: ChannelController> ChannelRef<'_, C> {
     /// Send a control message.
     #[inline(always)]
     pub async fn send_control(
@@ -342,106 +111,39 @@ impl<R: Runtime, C: ChannelController, M> ChannelRef<'_, R, C, M> {
     pub async fn completion(&mut self) -> Result<(), errors::HandleError> {
         self.inner.as_mut().completion().await
     }
-
-    /// Restarts controller if stopped.
-    ///
-    /// Sometimes it's useful to reuse state.
-    #[inline(always)]
-    pub fn restart(&mut self) -> bool
-    where
-        R: 'static + Clone,
-        C: 'static,
-    {
-        self.inner.as_mut().restart(self.runtime)
-    }
-
-    /// Restarts controller if stopped (with attached stream).
-    #[inline(always)]
-    pub fn restart_with(&mut self, stream: R::Stream) -> bool
-    where
-        R: 'static + Clone,
-        C: 'static,
-    {
-        self.inner.as_mut().restart_with(self.runtime, stream)
-    }
-}
-
-impl<R: Runtime, C: ChannelController, M> ChannelRemoved<R, C, M> {
-    /// Gets reference to channel metadata.
-    #[inline(always)]
-    pub fn meta(&mut self) -> Pin<&mut M> {
-        self.0.as_mut().meta()
-    }
-
-    /// Gets reference to channel configuration.
-    #[inline(always)]
-    pub fn config(&self) -> &C::Config {
-        self.0.config()
-    }
-
-    /// Send a control message.
-    #[inline(always)]
-    pub async fn send_control(
-        &mut self,
-        msg: C::ControlMsg,
-    ) -> Result<(), errors::SendControlMsgError> {
-        self.0.as_mut().send_control(msg).await
-    }
-
-    /// Send a control message and wait for completion.
-    ///
-    /// Useful for sending shutdown message.
-    #[inline(always)]
-    pub async fn send_and_completion(
-        mut self,
-        msg: C::ControlMsg,
-    ) -> Result<(), errors::HandleError> {
-        self.0.as_mut().send_and_completion(msg).await
-    }
-
-    /// Waits controller for completion.
-    #[inline(always)]
-    pub async fn completion(mut self) -> Result<(), errors::HandleError> {
-        self.0.as_mut().completion().await
-    }
 }
 
 /// Channel manager that only manages one channel.
 ///
 /// Useful if you want to manage channels yourself.
-pub struct SingleManager<R: Runtime, C: ChannelController, M> {
-    inner: Pin<Box<Channel<R, C, M>>>,
-    runtime: R,
+#[pin_project(!Unpin)]
+pub struct SingleManager<C: ChannelController> {
+    #[pin]
+    inner: Channel<C>,
 }
 
-impl<R: Runtime, C: ChannelController, M> SingleManager<R, C, M> {
+impl<C: ChannelController> SingleManager<C> {
     /// Create new channel.
     ///
     /// # Parameters
     /// - `runtime` : Runtime used. Must be [`Clone`]-able.
     /// - `config` : Channel configuration.
-    /// - `meta` : Channel metadata.
-    pub fn new(runtime: R, config: C::Config, meta: M) -> Self
+    pub fn new(runtime: &C::Runtime, config: C::Config) -> Self
     where
-        R: 'static + Clone,
         C: 'static,
+        C::Runtime: Clone,
     {
-        let (sender, receiver) = bounded(0);
-        let inner = Arc::new(ChannelInner {
-            config,
-            sender,
-            receiver,
-        });
-
+        let (sender, receiver) = runtime.spsc_make(1);
         Self {
-            inner: Box::pin(Channel {
+            inner: Channel {
                 handle: runtime
-                    .spawn(handle_channel(runtime.clone(), inner.clone()))
+                    .spawn(handle_channel::<
+                        C,
+                        StreamWrapper<<C::Runtime as Runtime>::Stream>,
+                    >(runtime.clone(), config, receiver))
                     .into(),
-                inner,
-                meta,
-            }),
-            runtime,
+                send_ctrl: sender,
+            },
         }
     }
 
@@ -451,97 +153,47 @@ impl<R: Runtime, C: ChannelController, M> SingleManager<R, C, M> {
     /// - `runtime` : Runtime used. Must be [`Clone`]-able.
     /// - `stream` : Stream to be bound.
     /// - `config` : Channel configuration.
-    /// - `meta` : Channel metadata.
-    pub fn with_stream(runtime: R, stream: R::Stream, config: C::Config, meta: M) -> IoResult<Self>
-    where
-        R: 'static + Clone,
-        C: 'static,
-    {
-        let (sender, receiver) = bounded(0);
-        let inner = Arc::new(ChannelInner {
-            config,
-            sender,
-            receiver,
-        });
-        let peer_addr = stream.peer_addr()?;
-
-        Ok(Self {
-            inner: Box::pin(Channel {
-                handle: runtime
-                    .spawn(handle_stream(
-                        runtime.clone(),
-                        inner.clone(),
-                        stream,
-                        peer_addr,
-                    ))
-                    .into(),
-                inner,
-                meta,
-            }),
-            runtime,
-        })
-    }
-
-    /// Create new channel with default metadata.
-    ///
-    /// # Parameters
-    /// - `runtime` : Runtime used. Must be [`Clone`]-able.
-    /// - `config` : Channel configuration.
-    pub fn with_default_meta(runtime: R, config: C::Config) -> Self
-    where
-        R: 'static + Clone,
-        C: 'static,
-        M: Default,
-    {
-        Self::new(runtime, config, M::default())
-    }
-
-    /// Bind stream into channel with default metadata.
-    ///
-    /// # Parameters
-    /// - `runtime` : Runtime used. Must be [`Clone`]-able.
-    /// - `stream` : Stream to be bound.
-    /// - `config` : Channel configuration.
-    pub fn with_stream_default_meta(
-        runtime: R,
-        stream: R::Stream,
+    pub fn with_stream(
+        runtime: &C::Runtime,
+        stream: <C::Runtime as Runtime>::Stream,
         config: C::Config,
     ) -> IoResult<Self>
     where
-        R: 'static + Clone,
         C: 'static,
-        M: Default,
+        C::Runtime: Clone,
     {
-        Self::with_stream(runtime, stream, config, M::default())
+        let (sender, receiver) = runtime.spsc_make(0);
+        let peer_addr = stream.peer_addr()?;
+
+        Ok(Self {
+            inner: Channel {
+                handle: runtime
+                    .spawn(handle_stream::<
+                        C,
+                        StreamWrapper<<C::Runtime as Runtime>::Stream>,
+                    >(
+                        runtime.clone(), config, receiver, stream, peer_addr
+                    ))
+                    .into(),
+                send_ctrl: sender,
+            },
+        })
     }
 
     /// Gets [`ChannelRef`] to self.
-    pub fn as_ref(&mut self) -> ChannelRef<'_, R, C, M> {
+    pub fn as_ref(self: Pin<&mut Self>) -> ChannelRef<'_, C> {
         ChannelRef {
-            inner: self.inner.as_mut(),
-            runtime: &self.runtime,
+            inner: self.project().inner,
         }
-    }
-
-    /// Gets reference to channel metadata.
-    #[inline(always)]
-    pub fn meta(&mut self) -> Pin<&mut M> {
-        self.inner.as_mut().meta()
-    }
-
-    /// Gets reference to channel configuration.
-    #[inline(always)]
-    pub fn config(&self) -> &C::Config {
-        self.inner.config()
     }
 
     /// Send a control message.
     #[inline(always)]
     pub async fn send_control(
-        &mut self,
+        self: Pin<&mut Self>,
         msg: C::ControlMsg,
     ) -> Result<(), errors::SendControlMsgError> {
-        self.inner.as_mut().send_control(msg).await
+        self.project().inner.as_mut().send_control(msg).await
     }
 
     /// Send a control message and wait for completion.
@@ -549,51 +201,35 @@ impl<R: Runtime, C: ChannelController, M> SingleManager<R, C, M> {
     /// Useful for sending shutdown message.
     #[inline(always)]
     pub async fn send_and_completion(
-        &mut self,
+        self: Pin<&mut Self>,
         msg: C::ControlMsg,
     ) -> Result<(), errors::HandleError> {
-        self.inner.as_mut().send_and_completion(msg).await
+        self.project().inner.as_mut().send_and_completion(msg).await
     }
 
     /// Waits controller for completion.
     #[inline(always)]
-    pub async fn completion(&mut self) -> Result<(), errors::HandleError> {
-        self.inner.as_mut().completion().await
-    }
-
-    /// Restarts controller if stopped.
-    ///
-    /// Sometimes it's useful to reuse state.
-    pub fn restart(&mut self) -> bool
-    where
-        R: 'static + Clone,
-        C: 'static,
-    {
-        self.inner.as_mut().restart(&self.runtime)
-    }
-
-    /// Restarts controller if stopped (with attached stream).
-    pub fn restart_with(&mut self, stream: R::Stream) -> bool
-    where
-        R: 'static + Clone,
-        C: 'static,
-    {
-        self.inner.as_mut().restart_with(&self.runtime, stream)
+    pub async fn completion(self: Pin<&mut Self>) -> Result<(), errors::HandleError> {
+        self.project().inner.as_mut().completion().await
     }
 }
 
-#[instrument(skip_all, fields(peer_id = %print_hex(cfg.config.peer_id())))]
-async fn handle_channel<R: Runtime, C: ChannelController + 'static>(
-    runtime: R,
-    cfg: Arc<ChannelInner<C>>,
+#[instrument(skip_all, fields(peer_id = %print_hex(cfg.peer_id())))]
+async fn handle_channel<
+    C: ChannelController + 'static,
+    S: StreamLike<Stream = <C::Runtime as Runtime>::Stream> + 'static,
+>(
+    rt: C::Runtime,
+    cfg: C::Config,
+    recv: <C::Runtime as Runtime>::SPSCReceiver<C::ControlMsg>,
 ) -> bool {
     let stream = {
-        let peer_addrs = cfg.config.peer_addrs();
+        let peer_addrs = cfg.peer_addrs();
         debug!(
             "connecting to peer at addresses: {}",
             print_list(&peer_addrs)
         );
-        runtime.connect(&peer_addrs[..]).await
+        rt.connect(&peer_addrs[..]).await
     };
     let stream = match stream {
         Ok(v) => v,
@@ -612,41 +248,34 @@ async fn handle_channel<R: Runtime, C: ChannelController + 'static>(
     };
     debug!("connected to peer at {peer_addr}");
 
-    handle_stream(runtime, cfg, stream, peer_addr).await
+    handle_stream::<C, S>(rt, cfg, recv, stream, peer_addr).await
 }
 
-#[instrument(skip_all, fields(peer_id = %print_hex(cfg.config.peer_id())))]
-async fn handle_stream<R: Runtime, C: ChannelController + 'static>(
-    runtime: R,
-    cfg: Arc<ChannelInner<C>>,
-    stream: R::Stream,
+#[instrument(skip_all, fields(peer_id = %print_hex(cfg.peer_id())))]
+async fn handle_stream<
+    C: ChannelController + 'static,
+    S: StreamLike<Stream = <C::Runtime as Runtime>::Stream> + 'static,
+>(
+    rt: C::Runtime,
+    cfg: C::Config,
+    recv: <C::Runtime as Runtime>::SPSCReceiver<C::ControlMsg>,
+    stream: <C::Runtime as Runtime>::Stream,
     peer_addr: SocketAddr,
 ) -> bool {
-    let tls = match setup_client(peer_addr.ip()) {
-        Ok(v) => v,
-        Err(e) => {
-            error!(error = %e, "rustls setup");
-            return false;
-        }
+    let Some(stream) = S::new(stream, peer_addr) else {
+        return false;
     };
 
     let fut = ChannelFut {
-        runtime,
-        stream: StreamWrapper {
-            stream,
-            tls,
-            addr: peer_addr,
-        },
         state: State::Normal {
             timer: TimerManager::new(),
-            ctrl_recv: cfg.receiver.clone().into_stream(),
-            circ_map: CellMap::new(
-                C::channel_cap(&cfg.config),
-                C::channel_aggregate_cap(&cfg.config),
-            ),
+            ctrl_recv: recv,
+            circ_map: CircMap::new(&rt, C::channel_cap(&cfg), C::channel_aggregate_cap(&cfg)),
             cell_msg_pause: true,
-            controller: C::new(cfg),
+            controller: C::new(&rt, cfg),
         },
+        rt,
+        stream,
         span: debug_span!("ChannelFut"),
     };
 
@@ -659,15 +288,16 @@ async fn handle_stream<R: Runtime, C: ChannelController + 'static>(
     }
 }
 
-#[pin_project(project = StateProj)]
-enum State<R: Runtime, C: ChannelController> {
+#[pin_project(!Unpin, project = StateProj)]
+enum State<C: ChannelController> {
     Normal {
         controller: C,
         #[pin]
-        timer: TimerManager<R>,
+        timer: TimerManager<C::Runtime>,
         #[pin]
-        ctrl_recv: RecvStream<'static, C::ControlMsg>,
-        circ_map: CellMap<C::Cell, C::CircMeta>,
+        ctrl_recv: <C::Runtime as Runtime>::SPSCReceiver<C::ControlMsg>,
+        #[pin]
+        circ_map: CircMap<C::Runtime, C::Cell, C::CircMeta>,
         cell_msg_pause: bool,
     },
     ReqShutdown,
@@ -675,13 +305,13 @@ enum State<R: Runtime, C: ChannelController> {
     Shutdown,
 }
 
-#[pin_project]
-struct ChannelFut<R: Runtime, C: ChannelController> {
-    runtime: R,
+#[pin_project(!Unpin)]
+struct ChannelFut<C: ChannelController, S: StreamLike> {
+    rt: C::Runtime,
     #[pin]
-    stream: StreamWrapper<R::Stream>,
+    stream: S,
     #[pin]
-    state: State<R, C>,
+    state: State<C>,
     span: Span,
 }
 
@@ -691,9 +321,10 @@ const FLAG_TIMEOUT: u8 = 1 << 2;
 const FLAG_CTRLMSG: u8 = 1 << 3;
 const FLAG_FLUSH: u8 = 1 << 4;
 const FLAG_CELLMSG: u8 = 1 << 5;
+const FLAG_CELLMAP: u8 = 1 << 6;
 const FLAG_EMPTY_HANDLE: u8 = 1 << 7;
 
-impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
+impl<C: ChannelController, S: StreamLike> Future for ChannelFut<C, S> {
     type Output = Result<(), C::Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -709,7 +340,7 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                 StateProj::Shutdown => return this.stream.poll_close(cx).map_err(|e| e.into()),
                 StateProj::ReqShutdown => {
                     debug!("graceful shutdown request received");
-                    this.stream.as_mut().tls().send_close_notify();
+                    this.stream.as_mut().send_close_notify();
                     this.state.set(State::TlsShutdown);
                     continue;
                 }
@@ -742,7 +373,7 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                 controller,
                 mut timer,
                 mut ctrl_recv,
-                circ_map,
+                mut circ_map,
                 cell_msg_pause,
             } = state
             else {
@@ -769,7 +400,7 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                         error!(
                             "shutting down: control channel disconnected (this might be a bug in channel manager)"
                         );
-                        this.state.set(State::Shutdown);
+                        this.state.set(State::ReqShutdown);
                         continue 'main;
                     };
 
@@ -784,17 +415,64 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                 pending |= FLAG_CTRLMSG;
             }
 
+            let mut has_ready = false;
+            if pending & FLAG_CELLMAP == 0 {
+                let mut err = None;
+                circ_map.as_mut().retain(|&id, mut v| {
+                    if err.is_some() {
+                        return true;
+                    }
+
+                    let cell = match v.as_mut().poll_ready(cx) {
+                        Ready(Err(SendError(v))) => Some(v),
+                        Ready(Ok(())) if !v.is_pollable() => None,
+                        Ready(Ok(())) => {
+                            has_ready = true;
+                            return true;
+                        }
+                        Pending => return true,
+                    };
+
+                    // Event: channel closed
+                    if let Err(e) = controller.handle(ChannelClosed {
+                        id,
+                        cell,
+                        meta: v.meta(),
+                    }) {
+                        err = Some(e);
+                    }
+                    has_event = true;
+
+                    false
+                });
+
+                if let Some(e) = err {
+                    this.state.set(State::Shutdown);
+                    return Ready(Err(e));
+                }
+
+                pending |= FLAG_CELLMAP;
+            }
+
             if pending & FLAG_CELLMSG == 0 {
                 while !*cell_msg_pause {
-                    let Ready(msg) = circ_map.poll_recv(cx) else {
-                        pending |= FLAG_CELLMSG;
-                        break;
+                    let msg = match circ_map.as_mut().poll_recv(cx) {
+                        Pending => {
+                            pending |= FLAG_CELLMSG;
+                            break;
+                        }
+                        Ready(Some(v)) => v,
+                        Ready(None) => {
+                            error!(
+                                "shutting down: circuit map aggregate receiver disconnected (this might be a bug in runtime)"
+                            );
+                            this.state.set(State::ReqShutdown);
+                            continue 'main;
+                        }
                     };
 
                     // Event: cell message
-                    *cell_msg_pause = match controller.handle(ChildCellMsg(
-                        msg.expect("circuit map aggregate receiver should never close"),
-                    )) {
+                    *cell_msg_pause = match controller.handle(ChildCellMsg(msg)) {
                         Ok(v) => v.0,
                         Err(e) => {
                             this.state.set(State::Shutdown);
@@ -810,9 +488,17 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
 
             if has_event || pending & FLAG_EMPTY_HANDLE == 0 {
                 // Handle channel
+                let mut is_any_close = false;
                 let ret = match controller.handle((
-                    ChannelInput::new(this.stream.as_mut().as_stream(), Instant::now()),
-                    circ_map,
+                    &*this.rt,
+                    ChannelInput::new(
+                        this.stream.as_mut().as_stream(),
+                        this.rt.get_time(),
+                        has_ready,
+                        cx,
+                        circ_map.as_mut(),
+                        &mut is_any_close,
+                    ),
                 )) {
                     Ok(v) => v,
                     Err(e) => {
@@ -826,31 +512,38 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
                     this.state.set(State::ReqShutdown);
                     continue;
                 }
+
                 if let Some(time) = ret.timeout {
                     debug!(timeout = ?time, "resetting timer");
-                    timer.as_mut().set(this.runtime, time);
+                    timer.as_mut().set(this.rt, time);
                     pending &= !FLAG_TIMEOUT;
                 } else {
                     debug!("clearing timer");
                     timer.as_mut().unset();
                 }
+
                 match (*cell_msg_pause, ret.cell_msg_pause) {
                     (true, false) => debug!("resuming cell message receiving"),
                     (false, true) => debug!("pausing cell message receiving"),
                     _ => (),
                 }
                 *cell_msg_pause = ret.cell_msg_pause;
+
+                if is_any_close {
+                    // Rescan close circuit
+                    pending &= !FLAG_CELLMAP;
+                }
             }
             // Mark empty handle as true, because either timeout already fires or it has been handled previously.
             pending |= FLAG_EMPTY_HANDLE;
 
             let mut retry = false;
-            if pending & FLAG_READ == 0 && this.stream.as_mut().tls().wants_read() {
+            if pending & FLAG_READ == 0 && this.stream.wants_read() {
                 trace!("repolling: TLS wants to read");
                 pending &= !FLAG_EMPTY_HANDLE; // Make sure controller will handle
                 retry = true;
             }
-            if pending & FLAG_WRITE == 0 && this.stream.as_mut().tls().wants_write() {
+            if pending & FLAG_WRITE == 0 && this.stream.wants_write() {
                 trace!("repolling: TLS wants to write");
                 pending &= !FLAG_EMPTY_HANDLE; // Make sure controller will handle
                 retry = true;
@@ -861,6 +554,10 @@ impl<R: Runtime, C: ChannelController> Future for ChannelFut<R, C> {
             }
             if pending & FLAG_CELLMSG == 0 && !*cell_msg_pause {
                 trace!("repolling: cell aggregate channel wants to be polled");
+                retry = true;
+            }
+            if pending & FLAG_CELLMAP == 0 {
+                trace!("repolling: some circuit(s) are closed");
                 retry = true;
             }
 
@@ -890,15 +587,66 @@ impl From<RustlsError> for ErrorType {
     }
 }
 
-#[pin_project]
+trait StreamLike: Sized {
+    type Stream;
+
+    fn new(stream: Self::Stream, addr: SocketAddr) -> Option<Self>;
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IoError>>;
+
+    fn send_close_notify(self: Pin<&mut Self>);
+
+    fn process(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        is_shutdown: bool,
+        pending: u8,
+    ) -> Result<Poll<Option<u8>>, ErrorType>;
+
+    fn as_stream(self: Pin<&mut Self>) -> &mut dyn Stream;
+
+    fn wants_read(&self) -> bool;
+
+    fn wants_write(&self) -> bool;
+}
+
+#[pin_project(!Unpin, project = StreamWrapperProj)]
 struct StreamWrapper<S> {
     #[pin]
     stream: S,
+    inner: InnerStreamWrapper,
+}
+
+struct InnerStreamWrapper {
     tls: ClientConnection,
     addr: SocketAddr,
 }
 
-impl<S: RTStream> StreamWrapper<S> {
+impl<S: RTStream> StreamLike for StreamWrapper<S> {
+    type Stream = S;
+
+    fn new(stream: S, addr: SocketAddr) -> Option<Self> {
+        match setup_client(addr.ip()) {
+            Ok(tls) => Some(Self {
+                stream,
+                inner: InnerStreamWrapper { tls, addr },
+            }),
+            Err(e) => {
+                error!(error = %e, "rustls setup");
+                None
+            }
+        }
+    }
+
+    #[instrument(level = "debug", skip(self, cx))]
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
+        self.project().stream.poll_close(cx)
+    }
+
+    fn send_close_notify(self: Pin<&mut Self>) {
+        self.project().inner.tls.send_close_notify();
+    }
+
     #[instrument(level = "debug", skip(self, cx))]
     fn process(
         self: Pin<&mut Self>,
@@ -906,30 +654,33 @@ impl<S: RTStream> StreamWrapper<S> {
         is_shutdown: bool,
         mut pending: u8,
     ) -> Result<Poll<Option<u8>>, ErrorType> {
-        let mut this = self.project();
+        let StreamWrapperProj {
+            mut stream,
+            inner: InnerStreamWrapper { tls, .. },
+        } = self.project();
 
         loop {
-            this.tls.process_new_packets()?;
+            tls.process_new_packets()?;
 
-            if pending & FLAG_FLUSH == 0 && this.stream.as_mut().poll_flush(cx)?.is_pending() {
+            if pending & FLAG_FLUSH == 0 && stream.as_mut().poll_flush(cx)?.is_pending() {
                 pending |= FLAG_FLUSH;
             }
 
-            let wants_write = pending & FLAG_WRITE == 0 && this.tls.wants_write();
-            let wants_read = pending & FLAG_READ == 0 && this.tls.wants_read();
+            let wants_write = pending & FLAG_WRITE == 0 && tls.wants_write();
+            let wants_read = pending & FLAG_READ == 0 && tls.wants_read();
             if !(wants_write || wants_read) {
                 break;
             }
 
             if wants_write {
-                let mut wrapper = guard(AsyncWriteWrapper::new(cx, this.stream.as_mut()), |w| {
+                let mut wrapper = guard(AsyncWriteWrapper::new(cx, stream.as_mut()), |w| {
                     if w.finish() {
                         pending |= FLAG_WRITE;
                     }
                 });
 
-                while this.tls.wants_write() {
-                    match this.tls.write_tls(&mut *wrapper) {
+                while tls.wants_write() {
+                    match tls.write_tls(&mut *wrapper) {
                         Ok(0) => {
                             info!("shutting down: write end connection closed");
                             return Ok(Ready(None));
@@ -944,14 +695,14 @@ impl<S: RTStream> StreamWrapper<S> {
             }
 
             if wants_read {
-                let mut wrapper = guard(AsyncReadWrapper::new(cx, this.stream.as_mut()), |w| {
+                let mut wrapper = guard(AsyncReadWrapper::new(cx, stream.as_mut()), |w| {
                     if w.finish() {
                         pending |= FLAG_READ;
                     }
                 });
 
-                while this.tls.wants_read() {
-                    match this.tls.read_tls(&mut *wrapper) {
+                while tls.wants_read() {
+                    match tls.read_tls(&mut *wrapper) {
                         Ok(0) => {
                             // XXX: Read end is closed.
                             // We might have pending data to be written, but trying to handle it leads to infinite loop/pending.
@@ -972,8 +723,8 @@ impl<S: RTStream> StreamWrapper<S> {
         Ok(if is_shutdown && pending & (FLAG_READ | FLAG_WRITE) == 0 {
             info!("TLS shutdown finished");
             Ready(None)
-        } else if this.tls.is_handshaking() || is_shutdown {
-            if this.tls.is_handshaking() {
+        } else if tls.is_handshaking() || is_shutdown {
+            if tls.is_handshaking() {
                 debug!("pending: TLS handshaking");
             } else {
                 debug!("pending: TLS shutdown");
@@ -989,23 +740,20 @@ impl<S: RTStream> StreamWrapper<S> {
         })
     }
 
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
-        self.project().stream.poll_close(cx)
-    }
-}
-
-impl<S> StreamWrapper<S> {
-    fn tls(self: Pin<&mut Self>) -> &mut ClientConnection {
-        self.project().tls
-    }
-
     fn as_stream(self: Pin<&mut Self>) -> &mut dyn Stream {
-        // SAFETY: Stream trait cannot access stream.
-        unsafe { Pin::into_inner_unchecked(self) }
+        self.project().inner
+    }
+
+    fn wants_read(&self) -> bool {
+        self.inner.tls.wants_read()
+    }
+
+    fn wants_write(&self) -> bool {
+        self.inner.tls.wants_write()
     }
 }
 
-impl<S> Read for StreamWrapper<S> {
+impl Read for InnerStreamWrapper {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
         self.tls.reader().read(buf)
     }
@@ -1015,7 +763,7 @@ impl<S> Read for StreamWrapper<S> {
     }
 }
 
-impl<S> Write for StreamWrapper<S> {
+impl Write for InnerStreamWrapper {
     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
         self.tls.writer().write(buf)
     }
@@ -1029,7 +777,7 @@ impl<S> Write for StreamWrapper<S> {
     }
 }
 
-impl<S> Stream for StreamWrapper<S> {
+impl Stream for InnerStreamWrapper {
     fn link_cert(&self) -> Option<&[u8]> {
         self.tls.peer_certificates()?.first().map(|v| &v[..])
     }

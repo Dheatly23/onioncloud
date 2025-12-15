@@ -107,7 +107,11 @@ impl<T: Send> Sink<T> for SPSCPipeSender<T> {
             guard.wake_recv();
             Poll::Ready(Ok(()))
         } else if inner.flags.load(Acquire) & 2 == 0 {
-            Poll::Ready(Err(SendError(this.buf.take().unwrap())))
+            Poll::Ready(if let Some(m) = this.buf.take() {
+                Err(SendError(m))
+            } else {
+                Ok(())
+            })
         } else {
             guard.wake_recv();
             set_option_waker(&mut guard.send_waker, cx);

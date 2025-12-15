@@ -9,14 +9,37 @@ use std::sync::atomic::Ordering::*;
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicUsize};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
-use tracing::info_span;
+use tracing::{Span, info_span};
 
 use crate::util::set_option_waker;
 
 #[derive(Default)]
 pub(super) struct Tasks {
-    tasks: Vec<Option<Pin<Box<dyn Send + Future<Output = ()>>>>>,
+    tasks: Vec<Option<Task>>,
     wakers: Vec<TestWakerWrapper>,
+}
+
+pub(super) struct Task {
+    fut: Pin<Box<dyn Send + Future<Output = ()>>>,
+    scope: Span,
+}
+
+impl Task {
+    pub(super) fn with_current_span(fut: Pin<Box<dyn Send + Future<Output = ()>>>) -> Self {
+        Self {
+            fut,
+            scope: Span::current(),
+        }
+    }
+
+    fn poll(&mut self, w: &TestWakerWrapper, i: u8) -> bool {
+        self.scope.in_scope(|| {
+            self.fut
+                .as_mut()
+                .poll(&mut Context::from_waker(&w.create_waker(i)))
+                .is_ready()
+        })
+    }
 }
 
 impl Tasks {
@@ -49,11 +72,7 @@ impl Tasks {
 
         if !w.take_wake_at_flipped(j) {
             false
-        } else if info_span!("task", id = ix).in_scope(|| {
-            task.as_mut()
-                .poll(&mut Context::from_waker(&w.create_waker(j)))
-                .is_ready()
-        }) {
+        } else if task.poll(w, j) {
             *p = None;
             true
         } else {
@@ -78,11 +97,7 @@ impl Tasks {
                 let p = &mut self.tasks[i];
                 let Some(task) = p else { continue };
                 run += 1;
-                if info_span!("task", id = i).in_scope(|| {
-                    task.as_mut()
-                        .poll(&mut Context::from_waker(&w.create_waker(j)))
-                        .is_ready()
-                }) {
+                if task.poll(w, j) {
                     *p = None;
                 }
             }
@@ -91,18 +106,18 @@ impl Tasks {
         run
     }
 
-    pub(super) fn add_pending(
-        &mut self,
-        tasks: impl IntoIterator<Item = Pin<Box<dyn Send + Future<Output = ()>>>>,
-    ) {
+    pub(super) fn add_pending(&mut self, tasks: impl IntoIterator<Item = Task>) {
         let it = tasks.into_iter();
         let l = it.size_hint().0;
         self.tasks.reserve(l);
         self.wakers.reserve((l + 15) / 16);
 
-        for t in it {
+        for Task { fut, scope } in it {
             let i = self.tasks.len();
-            self.tasks.push(Some(t));
+            let s = info_span!(parent: None, "task", id = i);
+            s.follows_from(scope);
+            self.tasks.push(Some(Task { fut, scope: s }));
+
             match i % 16 {
                 0 => {
                     let w = TestWakerWrapper::new();

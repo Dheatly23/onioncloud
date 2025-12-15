@@ -6,8 +6,8 @@ use futures_io::AsyncRead;
 
 use super::reader::{CellHeaderReader, FixedCellReader, VariableCellReader};
 use super::{Cell, CellHeader};
-use crate::cache::CellCache;
-use crate::util::sans_io::Handle;
+use crate::cache::{Cachable, CellCache};
+use crate::util::sans_io::{FnHandle, Handle};
 use crate::{errors, util};
 
 /// Cell type.
@@ -55,8 +55,7 @@ where
 /// Cell reader type.
 ///
 /// Continuously generates cell from a stream.
-pub struct CellReader<C> {
-    config: C,
+pub struct CellReader {
     inner: CellReaderInner,
 }
 
@@ -68,20 +67,34 @@ enum CellReaderInner {
     Variable(VariableCellReader),
 }
 
-impl<C: WithCellConfig + CellCache> CellReader<C> {
-    pub fn new(config: C) -> Self {
+impl CellReader {
+    #[inline(always)]
+    pub fn new() -> Self {
         Self {
-            config,
             inner: CellReaderInner::Init,
         }
     }
 }
 
-impl<C: WithCellConfig + CellCache> Handle<&mut dyn Read> for CellReader<C> {
+impl Cachable for CellReader {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        if let CellReaderInner::Fixed(v) = self.inner {
+            v.cache(cache);
+        }
+    }
+}
+
+impl Default for CellReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<C: WithCellConfig + CellCache> Handle<(&mut dyn Read, C)> for CellReader {
     type Return = Result<Cell, errors::CellError>;
 
-    fn handle(&mut self, reader: &mut dyn Read) -> Self::Return {
-        let Self { config, inner } = self;
+    fn handle(&mut self, (reader, config): (&mut dyn Read, C)) -> Self::Return {
+        let Self { inner } = self;
         loop {
             match inner {
                 CellReaderInner::Err => return Err(errors::CellFormatError.into()),
@@ -122,7 +135,12 @@ pub async fn read_cell_cached(
     reader: Pin<&mut impl AsyncRead>,
     config: impl WithCellConfig + CellCache,
 ) -> Result<Cell, errors::CellError> {
-    util::async_reader(reader, CellReader::new(config)).await
+    let mut handle = CellReader::new();
+    util::async_reader(
+        reader,
+        FnHandle(move |s: &mut dyn Read| handle.handle((s, &config))),
+    )
+    .await
 }
 
 #[cfg(test)]

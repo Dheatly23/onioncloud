@@ -1,7 +1,8 @@
 use std::io::{Error as IoError, ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
-use std::mem::take;
 
-use crate::cache::{Cachable, CellCache, CellCacheExt};
+use scopeguard::guard_on_unwind;
+
+use crate::cache::{Cachable, CellCache};
 use crate::errors;
 
 /// Helper for read buffers.
@@ -468,13 +469,9 @@ impl<T> InBuffer<T> {
     }
 }
 
-impl<T: Cachable> InBuffer<T> {
-    /// Clears and discards all cells.
-    pub fn discard_all(&mut self, cache: &impl CellCache) {
-        let Self { buffer, .. } = take(self);
-        for v in buffer.into_iter().flatten() {
-            cache.discard(v);
-        }
+impl<T: Cachable> Cachable for InBuffer<T> {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.buffer.cache(cache);
     }
 }
 
@@ -501,6 +498,12 @@ impl<T> OutBuffer<T> {
             head: 0,
             len: 0,
         }
+    }
+
+    /// Gets data length.
+    #[inline(always)]
+    pub fn len(&self) -> u8 {
+        self.len
     }
 
     /// Check if buffer is full.
@@ -556,8 +559,8 @@ impl<T> OutBuffer<T> {
 
     /// Pop an item from front of buffer.
     pub fn pop_front(&mut self) -> Option<T> {
-        assert!(self.head < 64);
-        assert!(self.len <= 64);
+        debug_assert!(self.head < 64);
+        debug_assert!(self.len <= 64);
 
         if self.len == 0 {
             return None;
@@ -575,15 +578,69 @@ impl<T> OutBuffer<T> {
 
         ret
     }
+
+    fn retain_inner<F: FnMut(&mut Option<T>)>(&mut self, mut f: F) {
+        debug_assert!(self.head < 64);
+        debug_assert!(self.len <= 64);
+
+        // Discard everything on unwind to preserve invariants
+        let mut this = guard_on_unwind(self, |this| *this = Self::new());
+
+        let mut nl = 0u8;
+        let mut ix = this.head;
+        let mut pi = ix;
+        for _ in 0..this.len {
+            let p = &mut this.buffer[ix as usize];
+            debug_assert!(p.is_some());
+
+            f(p);
+            if p.is_some() {
+                if ix != pi {
+                    let v = p.take();
+                    debug_assert!(v.is_some());
+                    this.buffer[pi as usize] = v;
+                }
+
+                nl += 1;
+                pi = pi.checked_sub(1).unwrap_or(63);
+            }
+
+            ix = ix.checked_sub(1).unwrap_or(63);
+        }
+
+        this.len = nl;
+        if nl == 0 {
+            this.head = 0;
+        }
+    }
+
+    pub fn retain(&mut self, mut f: impl FnMut(&T) -> bool) {
+        self.retain_inner(move |v| {
+            if let Some(p) = v
+                && !f(p)
+            {
+                *v = None;
+            }
+        });
+    }
+
+    pub fn retain_cached(&mut self, cache: &impl CellCache, mut f: impl FnMut(&T) -> bool)
+    where
+        T: Cachable,
+    {
+        self.retain_inner(move |v| {
+            if let Some(p) = v
+                && !f(p)
+            {
+                v.take().cache(cache);
+            }
+        });
+    }
 }
 
-impl<T: Cachable> OutBuffer<T> {
-    /// Clears and discards all cells.
-    pub fn discard_all(&mut self, cache: &impl CellCache) {
-        let Self { buffer, .. } = take(self);
-        for v in buffer.into_iter().flatten() {
-            cache.discard(v);
-        }
+impl<T: Cachable> Cachable for OutBuffer<T> {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        self.buffer.cache(cache);
     }
 }
 

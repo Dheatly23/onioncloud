@@ -4,11 +4,20 @@ pub mod manager;
 use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
+use std::pin::Pin;
+use std::task::Context;
 use std::time::Instant;
 
 use crate::crypto::relay::{RelayId, RelayIdEd};
-use crate::util::cell_map::NewHandler;
+use crate::runtime::Runtime;
+use crate::util::cell_map::{CellMap, CellMapRef, NewHandler};
 use crate::util::sans_io::CellMsgPause;
+
+/// Type alias for circuit map.
+pub type CircMap<R, C, M> = CellMap<NonZeroU32, R, C, M>;
+/// Type alias for circuit map.
+pub type CircMapRef<'a, 'b, R, C, M> = CellMapRef<'a, 'b, NonZeroU32, R, C, M>;
 
 /// Trait for channel configuration.
 pub trait ChannelConfig {
@@ -28,14 +37,33 @@ pub trait ChannelConfig {
 }
 
 /// Reference to channel data.
-pub struct ChannelInput<'a> {
+pub struct ChannelInput<'a, 'b, R: Runtime, C: 'static + Send, M> {
     stream: &'a mut dyn Stream,
     time: Instant,
+    has_ready: bool,
+
+    circ_map: Pin<&'a mut CircMap<R, C, M>>,
+    cx: &'a mut Context<'b>,
+    is_any_close: &'a mut bool,
 }
 
-impl<'a> ChannelInput<'a> {
-    pub(crate) fn new(stream: &'a mut dyn Stream, time: Instant) -> Self {
-        Self { stream, time }
+impl<'a, 'b, R: Runtime, C: 'static + Send, M> ChannelInput<'a, 'b, R, C, M> {
+    pub(crate) fn new(
+        stream: &'a mut dyn Stream,
+        time: Instant,
+        has_ready: bool,
+        cx: &'a mut Context<'b>,
+        circ_map: Pin<&'a mut CircMap<R, C, M>>,
+        is_any_close: &'a mut bool,
+    ) -> Self {
+        Self {
+            stream,
+            time,
+            has_ready,
+            cx,
+            circ_map,
+            is_any_close,
+        }
     }
 
     /// Get stream reader.
@@ -63,6 +91,16 @@ impl<'a> ChannelInput<'a> {
     /// Get current time.
     pub fn time(&self) -> Instant {
         self.time
+    }
+
+    /// Returns `true` if any circuit in map is ready.
+    pub fn has_ready(&self) -> bool {
+        self.has_ready
+    }
+
+    /// Get circuit map.
+    pub fn circ_map(&mut self) -> CircMapRef<'_, 'b, R, C, M> {
+        CircMapRef::new(self.circ_map.as_mut(), self.cx, self.is_any_close)
     }
 }
 
@@ -109,17 +147,17 @@ impl ChannelOutput {
 /// Once received, use destructuring let to get all the values.
 #[derive(Debug)]
 #[non_exhaustive]
-pub struct NewCircuit<Cell> {
+pub struct NewCircuit<ID, R: Runtime, Cell: 'static + Send> {
     /// Handler data.
-    pub inner: NewHandler<Cell>,
+    pub inner: NewHandler<ID, R, Cell>,
 
     /// Link protocol version.
     pub linkver: u16,
 }
 
-impl<Cell> NewCircuit<Cell> {
+impl<ID, R: Runtime, Cell: 'static + Send> NewCircuit<ID, R, Cell> {
     /// Create `NewCircuit`.
-    pub fn new(handler: NewHandler<Cell>) -> Self {
+    pub fn new(handler: NewHandler<ID, R, Cell>) -> Self {
         Self {
             inner: handler,
             linkver: 0,

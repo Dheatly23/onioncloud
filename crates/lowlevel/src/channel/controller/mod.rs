@@ -2,13 +2,13 @@ pub mod user;
 
 use std::fmt::{Debug, Display};
 use std::io::Error as IoError;
-use std::sync::Arc;
+use std::num::NonZeroU32;
 
 use rustls::Error as RustlsError;
 
 use super::{ChannelConfig, ChannelInput, ChannelOutput};
-use crate::util::cell_map::CellMap;
-use crate::util::sans_io::event::{ChildCellMsg, ControlMsg, Timeout};
+use crate::runtime::Runtime;
+use crate::util::sans_io::event::{ChannelClosed, ChildCellMsg, ControlMsg, Timeout};
 use crate::util::sans_io::{CellMsgPause, Handle};
 
 pub use user::{UserConfig, UserControlMsg, UserController};
@@ -18,7 +18,7 @@ pub use user::{UserConfig, UserControlMsg, UserController};
 /// # Implementers Note
 ///
 /// Implementers _must_ implement [`Handle`]rs to handle incoming events. Values to be handled are:
-/// - [`(ChannelInput<'a>, &'a mut CellMap<Self::Cell, Self::CircMeta>)`]
+/// - `(ChannelInput<'a>, CellMapRef<'a, 'b, Self::Runtime, Self::Cell, Self::CircMeta>)`
 ///
 ///   Universal handler for channel inputs and circuit map. Will be called after all the other events.
 ///   Returns [`ChannelOutput`] to control things like shutdown, timer, and cell message handling.
@@ -36,16 +36,21 @@ pub use user::{UserConfig, UserControlMsg, UserController};
 ///   Cell message handler. Returns [`CellMsgPause`] to pause next cell message handling.
 pub trait ChannelController:
     Send
-    + for<'a> Handle<
+    + for<'a, 'b> Handle<
         (
-            ChannelInput<'a>,
-            &'a mut CellMap<Self::Cell, Self::CircMeta>,
+            &'a Self::Runtime,
+            ChannelInput<'a, 'b, Self::Runtime, Self::Cell, Self::CircMeta>,
         ),
         Return = Result<ChannelOutput, Self::Error>,
     > + Handle<ControlMsg<Self::ControlMsg>, Return = Result<(), Self::Error>>
     + Handle<ChildCellMsg<Self::Cell>, Return = Result<CellMsgPause, Self::Error>>
-    + Handle<Timeout, Return = Result<(), Self::Error>>
+    + for<'a> Handle<
+        ChannelClosed<'a, NonZeroU32, Self::Cell, Self::CircMeta>,
+        Return = Result<(), Self::Error>,
+    > + Handle<Timeout, Return = Result<(), Self::Error>>
 {
+    /// Runtime.
+    type Runtime: 'static + Runtime;
     /// Error type.
     type Error: 'static + Debug + Display + Send + Sync + From<IoError> + From<RustlsError>;
     /// Channel configuration.
@@ -58,14 +63,18 @@ pub trait ChannelController:
     type CircMeta: 'static + Send;
 
     /// Get circuit channel capacity.
-    fn channel_cap(_config: &Self::Config) -> usize {
+    fn channel_cap(cfg: &Self::Config) -> usize {
+        // Discard configuration
+        let _ = cfg;
         256
     }
 
     /// Get circuit aggregation channel capacity.
-    fn channel_aggregate_cap(_config: &Self::Config) -> usize {
+    fn channel_aggregate_cap(cfg: &Self::Config) -> usize {
+        // Discard configuration
+        let _ = cfg;
         256
     }
 
-    fn new(config: Arc<dyn Send + Sync + AsRef<Self::Config>>) -> Self;
+    fn new(rt: &Self::Runtime, cfg: Self::Config) -> Self;
 }

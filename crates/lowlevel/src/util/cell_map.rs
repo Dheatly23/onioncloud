@@ -1,63 +1,82 @@
 use std::collections::hash_map::{Entry, HashMap, VacantEntry};
+use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::hash::Hash;
+use std::marker::PhantomData;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use flume::r#async::RecvStream;
-use flume::{Receiver, Sender, TryRecvError, TrySendError, bounded};
 use futures_core::stream::Stream;
+use futures_sink::Sink;
+use pin_project::pin_project;
 use rand::prelude::*;
 
 use crate::cell::dispatch::WithCellConfig;
-use crate::errors;
+use crate::errors::NoFreeCircIDError;
+use crate::runtime::{PipeSender, Runtime, SendError, TrySendError};
 
-/// Handler data of [`CellMap`].
 #[derive(Debug)]
-pub struct HandlerData<Cell, Meta> {
-    /// Metadata.
-    ///
-    /// Use this to store specific data alongside.
-    pub meta: Meta,
-
-    /// Sender for cell handler.
-    send: Sender<Cell>,
+enum SendState {
+    Start,
+    Ready,
+    Waiting,
+    Closing,
+    Closed,
 }
 
-type MapTy<Cell, Meta> = HashMap<NonZeroU32, HandlerData<Cell, Meta>>;
-type VacantMapE<'a, Cell, Meta> = VacantEntry<'a, NonZeroU32, HandlerData<Cell, Meta>>;
+/// Handler data of [`CellMap`].
+#[pin_project]
+pub struct HandlerData<R: Runtime, Cell: 'static + Send, Meta> {
+    /// Metadata.
+    meta: Option<Meta>,
+
+    /// Sender for cell handler.
+    #[pin]
+    send: R::SPSCSender<Cell>,
+
+    /// Send state flag.
+    send_state: SendState,
+}
+
+impl<R: Runtime, Cell: 'static + Send, Meta: Debug> Debug for HandlerData<R, Cell, Meta> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("HandlerData")
+            .field("meta", &self.meta)
+            .field("send_state", &self.send_state)
+            .finish_non_exhaustive()
+    }
+}
+
+type MapTy<K, R, Cell, Meta> = HashMap<K, Pin<Box<HandlerData<R, Cell, Meta>>>>;
+type VacantMapE<'a, K, R, Cell, Meta> = VacantEntry<'a, K, Pin<Box<HandlerData<R, Cell, Meta>>>>;
 
 /// Cell stream manager.
 ///
 /// Manages handlers, send, and receive cells from it.
 /// Used by [`ChannelController`](`crate::channel::controller::ChannelController`) and [`CircuitController`](`crate::circuit::controller::CircuitController`).
+#[pin_project]
 #[derive(Debug)]
-pub struct CellMap<Cell: 'static, Meta = ()> {
+pub struct CellMap<K: Hash + Eq, R: Runtime, Cell: 'static + Send, Meta = ()> {
     /// Map data.
-    map: MapTy<Cell, Meta>,
+    map: MapTy<K, R, Cell, Meta>,
 
     /// Agrregate cell sender.
-    send: Sender<Cell>,
-
-    /// Duplicate of stream until we have `RecvStream::receiver`.
-    recv: Receiver<Cell>,
+    #[pin]
+    send: R::MPSCSender<Cell>,
 
     /// Aggregate cell receiver.
-    stream: RecvStream<'static, Cell>,
+    #[pin]
+    recv: R::MPSCReceiver<Cell>,
 
     /// Size of buffer for handler channel.
     chan_len: usize,
 }
 
-impl<Cell, Meta> Default for CellMap<Cell, Meta> {
-    fn default() -> Self {
-        Self::new(256, 256)
-    }
-}
-
-impl<Cell: 'static, Meta> CellMap<Cell, Meta> {
+impl<K: Hash + Eq, R: Runtime, Cell: 'static + Send, Meta> CellMap<K, R, Cell, Meta> {
     /// Create new [`CellMap`].
     ///
     /// # Parameters
+    /// - `runtime` : Reference to runtime.
     /// - `handler_cap` : Size of handler channels. Should not be zero.
     /// - `aggregate_cap` : Size of aggregate channel. Should not be zero. It's recommended to be bigger than or equal to `handler_cap`.
     ///
@@ -69,15 +88,14 @@ impl<Cell: 'static, Meta> CellMap<Cell, Meta> {
     ///
     /// let circ_map = CellMap::<Cell>::new(16, 16);
     /// ```
-    pub fn new(handler_cap: usize, aggregate_cap: usize) -> Self {
+    pub fn new(runtime: &R, handler_cap: usize, aggregate_cap: usize) -> Self {
         assert_ne!(handler_cap, 0, "handler channel size is zero");
         assert_ne!(aggregate_cap, 0, "aggregate channel size is zero");
-        let (send, recv) = bounded(aggregate_cap);
+        let (send, recv) = runtime.mpsc_make(aggregate_cap);
 
         Self {
             map: HashMap::new(),
             send,
-            stream: recv.clone().into_stream(),
             recv,
             chan_len: handler_cap,
         }
@@ -87,7 +105,7 @@ impl<Cell: 'static, Meta> CellMap<Cell, Meta> {
     ///
     /// **NOTE: Do not use the return value to send cells from inside of controller.
     /// It will reawake itself and might cause infinite loop.**
-    pub fn sender(&self) -> &Sender<Cell> {
+    pub fn sender(&self) -> &R::MPSCSender<Cell> {
         &self.send
     }
 
@@ -102,24 +120,33 @@ impl<Cell: 'static, Meta> CellMap<Cell, Meta> {
     }
 
     /// Get handler data.
-    pub fn get(&mut self, id: NonZeroU32) -> Option<&mut HandlerData<Cell, Meta>> {
-        self.map.get_mut(&id)
+    pub fn get(self: Pin<&mut Self>, id: &K) -> Option<Pin<&mut HandlerData<R, Cell, Meta>>> {
+        self.project().map.get_mut(id).map(|p| p.as_mut())
     }
 
     /// Check if ID is used.
-    pub fn has(&self, id: NonZeroU32) -> bool {
-        self.map.contains_key(&id)
+    pub fn has(&self, id: &K) -> bool {
+        self.map.contains_key(id)
     }
 
     fn insert_entry<'a>(
-        entry: VacantMapE<'a, Cell, Meta>,
-        send: &Sender<Cell>,
-        id: NonZeroU32,
+        rt: &R,
+        entry: VacantMapE<'a, K, R, Cell, Meta>,
+        send: &R::MPSCSender<Cell>,
         chan_len: usize,
         meta: Meta,
-    ) -> (NewHandler<Cell>, &'a mut HandlerData<Cell, Meta>) {
-        let (circ, recv) = HandlerData::new(chan_len, meta);
-        (NewHandler::new(id, recv, send.clone()), entry.insert(circ))
+    ) -> (
+        NewHandler<K, R, Cell>,
+        Pin<&'a mut HandlerData<R, Cell, Meta>>,
+    )
+    where
+        K: Clone,
+    {
+        let (circ, recv) = HandlerData::new(rt, chan_len, meta);
+        (
+            NewHandler::new(entry.key().clone(), recv, send.clone()),
+            entry.insert(Box::pin(circ)).as_mut(),
+        )
     }
 
     /// Insert new handler at ID.
@@ -130,26 +157,46 @@ impl<Cell: 'static, Meta> CellMap<Cell, Meta> {
     /// - `id` : ID. Must be free.
     /// - `meta` : Function to create metadata for the new handler.
     pub fn insert_with(
-        &mut self,
-        id: NonZeroU32,
+        self: Pin<&'_ mut Self>,
+        rt: &R,
+        id: K,
         meta: impl FnOnce() -> Meta,
-    ) -> Option<(NewHandler<Cell>, &mut HandlerData<Cell, Meta>)> {
-        let Entry::Vacant(e) = self.map.entry(id) else {
+    ) -> Option<(
+        NewHandler<K, R, Cell>,
+        Pin<&'_ mut HandlerData<R, Cell, Meta>>,
+    )>
+    where
+        K: Clone,
+    {
+        let this = self.project();
+        let Entry::Vacant(e) = this.map.entry(id) else {
             return None;
         };
 
-        Some(Self::insert_entry(e, &self.send, id, self.chan_len, meta()))
+        Some(Self::insert_entry(
+            rt,
+            e,
+            &this.send,
+            *this.chan_len,
+            meta(),
+        ))
     }
 
     /// Same as [`insert_with`], but with [`Default`] metadata.
+    #[inline(always)]
     pub fn insert(
-        &mut self,
-        id: NonZeroU32,
-    ) -> Option<(NewHandler<Cell>, &mut HandlerData<Cell, Meta>)>
+        self: Pin<&'_ mut Self>,
+        rt: &R,
+        id: K,
+    ) -> Option<(
+        NewHandler<K, R, Cell>,
+        Pin<&'_ mut HandlerData<R, Cell, Meta>>,
+    )>
     where
+        K: Clone,
         Meta: Default,
     {
-        self.insert_with(id, Default::default)
+        self.insert_with(rt, id, Default::default)
     }
 
     /// Open a new handler at random free ID.
@@ -158,108 +205,588 @@ impl<Cell: 'static, Meta> CellMap<Cell, Meta> {
     /// - `id_gen` : ID generator used.
     /// - `n_attempts` : Number of attempts to allocate ID. Tor spec recommends setting it to 64.
     /// - `meta` : Function to create metadata for the new handler.
-    pub fn open_with<G: IDGenerator>(
-        &mut self,
-        id_gen: &G,
+    pub fn open_with<G: IDGenerator<K>>(
+        self: Pin<&'_ mut Self>,
+        rt: &R,
+        id_gen: G,
         n_attempts: usize,
-        meta: impl FnOnce(NonZeroU32) -> Meta,
-    ) -> Result<(NewHandler<Cell>, &mut HandlerData<Cell, Meta>), errors::NoFreeCircIDError> {
+        meta: impl FnOnce(&K) -> Meta,
+    ) -> Result<
+        (
+            NewHandler<K, R, Cell>,
+            Pin<&'_ mut HandlerData<R, Cell, Meta>>,
+        ),
+        NoFreeCircIDError,
+    >
+    where
+        K: Clone,
+    {
+        let this = self.project();
         let mut rng = ThreadRng::default();
+        let mut n = n_attempts;
 
-        for _ in 0..n_attempts {
-            let id = id_gen.generate_id(&mut rng);
-
+        while let Some(id) = id_gen.generate_id(&mut rng, NAttempts(&mut n)) {
             // SAFETY: Lifetime extension because idk non-lexical lifetime stuff?
             #[allow(clippy::deref_addrof)]
-            let map = unsafe { &mut *(&raw mut self.map) };
+            let map = unsafe { &mut *(&raw mut *this.map) };
 
             if let Entry::Vacant(e) = map.entry(id) {
-                return Ok(Self::insert_entry(
-                    e,
-                    &self.send,
-                    id,
-                    self.chan_len,
-                    meta(id),
-                ));
+                let meta = meta(e.key());
+                return Ok(Self::insert_entry(rt, e, &this.send, *this.chan_len, meta));
             }
         }
 
-        Err(errors::NoFreeCircIDError)
+        Err(NoFreeCircIDError)
     }
 
     /// Same as [`open_with`], but with `[Default`] metadata.
-    pub fn open<G: IDGenerator>(
-        &mut self,
-        id_gen: &G,
+    #[inline]
+    pub fn open<G: IDGenerator<K>>(
+        self: Pin<&'_ mut Self>,
+        rt: &R,
+        id_gen: G,
         n_attempts: usize,
-    ) -> Result<(NewHandler<Cell>, &mut HandlerData<Cell, Meta>), errors::NoFreeCircIDError>
+    ) -> Result<
+        (
+            NewHandler<K, R, Cell>,
+            Pin<&'_ mut HandlerData<R, Cell, Meta>>,
+        ),
+        NoFreeCircIDError,
+    >
     where
+        K: Clone,
         Meta: Default,
     {
-        fn f<T: Default>(_: NonZeroU32) -> T {
+        fn f<K, T: Default>(_: &K) -> T {
             T::default()
         }
 
-        self.open_with(id_gen, n_attempts, f)
+        self.open_with(rt, id_gen, n_attempts, f)
     }
 
     /// Remove handler from map.
-    pub fn remove(&mut self, id: NonZeroU32) -> Option<Meta> {
-        self.map.remove(&id).map(|v| v.meta)
+    pub fn remove(self: Pin<&mut Self>, id: &K) -> Option<Meta> {
+        // SAFETY: Meta is always Some.
+        self.project()
+            .map
+            .remove(id)
+            .map(|mut v| unsafe { v.as_mut().project().meta.take().unwrap_unchecked() })
     }
 
     /// Enumerates all keys.
-    pub fn keys(&'_ self) -> impl Iterator<Item = &'_ NonZeroU32> {
+    pub fn keys(&'_ self) -> impl Iterator<Item = &'_ K> {
         self.map.keys()
     }
 
     /// Enumerates all items.
     pub fn items(
-        &'_ mut self,
-    ) -> impl Iterator<Item = (&'_ NonZeroU32, &'_ mut HandlerData<Cell, Meta>)> {
-        self.map.iter_mut()
+        self: Pin<&'_ mut Self>,
+    ) -> impl Iterator<Item = (&'_ K, Pin<&'_ mut HandlerData<R, Cell, Meta>>)> {
+        self.project().map.iter_mut().map(|(k, v)| (k, v.as_mut()))
+    }
+
+    /// Retains only items that satisfies predicate.
+    pub fn retain(
+        self: Pin<&'_ mut Self>,
+        mut pred: impl FnMut(&K, Pin<&'_ mut HandlerData<R, Cell, Meta>>) -> bool,
+    ) {
+        self.project().map.retain(|k, v| pred(k, v.as_mut()));
     }
 
     /// Receive cell from aggregate channel.
     ///
     /// **NOTE: Do not call this from inside of controller.**
-    pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<Cell>> {
-        Pin::new(&mut self.stream).poll_next(cx)
-    }
-
-    /// Receive cell from aggregate channel.
-    ///
-    /// **NOTE: Do not call this from inside of controller.**
-    pub fn try_recv(&mut self) -> Result<Cell, TryRecvError> {
-        self.recv.try_recv()
+    pub fn poll_recv(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Cell>> {
+        self.project().recv.poll_next(cx)
     }
 }
 
-impl<Cell, Meta> HandlerData<Cell, Meta> {
-    fn new(chan_len: usize, meta: Meta) -> (Self, Receiver<Cell>) {
-        let (send, recv) = bounded(chan_len);
-        (Self { meta, send }, recv)
+impl<R: Runtime, Cell: 'static + Send, Meta> HandlerData<R, Cell, Meta> {
+    fn new(rt: &R, chan_len: usize, meta: Meta) -> (Self, R::SPSCReceiver<Cell>) {
+        let (send, recv) = rt.spsc_make(chan_len);
+        (
+            Self {
+                meta: Some(meta),
+                send,
+                send_state: SendState::Start,
+            },
+            recv,
+        )
     }
 
-    /// Send a cell.
+    pub(crate) fn is_pollable(&self) -> bool {
+        !matches!(self.send_state, SendState::Closed)
+    }
+
+    /// Gets reference to metadata.
+    pub fn meta(self: Pin<&mut Self>) -> &mut Meta {
+        // SAFETY: Meta is always Some.
+        unsafe { self.project().meta.as_mut().unwrap_unchecked() }
+    }
+
+    /// Polls sender to be ready for data.
     ///
-    /// Returns [`SendError`] if channel is full or closed.
-    pub fn send(&self, cell: Cell) -> Result<(), TrySendError<Cell>> {
-        self.send.try_send(cell)
+    /// Returns [`SendError`] if channel is closed.
+    pub fn poll_ready(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), SendError<Cell>>> {
+        let this = self.project();
+        let ret;
+        match this.send_state {
+            SendState::Ready | SendState::Closed => ret = Poll::Ready(Ok(())),
+            SendState::Closing => {
+                ret = this.send.poll_close(cx);
+                if ret.is_ready() {
+                    *this.send_state = SendState::Closed;
+                }
+            }
+            _ => {
+                ret = this.send.poll_flush(cx);
+                *this.send_state = match ret {
+                    Poll::Ready(Ok(_)) => SendState::Ready,
+                    Poll::Ready(Err(_)) => SendState::Closed,
+                    Poll::Pending => SendState::Waiting,
+                };
+            }
+        }
+
+        ret
+    }
+
+    /// Starts sending data into sender.
+    ///
+    /// Returns [`SendError`] if channel is closed.
+    ///
+    /// **⚠NOTE: Do not call this until [`poll_ready`] returns [`Ok`]!**
+    pub fn start_send(self: Pin<&mut Self>, item: Cell) -> Result<(), SendError<Cell>> {
+        let this = self.project();
+        if matches!(this.send_state, SendState::Closed) {
+            return Err(SendError(item));
+        }
+        debug_assert!(
+            matches!(this.send_state, SendState::Ready),
+            "poll_ready() is not ready yet"
+        );
+
+        let ret = this.send.start_send(item);
+        *this.send_state = match &ret {
+            Ok(_) => SendState::Waiting,
+            Err(_) => SendState::Closed,
+        };
+        ret
+    }
+
+    /// Starts closing sender.
+    pub fn start_close(self: Pin<&mut Self>) {
+        let state = self.project().send_state;
+        if !matches!(state, SendState::Closed) {
+            *state = SendState::Closing;
+        }
     }
 
     /// Check if handler has been closed.
     ///
-    /// This happens when the corresponding [`Receiver`] is dropped.
+    /// This happens when the corresponding receiver is dropped.
     pub fn is_closed(&self) -> bool {
         self.send.is_disconnected()
     }
 }
 
+/// Reference to [`CellMap`].
+pub struct CellMapRef<'a, 'b, K: Hash + Eq, R: Runtime, Cell: 'static + Send, Meta> {
+    inner: Pin<&'a mut CellMap<K, R, Cell, Meta>>,
+    cx: &'a mut Context<'b>,
+    is_any_close: &'a mut bool,
+}
+
+impl<'a, 'b, K: Hash + Eq, R: Runtime, Cell: 'static + Send, Meta>
+    CellMapRef<'a, 'b, K, R, Cell, Meta>
+{
+    pub(crate) fn new(
+        inner: Pin<&'a mut CellMap<K, R, Cell, Meta>>,
+        cx: &'a mut Context<'b>,
+        is_any_close: &'a mut bool,
+    ) -> Self {
+        Self {
+            inner,
+            cx,
+            is_any_close,
+        }
+    }
+
+    /// Reborrow reference.
+    #[inline(always)]
+    pub fn reborrow(&'_ mut self) -> CellMapRef<'_, 'b, K, R, Cell, Meta> {
+        CellMapRef::new(self.inner.as_mut(), self.cx, self.is_any_close)
+    }
+
+    /// Get number of handlers.
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns [`true`] if there is no handler.
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Get handler data.
+    pub fn get(&'_ mut self, id: &K) -> Option<HandleRef<'_, 'b, R, Cell, Meta>> {
+        self.inner
+            .as_mut()
+            .get(id)
+            .map(|p| HandleRef::new(p, self.cx, self.is_any_close))
+    }
+
+    /// Check if ID is used.
+    #[inline(always)]
+    pub fn has(&self, id: &K) -> bool {
+        self.inner.has(id)
+    }
+
+    /// Insert new handler at ID.
+    ///
+    /// Returns [`None`] if ID is occupied.
+    ///
+    /// # Parameters
+    /// - `id` : ID. Must be free.
+    /// - `meta` : Function to create metadata for the new handler.
+    pub fn insert_with(
+        &'_ mut self,
+        rt: &R,
+        id: K,
+        meta: impl FnOnce() -> Meta,
+    ) -> Option<(NewHandler<K, R, Cell>, HandleRef<'_, 'b, R, Cell, Meta>)>
+    where
+        K: Clone,
+    {
+        self.inner
+            .as_mut()
+            .insert_with(rt, id, meta)
+            .map(|(a, b)| (a, HandleRef::new(b, self.cx, self.is_any_close)))
+    }
+
+    /// Same as [`insert_with`], but with [`Default`] metadata.
+    #[inline(always)]
+    pub fn insert(
+        &'_ mut self,
+        rt: &R,
+        id: K,
+    ) -> Option<(NewHandler<K, R, Cell>, HandleRef<'_, 'b, R, Cell, Meta>)>
+    where
+        K: Clone,
+        Meta: Default,
+    {
+        self.inner
+            .as_mut()
+            .insert(rt, id)
+            .map(|(a, b)| (a, HandleRef::new(b, self.cx, self.is_any_close)))
+    }
+
+    /// Open a new handler at random free ID.
+    ///
+    /// # Parameters
+    /// - `id_gen` : ID generator used.
+    /// - `n_attempts` : Number of attempts to allocate ID. Tor spec recommends setting it to 64.
+    /// - `meta` : Function to create metadata for the new handler.
+    pub fn open_with<G: IDGenerator<K>>(
+        &'_ mut self,
+        rt: &R,
+        id_gen: G,
+        n_attempts: usize,
+        meta: impl FnOnce(&K) -> Meta,
+    ) -> Result<(NewHandler<K, R, Cell>, HandleRef<'_, 'b, R, Cell, Meta>), NoFreeCircIDError>
+    where
+        K: Clone,
+    {
+        self.inner
+            .as_mut()
+            .open_with(rt, id_gen, n_attempts, meta)
+            .map(|(a, b)| (a, HandleRef::new(b, self.cx, self.is_any_close)))
+    }
+
+    /// Same as [`open_with`], but with `[Default`] metadata.
+    #[inline]
+    pub fn open<G: IDGenerator<K>>(
+        &'_ mut self,
+        rt: &R,
+        id_gen: G,
+        n_attempts: usize,
+    ) -> Result<(NewHandler<K, R, Cell>, HandleRef<'_, 'b, R, Cell, Meta>), NoFreeCircIDError>
+    where
+        K: Clone,
+        Meta: Default,
+    {
+        self.inner
+            .as_mut()
+            .open(rt, id_gen, n_attempts)
+            .map(|(a, b)| (a, HandleRef::new(b, self.cx, self.is_any_close)))
+    }
+
+    /// Remove handler from map.
+    pub fn remove(&mut self, id: &K) -> Option<Meta> {
+        self.inner.as_mut().remove(id)
+    }
+
+    /// Enumerates all keys.
+    pub fn keys(&'_ self) -> impl Iterator<Item = &'_ K> {
+        self.inner.keys()
+    }
+}
+
+/// Reference to [`HandlerData`].
+pub struct HandleRef<'a, 'b, R: Runtime, Cell: 'static + Send, Meta> {
+    inner: Pin<&'a mut HandlerData<R, Cell, Meta>>,
+    cx: &'a mut Context<'b>,
+    is_any_close: &'a mut bool,
+}
+
+impl<'a, 'b, R: Runtime, Cell: 'static + Send, Meta> HandleRef<'a, 'b, R, Cell, Meta> {
+    fn new(
+        inner: Pin<&'a mut HandlerData<R, Cell, Meta>>,
+        cx: &'a mut Context<'b>,
+        is_any_close: &'a mut bool,
+    ) -> Self {
+        Self {
+            inner,
+            cx,
+            is_any_close,
+        }
+    }
+
+    /// Reborrow reference.
+    #[inline(always)]
+    pub fn reborrow(&'_ mut self) -> HandleRef<'_, 'b, R, Cell, Meta> {
+        HandleRef::new(self.inner.as_mut(), self.cx, self.is_any_close)
+    }
+
+    /// Gets reference to metadata.
+    #[inline(always)]
+    pub fn meta(&mut self) -> &mut Meta {
+        self.inner.as_mut().meta()
+    }
+
+    /// Checks if handle is closed.
+    pub fn is_closed(&self) -> bool {
+        matches!(self.inner.send_state, SendState::Closed)
+    }
+
+    /// Checks if handle is closing.
+    pub fn is_closing(&self) -> bool {
+        matches!(
+            self.inner.send_state,
+            SendState::Closed | SendState::Closing
+        )
+    }
+
+    /// Checks if handle is flushed and ready to send item.
+    ///
+    /// It is guaranteed if it returns [`true`] then [`try_send`] will not return [`TrySendError::NotReady`].
+    /// (It might return [`TrySendError::Disconnected`]).
+    pub fn is_ready(&mut self) -> bool {
+        match self.inner.send_state {
+            SendState::Start => match self.inner.as_mut().poll_ready(self.cx) {
+                Poll::Ready(Ok(())) => true,
+                Poll::Pending => false,
+                // Should be impossible because SendError contains value that the channel does not know how to construct it
+                Poll::Ready(Err(_)) => {
+                    unreachable!("channel at starting state cannot return SendError")
+                }
+            },
+            SendState::Ready | SendState::Closed => true,
+            _ => false,
+        }
+    }
+
+    /// Try to send value.
+    ///
+    /// Returns [`TrySendError`] if channel is not ready or disconnected.
+    pub fn try_send(&mut self, item: Cell) -> Result<(), TrySendError<Cell>> {
+        loop {
+            break match &self.inner.send_state {
+                SendState::Start => match self.inner.as_mut().poll_ready(self.cx) {
+                    Poll::Ready(Ok(())) => continue,
+                    Poll::Pending => Err(TrySendError::NotReady(item)),
+                    // Should be impossible because SendError contains value that the channel does not know how to construct it
+                    Poll::Ready(Err(_)) => {
+                        unreachable!("channel at starting state cannot return SendError")
+                    }
+                },
+                SendState::Waiting => Err(TrySendError::NotReady(item)),
+                SendState::Closed => Err(TrySendError::Disconnected(item)),
+                SendState::Closing => Err(match self.inner.as_mut().poll_ready(self.cx) {
+                    Poll::Pending => TrySendError::NotReady(item),
+                    Poll::Ready(Ok(())) => {
+                        *self.is_any_close = true;
+                        TrySendError::Disconnected(item)
+                    }
+                    Poll::Ready(Err(e)) => {
+                        *self.is_any_close = true;
+                        e.into()
+                    }
+                }),
+                SendState::Ready => match self.inner.as_mut().start_send(item).and_then(|_| {
+                    match self.inner.as_mut().poll_ready(self.cx) {
+                        Poll::Ready(v) => v,
+                        Poll::Pending => Ok(()),
+                    }
+                }) {
+                    Err(e) => {
+                        *self.is_any_close = true;
+                        Err(e.into())
+                    }
+                    Ok(()) => {
+                        debug_assert!(matches!(
+                            self.inner.send_state,
+                            SendState::Ready | SendState::Waiting
+                        ));
+                        Ok(())
+                    }
+                },
+            };
+        }
+    }
+
+    /// Starts closing sender.
+    pub fn start_close(&mut self) {
+        self.inner.as_mut().start_close();
+        // Starts poll for close (otherwise it never will be polled).
+        if let Poll::Ready(Err(_)) = self.inner.as_mut().poll_ready(self.cx) {
+            *self.is_any_close = true;
+        }
+    }
+}
+
 /// Trait for generating IDs.
-pub trait IDGenerator {
+pub trait IDGenerator<ID> {
     /// Generate random ID with RNG.
-    fn generate_id<R: RngCore + CryptoRng>(&self, rng: &mut R) -> NonZeroU32;
+    ///
+    /// NOTE: You must take attempt (by calling [`NAttempts::attempt`]) **before** generating a random value.
+    fn generate_id<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+        attempts: NAttempts<'_>,
+    ) -> Option<ID>;
+}
+
+impl<ID, T: IDGenerator<ID>> IDGenerator<ID> for &T {
+    fn generate_id<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+        attempts: NAttempts<'_>,
+    ) -> Option<ID> {
+        (**self).generate_id(rng, attempts)
+    }
+}
+
+/// Type wrapping attempts at generating ID.
+#[derive(Debug)]
+pub struct NAttempts<'a>(&'a mut usize);
+
+impl NAttempts<'_> {
+    /// Reborrows value.
+    pub fn reborrow<'a>(&'a mut self) -> NAttempts<'a> {
+        NAttempts(&mut *self.0)
+    }
+
+    /// Take an attempt.
+    ///
+    /// Returns [`None`] if all attempts are exhausted.
+    pub fn attempt(&mut self) -> Option<()> {
+        *self.0 = self.0.checked_sub(1)?;
+        Some(())
+    }
+}
+
+/// Extension trait for [`IDGenerator`].
+pub trait IDGeneratorExt<ID>: IDGenerator<ID> {
+    /// Filter the generated IDs.
+    #[inline(always)]
+    fn filter<F>(self, pred: F) -> FilterIDGenerator<ID, Self, F>
+    where
+        Self: Sized,
+        F: Fn(&ID) -> bool,
+    {
+        FilterIDGenerator::new(self, pred)
+    }
+
+    /// Map the generated IDs.
+    #[inline(always)]
+    fn map<R, F>(self, map: F) -> MapIDGenerator<ID, Self, F>
+    where
+        Self: Sized,
+        F: Fn(ID) -> R,
+    {
+        MapIDGenerator::new(self, map)
+    }
+}
+
+impl<ID, T: IDGenerator<ID>> IDGeneratorExt<ID> for T {}
+
+/// Wrapping type for filtering generated IDs.
+pub struct FilterIDGenerator<ID, T, F> {
+    inner: T,
+    pred: F,
+    _p: PhantomData<ID>,
+}
+
+impl<ID, T: IDGenerator<ID>, F: Fn(&ID) -> bool> FilterIDGenerator<ID, T, F> {
+    /// Create ID filter.
+    #[inline(always)]
+    pub const fn new(src: T, pred: F) -> Self {
+        Self {
+            inner: src,
+            pred,
+            _p: PhantomData,
+        }
+    }
+}
+
+impl<ID, T: IDGenerator<ID>, F: Fn(&ID) -> bool> IDGenerator<ID> for FilterIDGenerator<ID, T, F> {
+    fn generate_id<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+        mut attempts: NAttempts<'_>,
+    ) -> Option<ID> {
+        Some(loop {
+            let v = self.inner.generate_id(rng, attempts.reborrow())?;
+            if (self.pred)(&v) {
+                break v;
+            }
+        })
+    }
+}
+
+/// Wrapping type for mapping generated IDs.
+pub struct MapIDGenerator<ID, T, F> {
+    inner: T,
+    map: F,
+    _p: PhantomData<ID>,
+}
+
+impl<ID, R, T: IDGenerator<ID>, F: Fn(ID) -> R> MapIDGenerator<ID, T, F> {
+    /// Create ID filter.
+    #[inline(always)]
+    pub const fn new(src: T, map: F) -> Self {
+        Self {
+            inner: src,
+            map,
+            _p: PhantomData,
+        }
+    }
+}
+
+impl<ID, R, T: IDGenerator<ID>, F: Fn(ID) -> R> IDGenerator<R> for MapIDGenerator<ID, T, F> {
+    fn generate_id<Rng: RngCore + CryptoRng>(
+        &self,
+        rng: &mut Rng,
+        attempts: NAttempts<'_>,
+    ) -> Option<R> {
+        self.inner.generate_id(rng, attempts).map(&self.map)
+    }
 }
 
 /// ID generator that generates all possible IDs.
@@ -302,12 +829,25 @@ impl AnyIDGenerator {
     }
 }
 
-impl IDGenerator for AnyIDGenerator {
-    fn generate_id<R: RngCore + CryptoRng>(&self, rng: &mut R) -> NonZeroU32 {
-        if self.id_32bit {
-            rng.r#gen()
-        } else {
-            rng.r#gen::<NonZeroU16>().into()
+impl IDGenerator<NonZeroU32> for AnyIDGenerator {
+    fn generate_id<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+        mut att: NAttempts<'_>,
+    ) -> Option<NonZeroU32> {
+        loop {
+            att.attempt()?;
+            let v = rng.next_u32();
+            let v = if self.id_32bit {
+                NonZeroU32::new(v)
+            } else {
+                NonZeroU16::new(v as u16)
+                    .or_else(|| NonZeroU16::new((v >> 16) as u16))
+                    .map(NonZeroU32::from)
+            };
+            if v.is_some() {
+                break v;
+            }
         }
     }
 }
@@ -352,14 +892,31 @@ impl InitiatorIDGenerator {
     }
 }
 
-impl IDGenerator for InitiatorIDGenerator {
-    fn generate_id<R: RngCore + CryptoRng>(&self, rng: &mut R) -> NonZeroU32 {
-        NonZeroU32::new(rng.gen_range(if self.id_32bit {
-            0x8000_0000..=0xffff_ffff
-        } else {
-            0x8000..=0xffff
-        }))
-        .expect("ID must be nonzero")
+impl IDGenerator<NonZeroU32> for InitiatorIDGenerator {
+    fn generate_id<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+        mut att: NAttempts<'_>,
+    ) -> Option<NonZeroU32> {
+        loop {
+            att.attempt()?;
+            let v = rng.next_u32()
+                | if self.id_32bit {
+                    0x8000_0000
+                } else {
+                    0x8000_8000
+                };
+            let v = if self.id_32bit {
+                NonZeroU32::new(v)
+            } else {
+                NonZeroU16::new(v as u16)
+                    .or_else(|| NonZeroU16::new((v >> 16) as u16))
+                    .map(NonZeroU32::from)
+            };
+            if v.is_some() {
+                break v;
+            }
+        }
     }
 }
 
@@ -403,14 +960,31 @@ impl ResponderIDGenerator {
     }
 }
 
-impl IDGenerator for ResponderIDGenerator {
-    fn generate_id<R: RngCore + CryptoRng>(&self, rng: &mut R) -> NonZeroU32 {
-        NonZeroU32::new(rng.gen_range(if self.id_32bit {
-            1..=0x7fff_ffff
-        } else {
-            1..=0x7fff
-        }))
-        .expect("ID must be nonzero")
+impl IDGenerator<NonZeroU32> for ResponderIDGenerator {
+    fn generate_id<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+        mut att: NAttempts<'_>,
+    ) -> Option<NonZeroU32> {
+        loop {
+            att.attempt()?;
+            let v = rng.next_u32()
+                | if self.id_32bit {
+                    0x7fff_ffff
+                } else {
+                    0x7fff_7fff
+                };
+            let v = if self.id_32bit {
+                NonZeroU32::new(v)
+            } else {
+                NonZeroU16::new(v as u16)
+                    .or_else(|| NonZeroU16::new((v >> 16) as u16))
+                    .map(NonZeroU32::from)
+            };
+            if v.is_some() {
+                break v;
+            }
+        }
     }
 }
 
@@ -433,9 +1007,20 @@ impl StreamIDGenerator {
     }
 }
 
-impl IDGenerator for StreamIDGenerator {
-    fn generate_id<R: RngCore + CryptoRng>(&self, rng: &mut R) -> NonZeroU32 {
-        NonZeroU32::new(rng.gen_range(1..=0xffff)).expect("ID must be nonzero")
+impl IDGenerator<NonZeroU16> for StreamIDGenerator {
+    fn generate_id<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+        mut att: NAttempts<'_>,
+    ) -> Option<NonZeroU16> {
+        loop {
+            att.attempt()?;
+            let v = rng.next_u32();
+            let v = NonZeroU16::new(v as u16).or_else(|| NonZeroU16::new((v >> 16) as u16));
+            if v.is_some() {
+                break v;
+            }
+        }
     }
 }
 
@@ -443,25 +1028,45 @@ impl IDGenerator for StreamIDGenerator {
 ///
 /// For controller, send it to task handler.
 /// Once received, use destructuring let to get all the values.
-#[derive(Debug)]
 #[non_exhaustive]
-pub struct NewHandler<Cell> {
+pub struct NewHandler<ID, R: Runtime, Cell: 'static + Send> {
     /// Handler ID.
-    pub id: NonZeroU32,
+    pub id: ID,
 
     /// Receiver that receives cells from manager.
-    pub receiver: Receiver<Cell>,
+    pub receiver: R::SPSCReceiver<Cell>,
 
     /// Sender that sends cells into manager.
-    pub sender: Sender<Cell>,
+    pub sender: R::MPSCSender<Cell>,
 }
 
-impl<Cell> NewHandler<Cell> {
-    fn new(id: NonZeroU32, receiver: Receiver<Cell>, sender: Sender<Cell>) -> Self {
+impl<ID: Debug, R: Runtime, Cell: 'static + Send> Debug for NewHandler<ID, R, Cell> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("NewHandler")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<ID, R: Runtime, Cell: 'static + Send> NewHandler<ID, R, Cell> {
+    fn new(id: ID, receiver: R::SPSCReceiver<Cell>, sender: R::MPSCSender<Cell>) -> Self {
         Self {
             id,
             receiver,
             sender,
+        }
+    }
+
+    pub fn map_id<RID>(self, f: impl FnOnce(ID) -> RID) -> NewHandler<RID, R, Cell> {
+        let Self {
+            id,
+            receiver,
+            sender,
+        } = self;
+        NewHandler {
+            receiver,
+            sender,
+            id: f(id),
         }
     }
 }

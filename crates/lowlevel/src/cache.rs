@@ -2,8 +2,9 @@ use std::borrow::{Borrow, BorrowMut};
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::hash::{Hash, Hasher};
-use std::mem::ManuallyDrop;
+use std::mem::{ManuallyDrop, MaybeUninit, replace};
 use std::ops::{Deref, DerefMut};
+use std::ptr::{read, slice_from_raw_parts_mut};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering::*};
@@ -201,8 +202,66 @@ impl CellCache for StandardCellCache {
 /// Trait for cacheable types.
 pub trait Cachable {
     /// Cache and destroy `self`.
-    ///
     fn cache<C: CellCache + ?Sized>(self, cache: &C);
+}
+
+macro_rules! cachable_impl_tuple {
+    () => {};
+    ($t1:ident $(, $t:ident)*) => {
+        #[allow(non_snake_case)]
+        /// Auto-impl for tuple.
+        impl<$t1: Cachable $(, $t: Cachable)*> Cachable for ($t1, $($t),*) {
+            fn cache<Cache: CellCache + ?Sized>(self, cache: &Cache) {
+                let ($t1, $($t),*) = self;
+                $t1.cache(cache);
+                $($t.cache(cache);)*
+            }
+        }
+
+        cachable_impl_tuple![$($t),*];
+    };
+}
+
+cachable_impl_tuple![A, B, C, D, E, F, G, H, I, J, K, L];
+
+/// Auto-impl for unit type.
+impl Cachable for () {
+    fn cache<C: CellCache + ?Sized>(self, _: &C) {}
+}
+
+/// Auto-impl for arrays.
+impl<T: Cachable + Sized, const N: usize> Cachable for [T; N] {
+    fn cache<C: CellCache + ?Sized>(self, cache: &C) {
+        /// Type used to drop remaining values on panic.
+        struct S<T, const N: usize> {
+            // Use borrow to remove unnecessary memcpy (only works in release).
+            a: *mut [T; N],
+            n: usize,
+        }
+
+        impl<T, const N: usize> Drop for S<T, N> {
+            fn drop(&mut self) {
+                // SAFETY: All elements between n..N are filled
+                unsafe {
+                    slice_from_raw_parts_mut(self.a.cast::<T>().add(self.n), N - self.n)
+                        .drop_in_place()
+                }
+            }
+        }
+
+        let mut a = MaybeUninit::new(self);
+        let mut s = S {
+            a: a.as_mut_ptr(),
+            n: 0,
+        };
+        while s.n < N {
+            let n = s.n;
+            let i = replace(&mut s.n, n + 1);
+            // SAFETY: Element will not be used afterwards
+            let v = unsafe { read(s.a.cast::<T>().add(i)) };
+            v.cache(cache);
+        }
+    }
 }
 
 /// Auto-impl for [`Option`].

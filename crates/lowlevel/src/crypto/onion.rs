@@ -327,12 +327,8 @@ impl OnionLayerFast {
     }
 
     /// Get CREATE_FAST cell to be send to server.
-    pub fn create_cell<C: CellCache + Clone>(
-        &self,
-        circuit: NonZeroU32,
-        cache: &C,
-    ) -> Cached<CreateFast, C> {
-        cache.cache(CreateFast::new(cache.get_cached(), circuit, self.key))
+    pub fn create_cell<C: CellCache>(&self, circuit: NonZeroU32, cache: &C) -> CreateFast {
+        CreateFast::new(cache.get_cached(), circuit, self.key)
     }
 
     fn derive_server_inner(

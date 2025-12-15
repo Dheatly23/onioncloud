@@ -10,7 +10,6 @@ use std::io::Result as IoResult;
 use std::mem::take;
 use std::net::SocketAddr;
 use std::ops::DerefMut;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -53,7 +52,7 @@ impl Debug for TestRuntime {
 }
 
 struct RuntimeInner {
-    pending: Mutex<Vec<Pin<Box<dyn Send + Future<Output = ()>>>>>,
+    pending: Mutex<Vec<task::Task>>,
 
     timers: timer::Timers,
     sockets: Arc<Mutex<socket::Sockets>>,
@@ -75,8 +74,11 @@ impl Runtime for TestRuntime {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let (handle, task) = spawn(fut);
-        self.0.pending.lock().push(task);
+        let (handle, fut) = spawn(fut);
+        self.0
+            .pending
+            .lock()
+            .push(task::Task::with_current_span(fut));
 
         handle
     }
@@ -349,7 +351,7 @@ impl TestExecutor {
     pub fn spawn_blocking(&mut self, fut: impl 'static + Send + Future<Output = ()>) {
         let id = self.tasks.len();
         self.tasks
-            .add_pending([Box::pin(fut) as Pin<Box<dyn Send + Future<Output = ()>>>]);
+            .add_pending([task::Task::with_current_span(Box::pin(fut))]);
 
         self.run_tasks_until(|this, run| {
             if run == 0 {

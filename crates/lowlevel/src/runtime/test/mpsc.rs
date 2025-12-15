@@ -153,7 +153,11 @@ impl<T: Send> Sink<T> for MPSCPipeSender<T> {
             guard.wake_recv();
             Poll::Ready(Ok(()))
         } else if inner.receiver.load(Acquire) == 0 {
-            Poll::Ready(Err(SendError(this.buf.take().unwrap())))
+            Poll::Ready(if let Some(m) = this.buf.take() {
+                Err(SendError(m))
+            } else {
+                Ok(())
+            })
         } else {
             guard.wake_recv();
             if *this.r#gen == guard.send_wakers_gen
@@ -259,7 +263,7 @@ impl<T: Send> Stream for MPSCPipeReceiver<T> {
     }
 }
 
-impl<T: Send> PipeSender<T> for MPSCPipeReceiver<T> {
+impl<T: Send> PipeReceiver<T> for MPSCPipeReceiver<T> {
     fn is_disconnected(&self) -> bool {
         // SAFETY: This is originally created from Box.
         let inner = unsafe { self.0.as_ref() };

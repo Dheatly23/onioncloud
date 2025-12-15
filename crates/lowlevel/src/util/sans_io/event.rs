@@ -41,3 +41,17 @@ impl<M> ParentCellMsg<M> {
         self.0
     }
 }
+
+/// Channel is closed.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct ChannelClosed<'a, ID, C, M> {
+    /// Channel ID.
+    pub id: ID,
+
+    /// Last cell that fails to send.
+    pub cell: Option<C>,
+
+    /// Channel metadata.
+    pub meta: &'a mut M,
+}
