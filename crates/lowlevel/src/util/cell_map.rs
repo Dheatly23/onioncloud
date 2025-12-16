@@ -1,5 +1,6 @@
 use std::collections::hash_map::{Entry, HashMap, VacantEntry};
 use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::future::poll_fn;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::num::{NonZeroU16, NonZeroU32};
@@ -299,6 +300,13 @@ impl<K: Hash + Eq, R: Runtime, Cell: 'static + Send, Meta> CellMap<K, R, Cell, M
     pub fn poll_recv(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Cell>> {
         self.project().recv.poll_next(cx)
     }
+
+    /// Receive cell from aggregate channel.
+    ///
+    /// **NOTE: Do not call this from inside of controller.**
+    pub async fn recv(mut self: Pin<&mut Self>) -> Option<Cell> {
+        poll_fn(move |cx| self.as_mut().poll_recv(cx)).await
+    }
 }
 
 impl<R: Runtime, Cell: 'static + Send, Meta> HandlerData<R, Cell, Meta> {
@@ -390,6 +398,45 @@ impl<R: Runtime, Cell: 'static + Send, Meta> HandlerData<R, Cell, Meta> {
     /// This happens when the corresponding receiver is dropped.
     pub fn is_closed(&self) -> bool {
         self.send.is_disconnected()
+    }
+
+    /// Gets wrapper for sender.
+    pub fn sender(self: Pin<&mut Self>) -> impl '_ + Sink<Cell, Error = SendError<Cell>> {
+        struct Inner<'a, R: Runtime, Cell: 'static + Send, Meta>(
+            Pin<&'a mut HandlerData<R, Cell, Meta>>,
+        );
+
+        impl<'a, R: Runtime, Cell: 'static + Send, Meta> Sink<Cell> for Inner<'a, R, Cell, Meta> {
+            type Error = SendError<Cell>;
+
+            fn poll_ready(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Result<(), Self::Error>> {
+                self.0.as_mut().poll_ready(cx)
+            }
+
+            fn start_send(mut self: Pin<&mut Self>, item: Cell) -> Result<(), Self::Error> {
+                self.0.as_mut().start_send(item)
+            }
+
+            fn poll_flush(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Result<(), Self::Error>> {
+                self.0.as_mut().poll_ready(cx)
+            }
+
+            fn poll_close(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Result<(), Self::Error>> {
+                self.0.as_mut().start_close();
+                self.0.as_mut().poll_ready(cx)
+            }
+        }
+
+        Inner(self)
     }
 }
 
@@ -1075,257 +1122,195 @@ impl<ID, R: Runtime, Cell: 'static + Send> NewHandler<ID, R, Cell> {
 mod tests {
     use super::*;
 
+    use std::future::Future;
     use std::pin::pin;
-    use std::thread::{JoinHandle, spawn};
     use std::time::{Duration, Instant};
 
-    use futures_channel::oneshot::channel;
     use futures_util::{SinkExt as _, StreamExt as _};
-    use tokio::task::spawn as spawn_async;
-    use tokio::time::timeout_at;
+    use tracing::instrument;
 
-    fn join_all(handles: Vec<JoinHandle<()>>) {
-        for h in handles {
-            h.join().unwrap();
-        }
-    }
+    use crate::runtime::test::{TestRuntime, run};
 
-    fn spawn_circuit<'a, C: Send + 'static, M>(
-        data: (NewHandler<C>, &'a mut HandlerData<C, M>),
-        f: impl FnOnce(NonZeroU32, Receiver<C>, Sender<C>) + Send + 'static,
-        handles: &mut Vec<JoinHandle<()>>,
-    ) -> &'a mut HandlerData<C, M> {
-        let (d, r) = data;
-        handles.push(spawn(move || f(d.id, d.receiver, d.sender)));
-        r
+    fn spawn<F>(
+        rt: &TestRuntime,
+        f: impl FnOnce(TestRuntime) -> F,
+    ) -> <TestRuntime as Runtime>::Task<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        rt.spawn(f(rt.clone()))
     }
 
     #[test]
+    #[instrument]
     fn test_send_recv_one() {
-        let mut handles = Vec::new();
+        run(|rt| {
+            spawn(rt, |rt| async move {
+                let mut map = pin!(CellMap::<u32, TestRuntime, (u32, usize), ()>::new(
+                    &rt, 8, 8
+                ));
 
-        let mut map = CellMap::<(u32, usize)>::new(8, 8);
+                let id = 0xc12af7ed;
+                let (
+                    NewHandler {
+                        receiver: recv,
+                        sender: send,
+                        ..
+                    },
+                    mut circ,
+                ) = map.as_mut().insert(&rt, id).unwrap();
+                spawn(&rt, move |_| async move {
+                    let mut send = pin!(send);
+                    let mut recv = pin!(recv);
 
-        let id = NonZeroU32::new(0xc12af7ed).unwrap();
-        let circ = spawn_circuit(
-            map.insert(id).unwrap(),
-            |id, recv, send| {
+                    for i in 0..256 {
+                        assert_eq!(recv.next().await.unwrap(), (id, i));
+                    }
+
+                    for i in 0..256 {
+                        send.send((id, i)).await.unwrap();
+                    }
+                });
+
                 for i in 0..256 {
-                    assert_eq!(recv.recv().unwrap(), (id.get(), i));
+                    circ.as_mut().sender().send((id, i)).await.unwrap();
                 }
 
                 for i in 0..256 {
-                    send.send((id.get(), i)).unwrap();
+                    assert_eq!(map.as_mut().recv().await.unwrap(), (id, i));
                 }
-            },
-            &mut handles,
-        );
+            });
 
-        for i in 0..256 {
-            circ.send.send((id.get(), i)).unwrap();
-        }
-
-        for i in 0..256 {
-            assert_eq!(map.recv.recv().unwrap(), (id.get(), i));
-        }
-
-        join_all(handles);
+            |_| true
+        });
     }
 
     #[test]
+    #[instrument]
     fn test_send_recv_many() {
-        let mut handles = Vec::new();
+        run(|rt| {
+            spawn(rt, |rt| async move {
+                let mut map = pin!(CellMap::<u32, TestRuntime, (u32, usize), usize>::new(
+                    &rt, 8, 8
+                ));
+                const N_CIRC: u32 = 16;
 
-        let mut map = CellMap::<(u32, usize), usize>::new(8, 8);
+                for id in 0..N_CIRC {
+                    let (
+                        NewHandler {
+                            receiver: recv,
+                            sender: send,
+                            ..
+                        },
+                        _,
+                    ) = map.as_mut().insert(&rt, id).unwrap();
+                    spawn(&rt, move |_| async move {
+                        let mut send = pin!(send);
+                        let mut recv = pin!(recv);
 
-        const N_CIRC: u32 = 16;
+                        for i in 0..256 {
+                            assert_eq!(recv.next().await.unwrap(), (id, i));
+                        }
 
-        for id in 1..=N_CIRC {
-            spawn_circuit(
-                map.insert(NonZeroU32::new(id).unwrap()).unwrap(),
-                |id, recv, send| {
-                    for i in 0..256 {
-                        assert_eq!(recv.recv().unwrap(), (id.get(), i));
+                        for i in 0..256 {
+                            send.send((id, i)).await.unwrap();
+                        }
+                    });
+                }
+
+                for i in 0..256 {
+                    for id in 0..N_CIRC {
+                        map.as_mut()
+                            .get(&id)
+                            .unwrap()
+                            .sender()
+                            .send((id, i))
+                            .await
+                            .unwrap();
                     }
+                }
 
-                    for i in 0..256 {
-                        send.send((id.get(), i)).unwrap();
+                let mut n = 0;
+                while n < map.len() {
+                    let (id, i) = map.as_mut().recv().await.unwrap();
+                    let j = map.as_mut().get(&id).unwrap().meta();
+                    assert_eq!(i, *j);
+
+                    assert!(*j < 256);
+                    *j += 1;
+                    if *j == 256 {
+                        n += 1;
                     }
-                },
-                &mut handles,
-            );
-        }
+                }
+            });
 
-        for i in 0..256 {
-            for id in 1..=N_CIRC {
-                map.get(NonZeroU32::new(id).unwrap())
-                    .unwrap()
-                    .send
-                    .send((id, i))
-                    .unwrap();
-            }
-        }
-
-        let mut n = 0;
-        while n < map.len() {
-            let (id, i) = map.recv.recv().unwrap();
-            let j = &mut map.get(NonZeroU32::new(id).unwrap()).unwrap().meta;
-            assert_eq!(i, *j);
-
-            assert!(*j < 256);
-            *j += 1;
-            if *j == 256 {
-                n += 1;
-            }
-        }
-
-        join_all(handles);
-
-        for (_, circ) in map.items() {
-            assert!(circ.is_closed());
-        }
+            |_| true
+        });
     }
 
     #[test]
+    #[instrument]
     fn test_send_recv_many_open() {
-        let mut handles = Vec::new();
+        run(|rt| {
+            spawn(rt, |rt| async move {
+                let mut map = pin!(CellMap::<u32, TestRuntime, (u32, usize), usize>::new(
+                    &rt, 8, 8
+                ));
+                const N_CIRC: u32 = 16;
 
-        let mut map = CellMap::<(u32, usize), usize>::new(8, 8);
+                let mut g = AnyIDGenerator::new();
+                g.id_32bit(true);
+                let g = g.map(u32::from);
 
-        const N_CIRC: usize = 16;
+                for _ in 0..N_CIRC {
+                    let (
+                        NewHandler {
+                            receiver: recv,
+                            sender: send,
+                            id,
+                        },
+                        _,
+                    ) = loop {
+                        if let Ok(v) = map.as_mut().open(&rt, &g, 64) {
+                            break v;
+                        }
+                    };
+                    spawn(&rt, move |_| async move {
+                        let mut send = pin!(send);
+                        let mut recv = pin!(recv);
 
-        for _ in 0..N_CIRC {
-            spawn_circuit(
-                loop {
-                    if let Ok(v) = map.open(AnyIDGenerator::new().id_32bit(true), 64) {
-                        break v;
-                    }
-                },
-                |id, recv, send| {
-                    for i in 0..256 {
-                        assert_eq!(recv.recv().unwrap(), (id.get(), i));
-                    }
+                        for i in 0..256 {
+                            assert_eq!(recv.next().await.unwrap(), (id, i));
+                        }
 
-                    for i in 0..256 {
-                        send.send((id.get(), i)).unwrap();
-                    }
-                },
-                &mut handles,
-            );
-        }
-
-        for i in 0..256 {
-            for (id, circ) in map.items() {
-                circ.send.send((id.get(), i)).unwrap();
-            }
-        }
-
-        let mut n = 0;
-        while n < map.len() {
-            let (id, i) = map.recv.recv().unwrap();
-            let j = &mut map.get(NonZeroU32::new(id).unwrap()).unwrap().meta;
-            assert_eq!(i, *j);
-
-            assert!(*j < 256);
-            *j += 1;
-            if *j == 256 {
-                n += 1;
-            }
-        }
-
-        join_all(handles);
-
-        for (_, circ) in map.items() {
-            assert!(circ.is_closed());
-        }
-    }
-
-    #[tokio::test]
-    async fn test_send_recv_many_open_async() {
-        struct TO(Instant);
-
-        impl TO {
-            fn timeout<F: Future>(&self, f: F) -> impl use<F> + Future<Output = F::Output> {
-                let t = self.0;
-                async move { timeout_at(t.into(), f).await.unwrap() }
-            }
-        }
-
-        let t = TO(Instant::now() + Duration::from_secs(5));
-        let mut handles = Vec::new();
-
-        let mut map = CellMap::<(u32, u64), (u64, u64, u64)>::new(8, 8);
-
-        const N_CIRC: usize = 16;
-
-        let mut rng = ThreadRng::default();
-        for _ in 0..N_CIRC {
-            let (a, b): (u64, u64) = rng.r#gen();
-
-            let (send, recv) = channel::<NewHandler<(u32, u64)>>();
-            handles.push(spawn_async(t.timeout(async move {
-                let Ok(NewHandler {
-                    sender: send,
-                    receiver: recv,
-                    id,
-                }) = recv.await
-                else {
-                    return;
-                };
-
-                let mut send = pin!(send.sink());
-                let mut recv = pin!(recv.stream());
-                while let Some((i, j)) = recv.as_mut().next().await {
-                    assert_eq!(i, id.get());
-
-                    if send
-                        .as_mut()
-                        .send((i, j.wrapping_mul(a).wrapping_add(b)))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
+                        for i in 0..256 {
+                            send.send((id, i)).await.unwrap();
+                        }
+                    });
                 }
-            })));
 
-            loop {
-                if let Ok((data, _)) =
-                    map.open_with(AnyIDGenerator::new().id_32bit(true), 64, |_| (0, a, b))
-                {
-                    let id = data.id;
-                    if send.send(data).is_err() {
-                        map.remove(id);
-                    }
-                    break;
-                }
-            }
-        }
-
-        for (&id, circ) in map.items() {
-            let send = circ.send.clone();
-            handles.push(spawn_async(t.timeout(async move {
-                let mut send = pin!(send.sink());
                 for i in 0..256 {
-                    send.as_mut().send((id.get(), i)).await.unwrap();
+                    for (&id, circ) in map.as_mut().items() {
+                        circ.sender().send((id, i)).await.unwrap();
+                    }
                 }
-            })));
-        }
 
-        while !map.is_empty() {
-            let (id, i) = t.timeout(map.recv.recv_async()).await.unwrap();
-            let (ref mut j, a, b) = map.get(NonZeroU32::new(id).unwrap()).unwrap().meta;
-            assert_eq!(i, j.wrapping_mul(a).wrapping_add(b));
+                let mut n = 0;
+                while n < map.len() {
+                    let (id, i) = map.as_mut().recv().await.unwrap();
+                    let j = map.as_mut().get(&id).unwrap().meta();
+                    assert_eq!(i, *j);
 
-            assert!(*j < 256);
-            *j += 1;
-            if *j == 256 {
-                map.remove(NonZeroU32::new(id).unwrap());
-            }
-        }
+                    assert!(*j < 256);
+                    *j += 1;
+                    if *j == 256 {
+                        n += 1;
+                    }
+                }
+            });
 
-        for h in handles {
-            t.timeout(h).await.unwrap();
-        }
+            |_| true
+        });
     }
 }

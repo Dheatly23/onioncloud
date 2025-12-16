@@ -155,12 +155,14 @@ mod tests {
 
     #[test]
     fn test_parse_header_fail() {
-        let r =
-            CellReader::new(TestConfig::new(false)).handle(&mut util::Buffer::new(&[0, 0, 255]));
+        let r = CellReader::new()
+            .handle((&mut util::Buffer::new(&[0, 0, 255]), TestConfig::new(false)));
         assert!(matches!(r, Err(errors::CellError::InvalidCellHeader(_))));
 
-        let r = CellReader::new(TestConfig::new(true))
-            .handle(&mut util::Buffer::new(&[0, 0, 0, 0, 255]));
+        let r = CellReader::new().handle((
+            &mut util::Buffer::new(&[0, 0, 0, 0, 255]),
+            TestConfig::new(true),
+        ));
         assert!(matches!(r, Err(errors::CellError::InvalidCellHeader(_))));
     }
 
@@ -176,10 +178,12 @@ mod tests {
             buf.push(1);
             buf.extend_from_slice(&data);
 
+            let mut reader = CellReader::new();
+            let cfg = TestConfig::new(is_4bytes);
             let cell = test_read_helper(
                 &buf,
                 steps,
-                CellReader::new(TestConfig::new(is_4bytes)),
+                FnHandle(move |s: &mut dyn Read| reader.handle((s, &cfg))),
             );
             assert_eq!(cell.data(), data);
         }
@@ -200,10 +204,12 @@ mod tests {
             buf.extend_from_slice(&(data.len() as u16).to_be_bytes());
             buf.extend_from_slice(&data);
 
+            let mut reader = CellReader::new();
+            let cfg = TestConfig::new(is_4bytes);
             let cell = test_read_helper(
                 &buf,
                 steps,
-                CellReader::new(TestConfig::new(is_4bytes)),
+                FnHandle(move |s: &mut dyn Read| reader.handle((s, &cfg))),
             );
             assert_eq!(cell.data(), data);
         }

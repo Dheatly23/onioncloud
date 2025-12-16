@@ -1379,7 +1379,7 @@ mod tests {
         // Do handshake
         let (mut client, mut server) = {
             let client = OnionLayerFast::new();
-            let cell = client.create_cell(id, &cache);
+            let cell = cache.cache(client.create_cell(id, &cache));
             let (server, cell) = OnionLayerFast::derive_server_cached(&cell).unwrap();
             let client = client.derive_client(&cell).unwrap();
             (client, server)

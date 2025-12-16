@@ -376,6 +376,34 @@ impl TestExecutor {
     }
 }
 
+/// Helper function to run test.
+///
+/// The only argument is an initialization function.
+/// The function then returns a loop handling function.
+/// All tasks must finish for the test to be considered completed.
+pub fn run<I, S>(f: I)
+where
+    I: FnOnce(&TestRuntime) -> S,
+    S: FnMut(&mut TestExecutor) -> bool,
+{
+    let mut exec = TestExecutor::default();
+    let mut f = f(exec.runtime());
+
+    exec.run_tasks_until(move |this, run| {
+        if f(this) && run == 0 {
+            if this.tasks.is_finished() && this.rt.0.pending.lock().is_empty() {
+                trace!("all tasks finished");
+                true
+            } else {
+                error!("runtime deadlocks");
+                panic!("runtime deadlocks");
+            }
+        } else {
+            false
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
