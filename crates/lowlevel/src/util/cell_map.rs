@@ -1127,9 +1127,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use futures_util::{SinkExt as _, StreamExt as _};
-    use tracing::instrument;
+    use tracing::{Instrument as _, info, info_span, instrument};
 
-    use crate::runtime::test::{TestRuntime, run};
+    use crate::runtime::test::{TestRuntime, run as run_inner};
 
     fn spawn<F>(
         rt: &TestRuntime,
@@ -1142,11 +1142,22 @@ mod tests {
         rt.spawn(f(rt.clone()))
     }
 
-    #[test]
+    fn run<F>(f: impl FnOnce(TestRuntime) -> F)
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        run_inner(|rt| {
+            spawn(rt, f);
+            |_| true
+        });
+    }
+
+    #[test_log::test]
     #[instrument]
     fn test_send_recv_one() {
         run(|rt| {
-            spawn(rt, |rt| async move {
+            async move {
                 let mut map = pin!(CellMap::<u32, TestRuntime, (u32, usize), ()>::new(
                     &rt, 8, 8
                 ));
@@ -1160,37 +1171,49 @@ mod tests {
                     },
                     mut circ,
                 ) = map.as_mut().insert(&rt, id).unwrap();
-                spawn(&rt, move |_| async move {
-                    let mut send = pin!(send);
-                    let mut recv = pin!(recv);
+                spawn(&rt, move |_| {
+                    async move {
+                        let mut send = pin!(send);
+                        let mut recv = pin!(recv);
 
-                    for i in 0..256 {
-                        assert_eq!(recv.next().await.unwrap(), (id, i));
-                    }
+                        for i in 0..256 {
+                            let v = recv.next().await;
+                            info!("received {v:?}");
+                            assert_eq!(v, Some((id, i)));
+                        }
 
-                    for i in 0..256 {
-                        send.send((id, i)).await.unwrap();
+                        for i in 0..256 {
+                            send.send((id, i)).await.unwrap();
+                            info!("sent {:?}", (id, i));
+                        }
+
+                        info!("done");
                     }
+                    .instrument(info_span!("circuit"))
                 });
 
                 for i in 0..256 {
                     circ.as_mut().sender().send((id, i)).await.unwrap();
+                    info!("sent {:?}", (id, i));
                 }
 
                 for i in 0..256 {
-                    assert_eq!(map.as_mut().recv().await.unwrap(), (id, i));
+                    let v = map.as_mut().recv().await;
+                    info!("received {v:?}");
+                    assert_eq!(v, Some((id, i)));
                 }
-            });
 
-            |_| true
+                info!("done");
+            }
+            .instrument(info_span!("test_send_recv_one"))
         });
     }
 
-    #[test]
+    #[test_log::test]
     #[instrument]
     fn test_send_recv_many() {
         run(|rt| {
-            spawn(rt, |rt| async move {
+            async move {
                 let mut map = pin!(CellMap::<u32, TestRuntime, (u32, usize), usize>::new(
                     &rt, 8, 8
                 ));
@@ -1205,17 +1228,25 @@ mod tests {
                         },
                         _,
                     ) = map.as_mut().insert(&rt, id).unwrap();
-                    spawn(&rt, move |_| async move {
-                        let mut send = pin!(send);
-                        let mut recv = pin!(recv);
+                    spawn(&rt, move |_| {
+                        async move {
+                            let mut send = pin!(send);
+                            let mut recv = pin!(recv);
 
-                        for i in 0..256 {
-                            assert_eq!(recv.next().await.unwrap(), (id, i));
-                        }
+                            for i in 0..256 {
+                                let v = recv.next().await;
+                                info!("received {v:?}");
+                                assert_eq!(v, Some((id, i)));
+                            }
 
-                        for i in 0..256 {
-                            send.send((id, i)).await.unwrap();
+                            for i in 0..256 {
+                                send.send((id, i)).await.unwrap();
+                                info!("sent {:?}", (id, i));
+                            }
+
+                            info!("done");
                         }
+                        .instrument(info_span!("circuit", id))
                     });
                 }
 
@@ -1228,12 +1259,14 @@ mod tests {
                             .send((id, i))
                             .await
                             .unwrap();
+                        info!("sent {:?}", (id, i));
                     }
                 }
 
                 let mut n = 0;
                 while n < map.len() {
                     let (id, i) = map.as_mut().recv().await.unwrap();
+                    info!("received {:?}", (id, i));
                     let j = map.as_mut().get(&id).unwrap().meta();
                     assert_eq!(i, *j);
 
@@ -1243,17 +1276,16 @@ mod tests {
                         n += 1;
                     }
                 }
-            });
-
-            |_| true
+            }
+            .instrument(info_span!("test_send_recv_many"))
         });
     }
 
-    #[test]
+    #[test_log::test]
     #[instrument]
     fn test_send_recv_many_open() {
         run(|rt| {
-            spawn(rt, |rt| async move {
+            async move {
                 let mut map = pin!(CellMap::<u32, TestRuntime, (u32, usize), usize>::new(
                     &rt, 8, 8
                 ));
@@ -1281,24 +1313,31 @@ mod tests {
                         let mut recv = pin!(recv);
 
                         for i in 0..256 {
-                            assert_eq!(recv.next().await.unwrap(), (id, i));
+                            let v = recv.next().await;
+                            info!("received {v:?}");
+                            assert_eq!(v, Some((id, i)));
                         }
 
                         for i in 0..256 {
                             send.send((id, i)).await.unwrap();
+                            info!("sent {:?}", (id, i));
                         }
+
+                        info!("done");
                     });
                 }
 
                 for i in 0..256 {
                     for (&id, circ) in map.as_mut().items() {
                         circ.sender().send((id, i)).await.unwrap();
+                        info!("sent {:?}", (id, i));
                     }
                 }
 
                 let mut n = 0;
                 while n < map.len() {
                     let (id, i) = map.as_mut().recv().await.unwrap();
+                    info!("received {:?}", (id, i));
                     let j = map.as_mut().get(&id).unwrap().meta();
                     assert_eq!(i, *j);
 
@@ -1308,9 +1347,8 @@ mod tests {
                         n += 1;
                     }
                 }
-            });
-
-            |_| true
+            }
+            .instrument(info_span!("test_send_recv_many_open"))
         });
     }
 }
