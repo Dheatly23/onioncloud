@@ -1,17 +1,17 @@
 use std::collections::VecDeque;
-use std::future::Future;
 use std::io::{ErrorKind, IoSlice, IoSliceMut, Read as _, Result as IoResult, Write as _};
-use std::marker::PhantomPinned;
+use std::marker::{PhantomData, PhantomPinned};
+use std::mem::forget;
 use std::net::SocketAddr;
 use std::ops::DerefMut;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::ptr::NonNull;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 
-use futures_core::ready;
 use futures_io::{AsyncRead, AsyncWrite};
 use parking_lot::{Mutex, MutexGuard};
-use pin_project::pin_project;
+use tracing::{info_span, instrument};
 
 use crate::private::Sealed;
 use crate::runtime::Stream;
@@ -26,16 +26,19 @@ pub struct OpenSocket {
     pub send_eof: bool,
     /// Address associated with socket.
     pub addr: SocketAddr,
+    /// Handler function.
+    pub handle: HandleFn,
 }
 
 impl OpenSocket {
     /// Create new [`OpenSocket`].
     #[inline]
-    pub fn new(addr: SocketAddr) -> Self {
+    pub fn new(addr: SocketAddr, handle: HandleFn) -> Self {
         Self {
             send: VecDeque::new(),
             send_eof: false,
             addr,
+            handle,
         }
     }
 
@@ -54,18 +57,22 @@ impl OpenSocket {
     }
 }
 
+pub type OpenHandleFn =
+    Box<dyn Send + Sync + FnMut(&[SocketAddr]) -> Result<OpenSocket, ErrorKind>>;
+pub type HandleFn = Box<dyn Send + Sync + FnMut(&mut SocketRef<'_>) -> Result<(), ErrorKind>>;
+
 /// Handle for runtime sockets.
 pub struct Sockets {
-    sockets: Vec<SocketInner>,
+    handle: OpenHandleFn,
+    sockets: Vec<Weak<Mutex<SocketInner>>>,
 }
 
 enum SocketInner {
-    Connect {
-        addrs: Box<[SocketAddr]>,
-        waker: Option<Waker>,
+    Open {
+        inner: OpenSocketInner,
+        handle: HandleFn,
+        _pinned: PhantomPinned,
     },
-    Open(OpenSocketInner),
-    Closed,
     Error(ErrorKind),
 }
 
@@ -76,8 +83,6 @@ struct OpenSocketInner {
     send_waker: Option<Waker>,
     recv: VecDeque<u8>,
     recv_eof: bool,
-
-    closed: bool,
 }
 
 impl Sockets {
@@ -85,44 +90,13 @@ impl Sockets {
     pub(super) fn new() -> Self {
         Self {
             sockets: Vec::new(),
+            // Emulates network disconnection.
+            handle: Box::new(|_| Err(ErrorKind::NetworkUnreachable)),
         }
     }
 
-    /// Handle pending sockets.
-    ///
-    /// # Parameters
-    ///
-    /// - `f` : Function that receives list of [`SocketAddr`] and returns either [`OpenSocket`] or error.
-    pub fn handle_new_sockets(
-        &mut self,
-        mut f: impl FnMut(usize, &[SocketAddr]) -> Result<OpenSocket, ErrorKind>,
-    ) {
-        for (ix, i) in self.sockets.iter_mut().enumerate() {
-            let SocketInner::Connect { addrs, waker } = i else {
-                continue;
-            };
-
-            let res = f(ix, &addrs[..]);
-            if let Some(w) = waker.take() {
-                w.wake();
-            }
-            *i = match res {
-                Ok(OpenSocket {
-                    addr,
-                    send,
-                    send_eof,
-                }) => SocketInner::Open(OpenSocketInner {
-                    addr,
-                    send,
-                    recv: VecDeque::new(),
-                    send_eof,
-                    recv_eof: false,
-                    send_waker: None,
-                    closed: false,
-                }),
-                Err(e) => SocketInner::Error(e),
-            };
-        }
+    pub fn set_handle(&mut self, f: OpenHandleFn) {
+        self.handle = f;
     }
 
     /// Gets number of sockets (including pending).
@@ -130,92 +104,156 @@ impl Sockets {
         self.sockets.len()
     }
 
+    /// Inner method to get value and handle.
+    ///
+    /// # Safety
+    ///
+    /// Handle must be dropped before [`SocketRef`] is dropped.
+    unsafe fn get_inner(&mut self, ix: usize) -> Option<(SocketRef<'_>, &'_ mut HandleFn)> {
+        let v = self.sockets.get(ix)?.upgrade()?;
+        let mut guard = v.try_lock().expect("deadlock");
+
+        let SocketInner::Open { inner, handle, .. } = &mut *guard else {
+            return None;
+        };
+        let p = NonNull::from_mut(inner);
+        // SAFETY: Value should be locked while handle reference is used.
+        let h = unsafe { &mut *(&raw mut *handle) };
+        forget(guard);
+        Some((
+            SocketRef {
+                v,
+                p,
+                _p: PhantomData,
+            },
+            h,
+        ))
+    }
+
     /// Gets reference to socket.
-    pub fn get(&mut self, ix: usize) -> SocketRef<'_> {
-        SocketRef(match &mut self.sockets[ix] {
-            SocketInner::Open(v) => v,
-            _ => unreachable!("socket is not open"),
+    pub fn get(&mut self, ix: usize) -> Option<SocketRef<'_>> {
+        // SAFETY: Handle is dropped and reference is returned.
+        unsafe { self.get_inner(ix).map(|(v, _)| v) }
+    }
+
+    #[instrument(skip(self))]
+    pub(super) fn create_socket(&mut self, addrs: &[SocketAddr]) -> IoResult<TestSocket> {
+        let OpenSocket {
+            addr,
+            handle,
+            send,
+            send_eof,
+        } = (self.handle)(addrs)?;
+        let inner = Arc::new(Mutex::new(SocketInner::Open {
+            inner: OpenSocketInner {
+                addr,
+                send,
+                send_eof,
+                send_waker: None,
+                recv: VecDeque::new(),
+                recv_eof: false,
+            },
+            handle,
+            _pinned: PhantomPinned,
+        }));
+        self.sockets.push(Arc::downgrade(&inner));
+        Ok(TestSocket {
+            inner,
+            _pinned: PhantomPinned,
         })
+    }
+
+    #[instrument(skip_all)]
+    pub(super) fn handle_all(&mut self) {
+        for i in 0..self.sockets.len() {
+            let _g = info_span!("handle", i);
+
+            // SAFETY: Handle will be dropped roughly at the same time as guard.
+            let r = unsafe { self.get_inner(i) };
+            let Some((mut g, h)) = r else { continue };
+            if let Err(e) = (*h)(&mut g) {
+                // SAFETY: Value is locked.
+                unsafe {
+                    *g.v.data_ptr() = SocketInner::Error(e);
+                }
+            }
+        }
     }
 }
 
 /// Reference to a socket.
-pub struct SocketRef<'a>(&'a mut OpenSocketInner);
+pub struct SocketRef<'a> {
+    p: NonNull<OpenSocketInner>,
+    v: Arc<Mutex<SocketInner>>,
+    _p: PhantomData<&'a mut OpenSocketInner>,
+}
+
+unsafe impl Send for SocketRef<'_> {}
+unsafe impl Sync for SocketRef<'_> {}
+
+impl Drop for SocketRef<'_> {
+    fn drop(&mut self) {
+        // SAFETY: We lock the value.
+        unsafe { self.v.force_unlock() }
+    }
+}
 
 impl SocketRef<'_> {
+    fn inner(&mut self) -> &mut OpenSocketInner {
+        // SAFETY: Pointer points to locked value within.
+        unsafe { self.p.as_mut() }
+    }
+
     /// Get reference to send stream.
     ///
     /// Stream is [`Read`] by task.
     pub fn send_stream(&mut self) -> &mut VecDeque<u8> {
-        &mut self.0.send
+        &mut self.inner().send
     }
 
     /// Get reference to receive stream.
     ///
     /// Stream is [`Write`] by task.
     pub fn recv_stream(&mut self) -> &mut VecDeque<u8> {
-        &mut self.0.recv
+        &mut self.inner().recv
     }
 
     /// Close sending half of pipe.
     pub fn close_send(&mut self) {
-        self.0.send_eof = true;
+        self.inner().send_eof = true;
     }
 
     /// Close receiving half of pipe.
     pub fn close_recv(&mut self) {
-        self.0.recv_eof = true;
+        self.inner().recv_eof = true;
     }
 
     /// Wake send task.
     ///
     /// After pushing bytes using [`Self::send_stream`], call this to notify waker.
     pub fn wake_send(&mut self) {
-        if let Some(w) = self.0.send_waker.take() {
+        if let Some(w) = self.inner().send_waker.take() {
             w.wake();
         }
     }
 }
 
 /// A test socket.
+#[must_use]
 pub struct TestSocket {
-    ix: usize,
-    sockets: Arc<Mutex<Sockets>>,
+    inner: Arc<Mutex<SocketInner>>,
     _pinned: PhantomPinned,
 }
 
 impl Sealed for TestSocket {}
 
-impl Drop for TestSocket {
-    fn drop(&mut self) {
-        match &mut self.sockets.lock().sockets[self.ix] {
-            v @ SocketInner::Connect { .. } => *v = SocketInner::Closed,
-            SocketInner::Open(OpenSocketInner { closed, .. }) => *closed = true,
-            _ => (),
-        }
-    }
-}
-
 impl TestSocket {
-    fn inner(
-        &self,
-        cx: &mut Context<'_>,
-    ) -> Poll<IoResult<impl '_ + DerefMut<Target = OpenSocketInner>>> {
-        let ret =
-            MutexGuard::try_map_or_err(self.sockets.lock(), |v| match &mut v.sockets[self.ix] {
-                SocketInner::Open(v) => Ok(v),
-                &mut SocketInner::Error(e) => Err(Some(e.into())),
-                SocketInner::Connect { waker, .. } => {
-                    set_option_waker(waker, cx);
-                    Err(None)
-                }
-                SocketInner::Closed => unreachable!("socket closed"),
-            });
-        match ret {
-            Err((_, Some(e))) => Poll::Ready(Err(e)),
-            Err((_, None)) => Poll::Pending,
-            Ok(v) => Poll::Ready(Ok(v)),
-        }
+    fn inner(&self) -> IoResult<impl '_ + DerefMut<Target = OpenSocketInner>> {
+        MutexGuard::try_map_or_err(self.inner.lock(), |v| match *v {
+            SocketInner::Open { ref mut inner, .. } => Ok(inner),
+            SocketInner::Error(e) => Err(e.into()),
+        })
+        .map_err(|(_, e)| e)
     }
 }
 
@@ -225,11 +263,11 @@ impl AsyncRead for TestSocket {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<IoResult<usize>> {
-        let mut inner = ready!(self.inner(cx))?;
+        let mut g = self.inner()?;
 
-        match inner.send.read(buf) {
-            Ok(0) if !inner.send_eof && !buf.is_empty() => {
-                set_option_waker(&mut inner.send_waker, cx);
+        match g.send.read(buf) {
+            Ok(0) if !g.send_eof && !buf.is_empty() => {
+                set_option_waker(&mut g.send_waker, cx);
                 Poll::Pending
             }
             r => Poll::Ready(r),
@@ -241,11 +279,11 @@ impl AsyncRead for TestSocket {
         cx: &mut Context<'_>,
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<IoResult<usize>> {
-        let mut inner = ready!(self.inner(cx))?;
+        let mut g = self.inner()?;
 
-        match inner.send.read_vectored(bufs) {
-            Ok(0) if !inner.send_eof && bufs.iter().any(|b| !b.is_empty()) => {
-                set_option_waker(&mut inner.send_waker, cx);
+        match g.send.read_vectored(bufs) {
+            Ok(0) if !g.send_eof && bufs.iter().any(|b| !b.is_empty()) => {
+                set_option_waker(&mut g.send_waker, cx);
                 Poll::Pending
             }
             r => Poll::Ready(r),
@@ -254,95 +292,40 @@ impl AsyncRead for TestSocket {
 }
 
 impl AsyncWrite for TestSocket {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<IoResult<usize>> {
-        let mut inner = ready!(self.inner(cx))?;
+    fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, buf: &[u8]) -> Poll<IoResult<usize>> {
+        let mut g = self.inner()?;
 
-        if inner.recv_eof || inner.closed {
+        if g.recv_eof {
             return Poll::Ready(Ok(0));
         }
-        Poll::Ready(inner.recv.write(buf))
+        Poll::Ready(g.recv.write(buf))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<IoResult<()>> {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
-        let mut inner = ready!(self.inner(cx))?;
-
-        inner.closed = true;
+    fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<IoResult<()>> {
+        self.inner()?.recv_eof = true;
         Poll::Ready(Ok(()))
     }
 
     fn poll_write_vectored(
         self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        _: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<IoResult<usize>> {
-        let mut inner = ready!(self.inner(cx))?;
+        let mut g = self.inner()?;
 
-        if inner.recv_eof || inner.closed {
+        if g.recv_eof {
             return Poll::Ready(Ok(0));
         }
-        Poll::Ready(inner.recv.write_vectored(bufs))
+        Poll::Ready(g.recv.write_vectored(bufs))
     }
 }
 
 impl Stream for TestSocket {
     fn peer_addr(&self) -> IoResult<SocketAddr> {
-        match self.sockets.lock().sockets[self.ix] {
-            SocketInner::Open(OpenSocketInner { addr, .. }) => Ok(addr),
-            SocketInner::Error(e) => Err(e.into()),
-            _ => unreachable!("socket is not open"),
-        }
-    }
-}
-
-#[pin_project]
-pub(super) struct SocketConnectFut(Option<TestSocket>);
-
-impl From<TestSocket> for SocketConnectFut {
-    fn from(v: TestSocket) -> Self {
-        Self(Some(v))
-    }
-}
-
-impl Future for SocketConnectFut {
-    type Output = IoResult<TestSocket>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let Some(TestSocket {
-            ix, ref sockets, ..
-        }) = self.0
-        else {
-            panic!("future polled after finished")
-        };
-        let mut guard = sockets.lock();
-        match &mut guard.sockets[ix] {
-            &mut SocketInner::Error(e) => Poll::Ready(Err(e.into())),
-            SocketInner::Connect { waker, .. } => {
-                set_option_waker(waker, cx);
-                Poll::Pending
-            }
-            _ => {
-                drop(guard);
-                Poll::Ready(Ok(self.project().0.take().unwrap()))
-            }
-        }
-    }
-}
-
-pub(super) fn create_socket(this: &Arc<Mutex<Sockets>>, addrs: &[SocketAddr]) -> TestSocket {
-    let mut guard = this.lock();
-    let ix = guard.sockets.len();
-    guard.sockets.push(SocketInner::Connect {
-        addrs: addrs.into(),
-        waker: None,
-    });
-    drop(guard);
-    TestSocket {
-        ix,
-        sockets: this.clone(),
-        _pinned: PhantomPinned,
+        Ok(self.inner()?.addr)
     }
 }

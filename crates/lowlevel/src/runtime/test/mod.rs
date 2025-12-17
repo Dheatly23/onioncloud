@@ -55,7 +55,7 @@ struct RuntimeInner {
     pending: Mutex<Vec<task::Task>>,
 
     timers: timer::Timers,
-    sockets: Arc<Mutex<socket::Sockets>>,
+    sockets: Mutex<socket::Sockets>,
 }
 
 impl Sealed for TestRuntime {}
@@ -91,8 +91,8 @@ impl Runtime for TestRuntime {
         self.0.timers.create_timer(Some(timeout))
     }
 
-    fn connect(&self, addrs: &[SocketAddr]) -> impl Future<Output = IoResult<Self::Stream>> + Send {
-        socket::SocketConnectFut::from(socket::create_socket(&self.0.sockets, addrs))
+    async fn connect(&self, addrs: &[SocketAddr]) -> IoResult<Self::Stream> {
+        self.0.sockets.lock().create_socket(addrs)
     }
 
     fn spsc_make<T: 'static + Send>(
@@ -117,7 +117,7 @@ impl Default for TestExecutor {
             rt: TestRuntime(Arc::new(RuntimeInner {
                 pending: Default::default(),
                 timers: Default::default(),
-                sockets: Arc::new(Mutex::new(socket::Sockets::new())),
+                sockets: Mutex::new(socket::Sockets::new()),
             })),
         }
     }
@@ -273,6 +273,7 @@ impl TestExecutor {
     pub fn run_tasks(&mut self) -> bool {
         self.rt.0.timers.wake_timers();
         self.register_pending_tasks();
+        self.sockets().handle_all();
         let ret = self.tasks.run_tasks();
         trace!("run {ret} tasks");
         ret != 0
@@ -287,6 +288,7 @@ impl TestExecutor {
             self.rt.0.timers.advance_and_wake_timers();
             let pending = self.register_pending_tasks();
             let active = self.tasks.task_count();
+            self.sockets().handle_all();
             let run = self.tasks.run_tasks();
             trace!(pending, active, run, "finished loop");
             i = i.wrapping_add(1);

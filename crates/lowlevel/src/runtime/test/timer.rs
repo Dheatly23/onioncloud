@@ -161,6 +161,8 @@ struct TimerInner {
     waker: Option<Waker>,
 }
 
+/// A test timer.
+#[must_use = "timer does nothing if not polled"]
 pub struct TestTimer {
     inner: Arc<Mutex<TimerInner>>,
     time: Arc<RefTime>,
