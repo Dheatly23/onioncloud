@@ -410,13 +410,16 @@ where
 mod tests {
     use super::*;
 
+    use std::io::ErrorKind;
     use std::pin::pin;
 
-    use futures_util::{SinkExt as _, StreamExt as _};
+    use futures_util::{AsyncReadExt as _, AsyncWriteExt as _, SinkExt as _, StreamExt as _};
+    use rand::prelude::*;
     use test_log::test;
     use tracing::info;
 
     use crate::runtime::Timer;
+    use crate::util::print_bytes;
 
     #[test]
     #[instrument]
@@ -634,6 +637,134 @@ mod tests {
                 }
             }
         });
+
+        exec.run_tasks_until_finished();
+    }
+
+    #[test]
+    #[instrument]
+    fn test_task_net_simple() {
+        let mut exec = TestExecutor::default();
+
+        static HOST_TO_STREAM: &[u8] = b"hello from host";
+        static STREAM_TO_HOST: &[u8] = b"hello from stream";
+
+        exec.sockets().set_handle(Box::new(|a| {
+            let a = *a
+                .iter()
+                .find(|a| a.ip().is_loopback() && a.port() == 80)
+                .ok_or(ErrorKind::NotFound)?;
+            Ok(OpenSocket::new(
+                a,
+                Box::new(|h| {
+                    if h.is_recv_closed() {
+                        let v = h.recv_stream();
+                        let (a, b) = v.as_slices();
+                        info!("host received \"{}{}\"", print_bytes(a), print_bytes(b));
+                        assert_eq!(v, &STREAM_TO_HOST);
+                        v.clear();
+                    }
+
+                    Ok(())
+                }),
+            )
+            .with_send(HOST_TO_STREAM.iter().copied().collect())
+            .with_send_eof(true))
+        }));
+
+        let rt = exec.runtime();
+        rt.spawn({
+            let rt = rt.clone();
+            async move {
+                let mut socket = pin!(rt.connect(&[([127, 0, 0, 1], 80).into()]).await.unwrap());
+
+                {
+                    let mut v = Vec::new();
+                    socket.read_to_end(&mut v).await.unwrap();
+                    info!("task received \"{}\"", print_bytes(&v));
+                    assert_eq!(v, HOST_TO_STREAM);
+                }
+
+                socket.write_all(STREAM_TO_HOST).await.unwrap();
+                socket.close().await.unwrap();
+                info!("finished");
+            }
+        });
+
+        exec.run_tasks_until_finished();
+    }
+
+    #[test]
+    #[instrument]
+    fn test_task_net_ping_pong() {
+        let mut exec = TestExecutor::default();
+
+        exec.sockets().set_handle(Box::new(|a| {
+            let a = *a
+                .iter()
+                .find(|a| a.ip().is_loopback() && a.port() == 80)
+                .ok_or(ErrorKind::NotFound)?;
+
+            let mut v = Vec::new();
+            Ok(OpenSocket::new(
+                a,
+                Box::new(move |h| {
+                    let (a, b) = h.recv_stream().as_slices();
+                    v.clear();
+                    v.extend_from_slice(a);
+                    v.extend_from_slice(b);
+                    h.recv_stream().clear();
+                    if !v.is_empty() {
+                        info!("host received \"{}\"", print_bytes(&v));
+                        h.send_stream().extend(&v);
+                    }
+
+                    if !v.is_empty() {
+                        h.wake_send();
+                    }
+                    if h.is_recv_closed() {
+                        h.close_send();
+                        h.wake_send();
+                    }
+
+                    Ok(())
+                }),
+            ))
+        }));
+
+        let rt = exec.runtime();
+        for t in 0..10 {
+            rt.spawn({
+                let rt = rt.clone();
+                async move {
+                    let mut socket =
+                        pin!(rt.connect(&[([127, 0, 0, 1], 80).into()]).await.unwrap());
+
+                    let mut v = Vec::new();
+                    for _ in 0..10 {
+                        let t_ =
+                            rt.get_time() + Duration::from_secs(thread_rng().gen_range(1..=30));
+                        rt.timer(t_).await;
+
+                        let s = format!("item #{:016x} in task {t}", random::<u64>()).into_bytes();
+                        socket.write_all(&s).await.unwrap();
+                        socket.flush().await.unwrap();
+                        info!("sent bytes");
+
+                        v.resize(s.len(), 0);
+                        socket.read_exact(&mut v).await.unwrap();
+                        info!("task received \"{}\"", print_bytes(&v));
+                        assert_eq!(v, s);
+                    }
+
+                    socket.close().await.unwrap();
+                    v.clear();
+                    socket.read_to_end(&mut v).await.unwrap();
+                    assert_eq!(v.len(), 0);
+                    info!("finished");
+                }
+            });
+        }
 
         exec.run_tasks_until_finished();
     }

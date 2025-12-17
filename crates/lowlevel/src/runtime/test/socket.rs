@@ -6,12 +6,12 @@ use std::net::SocketAddr;
 use std::ops::DerefMut;
 use std::pin::Pin;
 use std::ptr::NonNull;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use futures_io::{AsyncRead, AsyncWrite};
 use parking_lot::{Mutex, MutexGuard};
-use tracing::{info_span, instrument};
+use tracing::{info_span, instrument, trace};
 
 use crate::private::Sealed;
 use crate::runtime::Stream;
@@ -57,14 +57,16 @@ impl OpenSocket {
     }
 }
 
+/// Open socket request handler function.
 pub type OpenHandleFn =
     Box<dyn Send + Sync + FnMut(&[SocketAddr]) -> Result<OpenSocket, ErrorKind>>;
+/// Socket management function.
 pub type HandleFn = Box<dyn Send + Sync + FnMut(&mut SocketRef<'_>) -> Result<(), ErrorKind>>;
 
 /// Handle for runtime sockets.
 pub struct Sockets {
     handle: OpenHandleFn,
-    sockets: Vec<Weak<Mutex<SocketInner>>>,
+    sockets: Vec<Option<Arc<Mutex<SocketInner>>>>,
 }
 
 enum SocketInner {
@@ -95,6 +97,7 @@ impl Sockets {
         }
     }
 
+    /// Sets open socket request handler.
     pub fn set_handle(&mut self, f: OpenHandleFn) {
         self.handle = f;
     }
@@ -114,10 +117,11 @@ impl Sockets {
     ///
     /// Handle must be dropped before [`SocketRef`] is dropped.
     unsafe fn get_inner(&mut self, ix: usize) -> Option<(SocketRef<'_>, &'_ mut HandleFn)> {
-        let v = self.sockets.get(ix)?.upgrade()?;
+        let v = self.sockets.get(ix)?.as_deref()?;
         let mut guard = v.try_lock().expect("deadlock");
 
         let SocketInner::Open { inner, handle, .. } = &mut *guard else {
+            trace!("socket is error");
             return None;
         };
         let p = NonNull::from_mut(inner);
@@ -160,7 +164,7 @@ impl Sockets {
             handle,
             _pinned: PhantomPinned,
         }));
-        self.sockets.push(Arc::downgrade(&inner));
+        self.sockets.push(Some(inner.clone()));
         Ok(TestSocket {
             inner,
             _pinned: PhantomPinned,
@@ -169,26 +173,40 @@ impl Sockets {
 
     #[instrument(skip_all)]
     pub(super) fn handle_all(&mut self) {
+        let mut n = 0;
         for i in 0..self.sockets.len() {
-            let _g = info_span!("handle", i);
+            let _g = info_span!("handle", i).entered();
 
-            // SAFETY: Handle will be dropped roughly at the same time as guard.
-            let r = unsafe { self.get_inner(i) };
-            let Some((mut g, h)) = r else { continue };
-            if let Err(e) = (*h)(&mut g) {
-                // SAFETY: Value is locked.
-                unsafe {
-                    *g.v.data_ptr() = SocketInner::Error(e);
+            {
+                // SAFETY: Handle will be dropped roughly at the same time as guard.
+                let r = unsafe { self.get_inner(i) };
+                let Some((mut g, h)) = r else { continue };
+                if let Err(e) = (*h)(&mut g) {
+                    // SAFETY: Value is locked.
+                    unsafe {
+                        *g.v.data_ptr() = SocketInner::Error(e);
+                    }
                 }
             }
+
+            if let Some(Some(v)) = self.sockets.get(i)
+                && Arc::strong_count(v) <= 1
+            {
+                trace!("dropped socket");
+                self.sockets[i] = None;
+            }
+
+            n += 1;
         }
+
+        trace!("handled {n} sockets");
     }
 }
 
 /// Reference to a socket.
 pub struct SocketRef<'a> {
     p: NonNull<OpenSocketInner>,
-    v: Arc<Mutex<SocketInner>>,
+    v: &'a Mutex<SocketInner>,
     _p: PhantomData<&'a mut OpenSocketInner>,
 }
 
@@ -203,9 +221,16 @@ impl Drop for SocketRef<'_> {
 }
 
 impl SocketRef<'_> {
+    #[inline]
     fn inner(&mut self) -> &mut OpenSocketInner {
         // SAFETY: Pointer points to locked value within.
         unsafe { self.p.as_mut() }
+    }
+
+    #[inline]
+    fn inner_ref(&self) -> &OpenSocketInner {
+        // SAFETY: Pointer points to locked value within.
+        unsafe { self.p.as_ref() }
     }
 
     /// Get reference to send stream.
@@ -227,9 +252,19 @@ impl SocketRef<'_> {
         self.inner().send_eof = true;
     }
 
+    /// Checks if send is closed.
+    pub fn is_send_closed(&self) -> bool {
+        self.inner_ref().send_eof
+    }
+
     /// Close receiving half of pipe.
     pub fn close_recv(&mut self) {
         self.inner().recv_eof = true;
+    }
+
+    /// Checks if recv is closed.
+    pub fn is_recv_closed(&self) -> bool {
+        self.inner_ref().recv_eof
     }
 
     /// Wake send task.

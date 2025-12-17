@@ -428,6 +428,21 @@ pub(crate) fn print_ed(key: &EdPublicKey) -> impl Debug + Display {
     S(a)
 }
 
+pub(crate) fn print_bytes(s: &[u8]) -> impl '_ + Display {
+    struct S<'a>(&'a [u8]);
+
+    impl Display for S<'_> {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            for &b in self.0 {
+                Display::fmt(&char::from(b).escape_default(), f)?;
+            }
+            Ok(())
+        }
+    }
+
+    S(s)
+}
+
 pub(crate) fn option_ord_min<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
     match (a, b) {
         (v, None) | (None, v) => v,
