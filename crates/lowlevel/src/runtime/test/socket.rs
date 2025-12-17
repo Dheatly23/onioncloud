@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::io::{ErrorKind, IoSlice, IoSliceMut, Read as _, Result as IoResult, Write as _};
 use std::marker::{PhantomData, PhantomPinned};
-use std::mem::forget;
+use std::mem::{forget, transmute};
 use std::net::SocketAddr;
 use std::ops::DerefMut;
 use std::pin::Pin;
@@ -104,6 +104,10 @@ impl Sockets {
         self.sockets.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.sockets.is_empty()
+    }
+
     /// Inner method to get value and handle.
     ///
     /// # Safety
@@ -118,7 +122,7 @@ impl Sockets {
         };
         let p = NonNull::from_mut(inner);
         // SAFETY: Value should be locked while handle reference is used.
-        let h = unsafe { &mut *(&raw mut *handle) };
+        let h = unsafe { transmute::<&mut HandleFn, &mut HandleFn>(handle) };
         forget(guard);
         Some((
             SocketRef {

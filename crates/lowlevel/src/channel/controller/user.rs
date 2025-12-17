@@ -726,7 +726,7 @@ impl<R: Runtime, C: 'static + Send + Sync + Clone + CellCache> SteadyState<R, C>
                 .circ_map()
                 .open_with(
                     rt,
-                    InitiatorIDGenerator::from_config(cfg).filter(|id| !self.closing.contains(&id)),
+                    InitiatorIDGenerator::from_config(cfg).filter(|id| !self.closing.contains(id)),
                     64,
                     |_| CircuitMeta {
                         peer_close: false,

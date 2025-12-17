@@ -545,7 +545,7 @@ impl<R: Runtime, C: 'static + Send + Sync + Clone + CellCache> SteadyState<R, C>
                 .stream_map()
                 .open_with(
                     rt,
-                    StreamIDGenerator::new().filter(|id| !self.closing.contains(&id)),
+                    StreamIDGenerator::new().filter(|id| !self.closing.contains(id)),
                     64,
                     |_| DirStreamMeta {
                         peer_close: false,
@@ -850,7 +850,7 @@ impl<R: Runtime, C: 'static + Send + Sync + Clone + CellCache> SteadyState<R, C>
         let mut found: Option<Cached<Relay, _>> = None;
         let mut is_data = false;
 
-        while found.is_none()
+        if found.is_none()
             && let Some((id, reason)) = self.pending_close.pop_front()
         {
             self.closing.remove(&id);
@@ -862,10 +862,9 @@ impl<R: Runtime, C: 'static + Send + Sync + Clone + CellCache> SteadyState<R, C>
                         .try_into_relay(cfg.circ_id.inner, RelayVersion::V0)?,
                 ),
             );
-            break;
         }
 
-        while found.is_none()
+        if found.is_none()
             && let Some(digest) = self.forward_sendme_digest.pop_front()
             && let Some(data) = match self.sendme_ty {
                 SendmeType::Disabled => None,

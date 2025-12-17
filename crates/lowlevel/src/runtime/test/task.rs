@@ -110,7 +110,7 @@ impl Tasks {
         let it = tasks.into_iter();
         let l = it.size_hint().0;
         self.tasks.reserve(l);
-        self.wakers.reserve((l + 15) / 16);
+        self.wakers.reserve(l.div_ceil(16));
 
         for Task { fut, scope } in it {
             let i = self.tasks.len();
@@ -343,6 +343,7 @@ impl<T: Send> InnerHandle<T> {
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub(super) fn spawn<F>(fut: F) -> (Handle<F::Output>, Pin<Box<dyn Send + Future<Output = ()>>>)
 where
     F: Future + Send + 'static,

@@ -217,7 +217,9 @@ pub(crate) fn v1_to_v0(cell: &mut impl RelayLike) -> Result<(), CellLengthOverfl
         "length overflow: {len} > {}",
         RELAY_DATA_LENGTH
     );
-    assert!(RELAY_DATA_LENGTH <= v0::RELAY_DATA_LENGTH);
+    const {
+        assert!(RELAY_DATA_LENGTH <= v0::RELAY_DATA_LENGTH);
+    }
     if len > RELAY_DATA_LENGTH {
         return Err(CellLengthOverflowError);
     }

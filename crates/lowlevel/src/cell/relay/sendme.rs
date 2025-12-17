@@ -72,13 +72,7 @@ impl IntoRelay for RelaySendme {
         circuit: NonZeroU32,
         version: RelayVersion,
     ) -> Result<Relay, errors::CellLengthOverflowError> {
-        set_cmd_stream(
-            self.version,
-            version,
-            Self::ID,
-            self.stream.into(),
-            &mut self.data,
-        )?;
+        set_cmd_stream(self.version, version, Self::ID, self.stream, &mut self.data)?;
         Ok(self.data.into_relay(circuit))
     }
 
@@ -87,13 +81,7 @@ impl IntoRelay for RelaySendme {
         circuit: NonZeroU32,
         version: RelayVersion,
     ) -> Result<Cached<Relay, C>, errors::CellLengthOverflowError> {
-        set_cmd_stream(
-            this.version,
-            version,
-            Self::ID,
-            this.stream.into(),
-            &mut this.data,
-        )?;
+        set_cmd_stream(this.version, version, Self::ID, this.stream, &mut this.data)?;
         Ok(Cached::map(this, |v| v.data.into_relay(circuit)))
     }
 }

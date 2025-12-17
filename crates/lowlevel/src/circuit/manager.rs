@@ -56,6 +56,7 @@ impl<C: CircuitController> SingleManager<C> {
     ///
     /// # Return
     /// Returns manager and [`NewCircuitSender`]. Sender must be fed new circuit data for circuit to function.
+    #[allow(clippy::type_complexity)]
     pub fn new<E>(
         runtime: &C::Runtime,
         config: C::Config,

@@ -130,6 +130,7 @@ impl<K: Hash + Eq, R: Runtime, Cell: 'static + Send, Meta> CellMap<K, R, Cell, M
         self.map.contains_key(id)
     }
 
+    #[allow(clippy::type_complexity)]
     fn insert_entry<'a>(
         rt: &R,
         entry: VacantMapE<'a, K, R, Cell, Meta>,
@@ -157,6 +158,7 @@ impl<K: Hash + Eq, R: Runtime, Cell: 'static + Send, Meta> CellMap<K, R, Cell, M
     /// # Parameters
     /// - `id` : ID. Must be free.
     /// - `meta` : Function to create metadata for the new handler.
+    #[allow(clippy::type_complexity)]
     pub fn insert_with(
         self: Pin<&'_ mut Self>,
         rt: &R,
@@ -184,6 +186,7 @@ impl<K: Hash + Eq, R: Runtime, Cell: 'static + Send, Meta> CellMap<K, R, Cell, M
     }
 
     /// Same as [`insert_with`], but with [`Default`] metadata.
+    #[allow(clippy::type_complexity)]
     #[inline(always)]
     pub fn insert(
         self: Pin<&'_ mut Self>,
@@ -206,6 +209,7 @@ impl<K: Hash + Eq, R: Runtime, Cell: 'static + Send, Meta> CellMap<K, R, Cell, M
     /// - `id_gen` : ID generator used.
     /// - `n_attempts` : Number of attempts to allocate ID. Tor spec recommends setting it to 64.
     /// - `meta` : Function to create metadata for the new handler.
+    #[allow(clippy::type_complexity)]
     pub fn open_with<G: IDGenerator<K>>(
         self: Pin<&'_ mut Self>,
         rt: &R,
@@ -241,7 +245,8 @@ impl<K: Hash + Eq, R: Runtime, Cell: 'static + Send, Meta> CellMap<K, R, Cell, M
     }
 
     /// Same as [`open_with`], but with `[Default`] metadata.
-    #[inline]
+    #[allow(clippy::type_complexity)]
+    #[inline(always)]
     pub fn open<G: IDGenerator<K>>(
         self: Pin<&'_ mut Self>,
         rt: &R,
@@ -501,6 +506,7 @@ impl<'a, 'b, K: Hash + Eq, R: Runtime, Cell: 'static + Send, Meta>
     /// # Parameters
     /// - `id` : ID. Must be free.
     /// - `meta` : Function to create metadata for the new handler.
+    #[allow(clippy::type_complexity)]
     pub fn insert_with(
         &'_ mut self,
         rt: &R,
@@ -517,7 +523,7 @@ impl<'a, 'b, K: Hash + Eq, R: Runtime, Cell: 'static + Send, Meta>
     }
 
     /// Same as [`insert_with`], but with [`Default`] metadata.
-    #[inline(always)]
+    #[allow(clippy::type_complexity)]
     pub fn insert(
         &'_ mut self,
         rt: &R,
@@ -539,6 +545,7 @@ impl<'a, 'b, K: Hash + Eq, R: Runtime, Cell: 'static + Send, Meta>
     /// - `id_gen` : ID generator used.
     /// - `n_attempts` : Number of attempts to allocate ID. Tor spec recommends setting it to 64.
     /// - `meta` : Function to create metadata for the new handler.
+    #[allow(clippy::type_complexity)]
     pub fn open_with<G: IDGenerator<K>>(
         &'_ mut self,
         rt: &R,
@@ -556,7 +563,7 @@ impl<'a, 'b, K: Hash + Eq, R: Runtime, Cell: 'static + Send, Meta>
     }
 
     /// Same as [`open_with`], but with `[Default`] metadata.
-    #[inline]
+    #[allow(clippy::type_complexity)]
     pub fn open<G: IDGenerator<K>>(
         &'_ mut self,
         rt: &R,
