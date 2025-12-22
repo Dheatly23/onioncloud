@@ -1136,7 +1136,7 @@ mod tests {
     use futures_util::{SinkExt as _, StreamExt as _};
     use tracing::{Instrument as _, info, info_span, instrument};
 
-    use crate::runtime::test::{TestRuntime, run as run_inner};
+    use crate::runtime::test::{TestExecutor, TestRuntime};
 
     fn spawn<F>(
         rt: &TestRuntime,
@@ -1154,10 +1154,9 @@ mod tests {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        run_inner(|rt| {
-            spawn(rt, f);
-            |_| true
-        });
+        let mut exec = TestExecutor::default();
+        spawn(exec.runtime(), f);
+        exec.run_tasks_until_finished();
     }
 
     #[test_log::test]

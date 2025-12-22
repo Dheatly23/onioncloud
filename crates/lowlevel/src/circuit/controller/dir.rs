@@ -79,6 +79,28 @@ impl<Cfg: DirConfig> CellCache for CfgData<Cfg> {
     }
 }
 
+/// Directory circuit controller.
+///
+/// Creates a one-hop circuit, suitable for directory streams.
+/// It cannot open remote-requested circuit, only user-initiated.
+///
+/// # Configuration
+///
+/// Controller's coniguration type must implement [`DirConfig`].
+///
+/// # User's Notes
+///
+/// - Controller **does not** automatically send RELAY_BEGIN_DIR cell.
+///
+///   It is the responsibility of stream controller to do so.
+/// - Stream controllers **must not** send any cell with circuit ID other than their own.
+/// - To gracefully shutdown circuit, do the following:
+///
+///   1. Send RELAY_END cell.
+///   2. Receive and drop all cells until receiver is closed.
+///
+///   Controller will automatically intercept RELAY_END cells to properly clean up circuit on it's end.
+/// - Non-graceful stream shutdown (AKA receiver gets dropped) will be detected in 5 seconds or upon any cell received.
 pub struct DirController<R: Runtime, C: DirConfig> {
     cfg: CfgData<C>,
     state: State<R, C>,
@@ -850,9 +872,11 @@ impl<R: Runtime, C: 'static + Send + Sync + Clone + CellCache> SteadyState<R, C>
         let mut found: Option<Cached<Relay, _>> = None;
         let mut is_data = false;
 
-        if found.is_none()
-            && let Some((id, reason)) = self.pending_close.pop_front()
-        {
+        while found.is_none() {
+            let Some((id, reason)) = self.pending_close.pop_front() else {
+                break;
+            };
+
             self.closing.remove(&id);
 
             // Prepend RELAY_END cell
@@ -864,14 +888,16 @@ impl<R: Runtime, C: 'static + Send + Sync + Clone + CellCache> SteadyState<R, C>
             );
         }
 
-        if found.is_none()
-            && let Some(digest) = self.forward_sendme_digest.pop_front()
-            && let Some(data) = match self.sendme_ty {
-                SendmeType::Disabled => None,
-                SendmeType::Unauth => Some(SendmeData::Unauth),
-                SendmeType::Auth => Some(SendmeData::Auth(digest)),
-            }
-        {
+        while found.is_none() {
+            let Some(digest) = self.forward_sendme_digest.pop_front() else {
+                break;
+            };
+            let data = match self.sendme_ty {
+                SendmeType::Disabled => continue,
+                SendmeType::Unauth => SendmeData::Unauth,
+                SendmeType::Auth => SendmeData::Auth(digest),
+            };
+
             // Prepend RELAY_SENDME cell
             found = Some(<_>::try_into_relay_cached(
                 cfg.cache_b(RelaySendme::from_data(cfg.get_cached(), data)),

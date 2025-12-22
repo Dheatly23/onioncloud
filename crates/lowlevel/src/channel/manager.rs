@@ -11,7 +11,7 @@ use pin_project::pin_project;
 use rustls::Error as RustlsError;
 use rustls::client::ClientConnection;
 use scopeguard::guard;
-use tracing::{Span, debug, debug_span, error, info, instrument, trace, warn};
+use tracing::{Span, debug, debug_span, error, info, info_span, instrument, trace, warn};
 
 use super::controller::ChannelController;
 use super::{ChannelConfig, ChannelInput, CircMap, Stream};
@@ -20,7 +20,8 @@ use crate::errors;
 use crate::runtime::{Runtime, SendError, Stream as RTStream};
 use crate::util::sans_io::event::{ChannelClosed, ChildCellMsg, ControlMsg, Timeout};
 use crate::util::{
-    AsyncReadWrapper, AsyncWriteWrapper, FutureRepollable, TimerManager, print_hex, print_list,
+    AsyncReadWrapper, AsyncWriteWrapper, BytesBuffer, FutureRepollable, TimerManager, print_hex,
+    print_list,
 };
 
 #[pin_project(!Unpin)]
@@ -168,7 +169,7 @@ impl<C: ChannelController> SingleManager<C> {
         Ok(Self {
             inner: Channel {
                 handle: runtime
-                    .spawn(handle_stream::<
+                    .spawn(handle_stream_outer::<
                         C,
                         StreamWrapper<<C::Runtime as Runtime>::Stream>,
                     >(
@@ -178,6 +179,40 @@ impl<C: ChannelController> SingleManager<C> {
                 send_ctrl: sender,
             },
         })
+    }
+
+    /// Create new channel without TLS.
+    ///
+    /// Useful for testing.
+    ///
+    /// # Safety
+    ///
+    /// Even though there is nothing memory unsafe about it,
+    /// nonetheless it's marked unsafe because it **bypass** essential cryptographic operation.
+    /// Ensure that it's **only** used for local testing only.
+    pub unsafe fn new_test(
+        runtime: &C::Runtime,
+        config: C::Config,
+        link_cert: impl 'static + Send + FnOnce(&SocketAddr) -> Option<Box<[u8]>>,
+    ) -> Self
+    where
+        C: 'static,
+        C::Runtime: Clone,
+    {
+        let (sender, receiver) = runtime.spsc_make(1);
+        Self {
+            inner: Channel {
+                handle: runtime
+                    .spawn(handle_test_stream::<C>(
+                        runtime.clone(),
+                        config,
+                        receiver,
+                        link_cert,
+                    ))
+                    .into(),
+                send_ctrl: sender,
+            },
+        }
     }
 
     /// Gets [`ChannelRef`] to self.
@@ -223,6 +258,38 @@ async fn handle_channel<
     cfg: C::Config,
     recv: <C::Runtime as Runtime>::SPSCReceiver<C::ControlMsg>,
 ) -> bool {
+    let Some((stream, peer_addr)) = open_socket(&rt, &cfg).await else {
+        return false;
+    };
+
+    let Some(stream) = S::new(stream, peer_addr) else {
+        return false;
+    };
+
+    handle_stream::<C, S>(rt, cfg, recv, stream).await
+}
+
+#[instrument(skip_all, fields(peer_id = %print_hex(cfg.peer_id())))]
+async fn handle_test_stream<C: ChannelController + 'static>(
+    rt: C::Runtime,
+    cfg: C::Config,
+    recv: <C::Runtime as Runtime>::SPSCReceiver<C::ControlMsg>,
+    link_cert: impl Send + FnOnce(&SocketAddr) -> Option<Box<[u8]>>,
+) -> bool {
+    let Some((stream, peer_addr)) = open_socket(&rt, &cfg).await else {
+        return false;
+    };
+
+    let stream = TestStreamWrapper::new(stream, peer_addr, link_cert(&peer_addr));
+
+    handle_stream::<C, _>(rt, cfg, recv, stream).await
+}
+
+#[instrument(skip_all)]
+async fn open_socket<R: Runtime>(
+    rt: &R,
+    cfg: &impl ChannelConfig,
+) -> Option<(R::Stream, SocketAddr)> {
     let stream = {
         let peer_addrs = cfg.peer_addrs();
         debug!(
@@ -235,7 +302,7 @@ async fn handle_channel<
         Ok(v) => v,
         Err(e) => {
             error!(error = %e, "cannot connect to peer");
-            return false;
+            return None;
         }
     };
 
@@ -243,16 +310,15 @@ async fn handle_channel<
         Ok(v) => v,
         Err(e) => {
             error!(error = %e, "cannot get peer address");
-            return false;
+            return None;
         }
     };
     debug!("connected to peer at {peer_addr}");
 
-    handle_stream::<C, S>(rt, cfg, recv, stream, peer_addr).await
+    Some((stream, peer_addr))
 }
 
-#[instrument(skip_all, fields(peer_id = %print_hex(cfg.peer_id())))]
-async fn handle_stream<
+async fn handle_stream_outer<
     C: ChannelController + 'static,
     S: StreamLike<Stream = <C::Runtime as Runtime>::Stream> + 'static,
 >(
@@ -262,10 +328,27 @@ async fn handle_stream<
     stream: <C::Runtime as Runtime>::Stream,
     peer_addr: SocketAddr,
 ) -> bool {
-    let Some(stream) = S::new(stream, peer_addr) else {
-        return false;
+    let stream = {
+        let _g = info_span!("handle_stream_outer", peer_id = %print_hex(cfg.peer_id())).entered();
+        let Some(stream) = S::new(stream, peer_addr) else {
+            return false;
+        };
+        stream
     };
 
+    handle_stream::<C, S>(rt, cfg, recv, stream).await
+}
+
+#[instrument(skip_all)]
+async fn handle_stream<
+    C: ChannelController + 'static,
+    S: StreamLike<Stream = <C::Runtime as Runtime>::Stream> + 'static,
+>(
+    rt: C::Runtime,
+    cfg: C::Config,
+    recv: <C::Runtime as Runtime>::SPSCReceiver<C::ControlMsg>,
+    stream: S,
+) -> bool {
     let fut = ChannelFut {
         state: State::Normal {
             timer: TimerManager::new(),
@@ -780,6 +863,140 @@ impl Write for InnerStreamWrapper {
 impl Stream for InnerStreamWrapper {
     fn link_cert(&self) -> Option<&[u8]> {
         self.tls.peer_certificates()?.first().map(|v| &v[..])
+    }
+
+    fn peer_addr(&self) -> &SocketAddr {
+        &self.addr
+    }
+}
+
+#[pin_project(!Unpin, project = TestStreamWrapperProj)]
+struct TestStreamWrapper<S> {
+    #[pin]
+    stream: S,
+    inner: Box<InnerTestStreamWrapper>,
+}
+
+impl<S> TestStreamWrapper<S> {
+    fn new(stream: S, addr: SocketAddr, link_cert: Option<Box<[u8]>>) -> Self {
+        Self {
+            stream,
+            inner: Box::new(InnerTestStreamWrapper {
+                read_buf: Default::default(),
+                write_buf: Default::default(),
+
+                addr,
+                link_cert,
+            }),
+        }
+    }
+}
+
+impl<S: RTStream> StreamLike for TestStreamWrapper<S> {
+    type Stream = S;
+
+    fn new(_: S, _: SocketAddr) -> Option<Self> {
+        error!("cannot create test stream with given parameters");
+        None
+    }
+
+    #[instrument(level = "debug", skip(self, cx))]
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
+        self.project().stream.poll_close(cx)
+    }
+
+    fn send_close_notify(self: Pin<&mut Self>) {}
+
+    #[instrument(level = "debug", skip(self, cx))]
+    fn process(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        is_shutdown: bool,
+        mut pending: u8,
+    ) -> Result<Poll<Option<u8>>, ErrorType> {
+        let TestStreamWrapperProj {
+            mut stream, inner, ..
+        } = self.project();
+
+        if is_shutdown {
+            loop {
+                match inner.write_buf.socket_write(stream.as_mut(), cx)? {
+                    Pending => return Ok(Pending),
+                    Ready(0) => return Ok(Ready(None)),
+                    Ready(_) => (),
+                }
+            }
+        }
+
+        while pending & FLAG_READ == 0 {
+            if matches!(
+                inner.read_buf.socket_read(stream.as_mut(), cx)?,
+                Pending | Ready(0)
+            ) {
+                pending |= FLAG_READ;
+            }
+        }
+
+        while pending & FLAG_WRITE == 0 {
+            if matches!(
+                inner.write_buf.socket_write(stream.as_mut(), cx)?,
+                Pending | Ready(0)
+            ) {
+                pending |= FLAG_WRITE;
+            }
+        }
+
+        Ok(Ready(Some(pending)))
+    }
+
+    fn as_stream(self: Pin<&mut Self>) -> &mut dyn Stream {
+        &mut **self.project().inner
+    }
+
+    fn wants_read(&self) -> bool {
+        !self.inner.read_buf.is_empty()
+    }
+
+    fn wants_write(&self) -> bool {
+        !self.inner.write_buf.is_full() && !self.inner.write_buf.is_eof()
+    }
+}
+
+struct InnerTestStreamWrapper {
+    read_buf: BytesBuffer<1024>,
+    write_buf: BytesBuffer<1024>,
+
+    addr: SocketAddr,
+    link_cert: Option<Box<[u8]>>,
+}
+
+impl Read for InnerTestStreamWrapper {
+    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+        self.read_buf.read(buf)
+    }
+
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> IoResult<usize> {
+        self.read_buf.read_vectored(bufs)
+    }
+}
+
+impl Write for InnerTestStreamWrapper {
+    fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+        self.write_buf.write(buf)
+    }
+
+    fn flush(&mut self) -> IoResult<()> {
+        self.write_buf.flush()
+    }
+
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> IoResult<usize> {
+        self.write_buf.write_vectored(bufs)
+    }
+}
+
+impl Stream for InnerTestStreamWrapper {
+    fn link_cert(&self) -> Option<&[u8]> {
+        self.link_cert.as_deref()
     }
 
     fn peer_addr(&self) -> &SocketAddr {

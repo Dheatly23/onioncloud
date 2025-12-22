@@ -1,5 +1,9 @@
 use std::io::{Error as IoError, ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
+use std::pin::Pin;
+use std::task::Poll::*;
+use std::task::{Context, Poll};
 
+use futures_io::{AsyncRead, AsyncWrite};
 use scopeguard::guard_on_unwind;
 
 use crate::cache::{Cachable, CellCache};
@@ -270,6 +274,313 @@ impl Write for BufferWrite<'_> {
         self.buf.extend_from_slice(buf);
         self.consumed += buf.len();
         Ok(())
+    }
+}
+
+/// FIFO bytes buffer with static size.
+#[derive(Clone, Copy)]
+pub struct BytesBuffer<const N: usize> {
+    buf: [u8; N],
+    head: usize,
+    len: usize,
+    eof: bool,
+}
+
+impl<const N: usize> Default for BytesBuffer<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> BytesBuffer<N> {
+    /// Create new [`BytesBuffer`].
+    pub const fn new() -> Self {
+        Self {
+            buf: [0; N],
+            head: 0,
+            len: 0,
+            eof: false,
+        }
+    }
+
+    /// Gets buffer length.
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Checks if buffer is empty.
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Checks if buffer is full.
+    #[inline(always)]
+    pub fn is_full(&self) -> bool {
+        self.len == N
+    }
+
+    /// Returns `true` if underlying socket is EOF.
+    #[inline(always)]
+    pub fn is_eof(&self) -> bool {
+        self.eof
+    }
+
+    /// Handler for [`AsyncRead`] socket.
+    pub fn socket_read<S>(
+        &mut self,
+        sock: Pin<&mut S>,
+        cx: &mut Context<'_>,
+    ) -> Poll<IoResult<usize>>
+    where
+        S: AsyncRead,
+    {
+        if self.eof || self.is_full() {
+            return Ready(Ok(0));
+        }
+
+        let (a, b) = self.empty();
+        let ret = sock.poll_read_vectored(cx, &mut [IoSliceMut::new(a), IoSliceMut::new(b)]);
+        if let Ready(Ok(n)) = ret {
+            self.inc(n);
+        }
+        self.eof = matches!(ret, Ready(Ok(0)));
+        ret
+    }
+
+    /// Handler for [`AsyncWrite`] socket.
+    pub fn socket_write<S>(
+        &mut self,
+        sock: Pin<&mut S>,
+        cx: &mut Context<'_>,
+    ) -> Poll<IoResult<usize>>
+    where
+        S: AsyncWrite,
+    {
+        if self.eof || self.is_empty() {
+            return Ready(Ok(0));
+        }
+
+        let (a, b) = self.filled();
+        let ret = sock.poll_write_vectored(cx, &[IoSlice::new(a), IoSlice::new(b)]);
+        if let Ready(Ok(n)) = ret {
+            self.dec(n);
+        }
+        self.eof = matches!(ret, Ready(Ok(0)));
+        ret
+    }
+
+    fn filled(&self) -> (&[u8], &[u8]) {
+        let (a, b) = self.buf.split_at(self.head);
+        match self.len.checked_sub(b.len()) {
+            Some(i) => (b, &a[..i]),
+            None => (&b[..self.len], &[]),
+        }
+    }
+
+    fn empty(&mut self) -> (&mut [u8], &mut [u8]) {
+        let (a, b) = self.buf.split_at_mut(self.head);
+        match self.len.checked_sub(b.len()) {
+            Some(i) => (&mut a[i..], &mut []),
+            None => (&mut b[self.len..], a),
+        }
+    }
+
+    fn inc(&mut self, n: usize) {
+        let r = self.len + n;
+        assert!(r <= N, "{} > {}", r, N);
+        self.len = r;
+    }
+
+    fn dec(&mut self, n: usize) {
+        self.len -= n;
+        self.head = (self.head + n) % N;
+    }
+}
+
+impl<const N: usize> Read for BytesBuffer<N> {
+    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        } else if self.is_empty() {
+            return if self.eof {
+                Ok(0)
+            } else {
+                Err(ErrorKind::WouldBlock.into())
+            };
+        }
+
+        let (a, b) = self.filled();
+        let mut n;
+        if a.len() >= buf.len() {
+            buf.copy_from_slice(&a[..buf.len()]);
+            n = buf.len();
+        } else {
+            let (buf, rest) = buf.split_at_mut(a.len());
+            buf.copy_from_slice(a);
+            n = a.len();
+            let i = b.len().min(rest.len());
+            rest[..i].copy_from_slice(&b[..i]);
+            n += i;
+        }
+
+        debug_assert!(n != 0, "0 bytes read");
+        self.dec(n);
+        Ok(n)
+    }
+
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> IoResult<usize> {
+        let (mut a, mut b) = self.filled();
+        let mut is_empty = true;
+        let mut n = 0;
+
+        for buf in bufs {
+            let mut buf = &mut buf[..];
+            if buf.is_empty() {
+                continue;
+            }
+            is_empty = false;
+
+            if !a.is_empty() {
+                if a.len() >= buf.len() {
+                    let t;
+                    (t, a) = a.split_at(buf.len());
+                    buf.copy_from_slice(t);
+                    n += buf.len();
+                    continue;
+                } else {
+                    let t;
+                    (t, buf) = buf.split_at_mut(a.len());
+                    t.copy_from_slice(a);
+                    n += a.len();
+                    if buf.is_empty() {
+                        continue;
+                    }
+                }
+            }
+
+            if b.is_empty() {
+                break;
+            } else if b.len() >= buf.len() {
+                let t;
+                (t, b) = b.split_at(buf.len());
+                buf.copy_from_slice(t);
+                n += buf.len();
+                if b.is_empty() {
+                    break;
+                }
+            } else {
+                buf[..b.len()].copy_from_slice(b);
+                n += b.len();
+                break;
+            }
+        }
+
+        self.dec(n);
+        if !is_empty && n == 0 && !self.eof {
+            return Err(ErrorKind::WouldBlock.into());
+        }
+        Ok(n)
+    }
+}
+
+impl<const N: usize> Write for BytesBuffer<N> {
+    fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+        if buf.is_empty() || self.eof {
+            return Ok(0);
+        } else if self.is_full() {
+            return Err(ErrorKind::WouldBlock.into());
+        }
+
+        let (a, b) = self.empty();
+        let mut n;
+        if a.len() >= buf.len() {
+            a[..buf.len()].copy_from_slice(buf);
+            n = buf.len();
+        } else {
+            let (buf, rest) = buf.split_at(a.len());
+            a.copy_from_slice(buf);
+            n = a.len();
+            let i = b.len().min(rest.len());
+            b[..i].copy_from_slice(&rest[..i]);
+            n += i;
+        }
+
+        debug_assert!(n != 0, "0 bytes read");
+        self.inc(n);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> IoResult<()> {
+        if self.is_empty() {
+            Ok(())
+        } else {
+            Err(if self.eof {
+                ErrorKind::UnexpectedEof
+            } else {
+                ErrorKind::WouldBlock
+            }
+            .into())
+        }
+    }
+
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> IoResult<usize> {
+        if self.eof {
+            return Ok(0);
+        }
+
+        let (mut a, mut b) = self.empty();
+        let mut is_empty = true;
+        let mut n = 0;
+
+        for buf in bufs {
+            let mut buf = &buf[..];
+            if buf.is_empty() {
+                continue;
+            }
+            is_empty = false;
+
+            if !a.is_empty() {
+                if a.len() >= buf.len() {
+                    let t;
+                    (t, a) = a.split_at_mut(buf.len());
+                    t.copy_from_slice(buf);
+                    n += buf.len();
+                    continue;
+                } else {
+                    let t;
+                    (t, buf) = buf.split_at(a.len());
+                    a.copy_from_slice(t);
+                    n += a.len();
+                    if buf.is_empty() {
+                        continue;
+                    }
+                }
+            }
+
+            if b.is_empty() {
+                break;
+            } else if b.len() >= buf.len() {
+                let t;
+                (t, b) = b.split_at_mut(buf.len());
+                t.copy_from_slice(buf);
+                n += buf.len();
+                if b.is_empty() {
+                    break;
+                }
+            } else {
+                b.copy_from_slice(&buf[..b.len()]);
+                n += b.len();
+                break;
+            }
+        }
+
+        self.inc(n);
+        if !is_empty && n == 0 {
+            return Err(ErrorKind::WouldBlock.into());
+        }
+        Ok(n)
     }
 }
 
@@ -649,6 +960,7 @@ mod tests {
     use super::*;
 
     use std::collections::vec_deque::VecDeque;
+    use std::marker::PhantomData;
     use std::sync::Arc;
 
     use proptest::collection::vec;
@@ -760,6 +1072,141 @@ mod tests {
         );
 
         assert_eq!(buf.finalize(), EXAMPLE_DATA.len());
+    }
+
+    #[derive(Debug, Clone)]
+    enum BytesBufferOp {
+        Inc(u8, usize),
+        Dec(usize),
+    }
+
+    struct BytesBufferRef<const N: usize> {
+        _p: PhantomData<[u8; N]>,
+    }
+
+    impl<const N: usize> ReferenceStateMachine for BytesBufferRef<N> {
+        type State = usize;
+        type Transition = BytesBufferOp;
+
+        fn init_state() -> BoxedStrategy<Self::State> {
+            Just(0usize).boxed()
+        }
+
+        fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
+            let end = N - *state;
+            prop_oneof![
+                (any::<u8>(), 0..=end).prop_map(|(v, n)| BytesBufferOp::Inc(v, n)),
+                (0..=end).prop_map(BytesBufferOp::Dec),
+            ]
+            .boxed()
+        }
+
+        fn apply(state: Self::State, trans: &Self::Transition) -> Self::State {
+            match *trans {
+                BytesBufferOp::Inc(_, n) => state + n,
+                BytesBufferOp::Dec(n) => state - n,
+            }
+        }
+
+        fn preconditions(state: &Self::State, trans: &Self::Transition) -> bool {
+            match *trans {
+                BytesBufferOp::Inc(_, n) => n <= N - *state,
+                BytesBufferOp::Dec(n) => n <= *state,
+            }
+        }
+    }
+
+    struct BytesBufferTest<const N: usize> {
+        _p: PhantomData<[u8; N]>,
+    }
+
+    impl<const N: usize> StateMachineTest for BytesBufferTest<N> {
+        type SystemUnderTest = Box<BytesBuffer<N>>;
+        type Reference = BytesBufferRef<N>;
+
+        fn init_test(
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        ) -> Self::SystemUnderTest {
+            let mut buf = Box::new(BytesBuffer::<N>::new());
+            buf.inc(*ref_state);
+            buf
+        }
+
+        fn apply(
+            mut state: Self::SystemUnderTest,
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+            trans: <Self::Reference as ReferenceStateMachine>::Transition,
+        ) -> Self::SystemUnderTest {
+            match trans {
+                BytesBufferOp::Inc(v, n) => {
+                    {
+                        let mut t = n;
+                        let (a, b) = state.empty();
+                        let i = a.len().min(t);
+                        a[..i].fill(v);
+                        t -= i;
+                        let i = b.len().min(t);
+                        b[..i].fill(v);
+                        state.inc(n);
+                    }
+
+                    assert_eq!(state.len, *ref_state);
+
+                    let (a, b) = state.filled();
+                    assert!(
+                        a.len() + b.len() == *ref_state,
+                        "{} + {} != {}",
+                        a.len(),
+                        b.len(),
+                        *ref_state
+                    );
+                    for (i, &o) in b.iter().rev().chain(a.iter().rev()).enumerate() {
+                        if i >= n {
+                            break;
+                        }
+                        assert_eq!(o, v, "unequal value at index {i}");
+                    }
+
+                    let (a, b) = state.empty();
+                    assert!(
+                        a.len() + b.len() == N - *ref_state,
+                        "{} + {} != {}",
+                        a.len(),
+                        b.len(),
+                        N - *ref_state
+                    );
+                }
+                BytesBufferOp::Dec(n) => {
+                    let old_head = state.head;
+                    state.dec(n);
+                    assert_eq!(state.len, *ref_state);
+
+                    let (a, b) = state.filled();
+                    assert!(
+                        a.len() + b.len() == *ref_state,
+                        "{} + {} != {}",
+                        a.len(),
+                        b.len(),
+                        *ref_state
+                    );
+
+                    let (a, b) = state.empty();
+                    assert!(
+                        a.len() + b.len() == N - *ref_state,
+                        "{} + {} != {}",
+                        a.len(),
+                        b.len(),
+                        N - *ref_state
+                    );
+
+                    if n > 0 {
+                        assert_ne!(state.head, old_head);
+                    }
+                }
+            }
+
+            state
+        }
     }
 
     #[derive(Debug, Clone)]
@@ -1415,12 +1862,16 @@ mod tests {
 
     prop_state_machine! {
         #[test]
-        fn test_buffer_sm_slicelike(sequential 1..32 => BufferSliceLikeTest);
+        fn test_bytes_buffer_small(sequential 1..=32 => BytesBufferTest<31>);
         #[test]
-        fn test_buffer_sm_slicelike_nb(sequential 1..32 => BufferSliceLikeNBTest);
+        fn test_bytes_buffer_big(sequential 1..=32 => BytesBufferTest<1024>);
         #[test]
-        fn test_in_buffer(sequential 1..64 => InBufferTest);
+        fn test_buffer_sm_slicelike(sequential 1..=32 => BufferSliceLikeTest);
         #[test]
-        fn test_out_buffer(sequential 1..64 => OutBufferTest);
+        fn test_buffer_sm_slicelike_nb(sequential 1..=32 => BufferSliceLikeNBTest);
+        #[test]
+        fn test_in_buffer(sequential 1..=64 => InBufferTest);
+        #[test]
+        fn test_out_buffer(sequential 1..=64 => OutBufferTest);
     }
 }
