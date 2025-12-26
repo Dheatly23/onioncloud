@@ -623,26 +623,35 @@ impl<C: CircuitController> Future for CircuitFut<C> {
     }
 }
 
+#[instrument(level = "trace", skip_all, fields(has_cell = cell.is_some()), ret)]
 fn poll_send_destroy<C, St: Stream<Item = C>, Si: Sink<C>>(
     mut send: Pin<&mut Si>,
     mut recv: Pin<&mut St>,
     cell: &mut Option<C>,
     cx: &mut Context<'_>,
 ) -> Poll<()> {
-    let r = if cell.is_some() {
-        send.as_mut().poll_ready(cx)
-    } else {
-        send.as_mut().poll_close(cx)
+    let r = loop {
+        let r = if cell.is_some() {
+            send.as_mut().poll_ready(cx)
+        } else {
+            send.as_mut().poll_close(cx)
+        };
+        break match r {
+            Pending => None,
+            Ready(Err(e)) => Some(e),
+            Ready(Ok(())) => match cell.take() {
+                Some(c) => {
+                    trace!("sending cell");
+                    match send.as_mut().start_send(c) {
+                        Ok(()) => continue,
+                        Err(e) => Some(e),
+                    }
+                }
+                None => None,
+            },
+        };
     };
-    let r = match r {
-        Pending => Ok(()),
-        Ready(e @ Err(_)) => e,
-        Ready(Ok(())) => match cell.take() {
-            Some(c) => send.as_mut().start_send(c),
-            None => Ok(()),
-        },
-    };
-    if r.is_err() {
+    if r.is_some() {
         debug!("cannot send destroy cell, channel is closed");
         *cell = None;
     }

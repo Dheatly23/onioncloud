@@ -19,6 +19,7 @@ pub type StreamMap<R, C, M> = CellMap<NonZeroU16, R, C, M>;
 /// Type alias for circuit map.
 pub type StreamMapRef<'a, 'b, R, C, M> = CellMapRef<'a, 'b, NonZeroU16, R, C, M>;
 
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SenderState {
     Start,
     Pending,
@@ -80,17 +81,15 @@ impl<'a, 'b, R: Runtime, S: 'static + Send, C: 'static + Send, M> CircuitInput<'
     /// Checks if circuit is ready to send cell.
     pub fn is_ready(&mut self) -> bool {
         loop {
-            match self.sender_state {
+            *self.sender_state = match self.sender_state {
                 SenderState::Ready => return true,
                 SenderState::Closed | SenderState::Pending => return false,
-                SenderState::Start => {
-                    *self.sender_state = match self.sender.as_mut().poll_ready(self.cx) {
-                        Ready(Ok(())) => SenderState::Ready,
-                        Ready(Err(_)) => SenderState::Closed,
-                        Pending => SenderState::Pending,
-                    }
-                }
-            }
+                SenderState::Start => match self.sender.as_mut().poll_flush(self.cx) {
+                    Ready(Ok(())) => SenderState::Ready,
+                    Ready(Err(_)) => SenderState::Closed,
+                    Pending => SenderState::Pending,
+                },
+            };
         }
     }
 
@@ -103,6 +102,8 @@ impl<'a, 'b, R: Runtime, S: 'static + Send, C: 'static + Send, M> CircuitInput<'
             if self.sender.as_mut().start_send(f()).is_err() {
                 *self.sender_state = SenderState::Closed;
             } else {
+                debug_assert_eq!(*self.sender_state, SenderState::Ready);
+                *self.sender_state = SenderState::Start;
                 self.is_ready();
             }
         }

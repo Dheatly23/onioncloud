@@ -12,6 +12,8 @@ use onioncloud_lowlevel::cell::relay::{
 };
 use onioncloud_lowlevel::cell::{Cell, TryFromCell, cast};
 use onioncloud_lowlevel::crypto::relay::{RelayId, from_str as relay_from_str};
+use onioncloud_lowlevel::runtime::Runtime;
+use onioncloud_lowlevel::runtime::test::TestRuntime;
 
 pub(crate) fn get_relay_data() -> (RelayId, Vec<SocketAddr>) {
     (
@@ -68,4 +70,16 @@ pub(crate) fn receive_oneshot<T>(recv: Receiver<T>) -> T {
         panic!("receive must succeed");
     };
     v.expect("receiver is cancelled")
+}
+
+#[allow(dead_code)]
+pub(crate) fn spawn<F>(
+    rt: &TestRuntime,
+    f: impl FnOnce(TestRuntime) -> F,
+) -> <TestRuntime as Runtime>::Task<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    rt.spawn(f(rt.clone()))
 }

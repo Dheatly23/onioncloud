@@ -281,15 +281,22 @@ impl TestExecutor {
 
     #[instrument(skip_all)]
     fn run_tasks_until(&mut self, mut f: impl FnMut(&mut Self, usize) -> bool) {
+        self.rt.0.timers.wake_timers();
+
         let mut i = 0u64;
         loop {
             let _scope = info_span!("loop", i).entered();
 
-            self.rt.0.timers.advance_and_wake_timers();
             let pending = self.register_pending_tasks();
             let active = self.tasks.task_count();
             self.sockets().handle_all();
-            let run = self.tasks.run_tasks();
+            let mut run = self.tasks.run_tasks();
+
+            // If no task is ran, advance time, wake timers, and rerun any woken tasks.
+            if run == 0 && self.rt.0.timers.advance_and_wake_timers() > 0 {
+                run = self.tasks.run_tasks();
+            }
+
             trace!(pending, active, run, "finished loop");
             i = i.wrapping_add(1);
 

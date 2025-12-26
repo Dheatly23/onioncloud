@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::convert::Infallible;
 use std::io::ErrorKind;
 use std::marker::PhantomData;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::pin::pin;
 use std::sync::Arc;
@@ -35,7 +35,7 @@ use onioncloud_lowlevel::util::cell_map::CellMap;
 use onioncloud_lowlevel::util::sans_io::event::{ChannelClosed, ChildCellMsg, ControlMsg, Timeout};
 use onioncloud_lowlevel::util::sans_io::{CellMsgPause, Handle};
 
-use crate::common::get_relay_data;
+use crate::common::{get_relay_data, spawn};
 
 #[derive(Default)]
 struct LinkCfg {
@@ -263,20 +263,19 @@ impl<'a, R: 'static + Runtime> Handle<ChannelClosed<'a, NonZeroU32, Cell, ()>>
 
 #[test]
 fn test_versions_controller() {
+    let cache = Arc::<StandardCellCache>::default();
     let mut exec = TestExecutor::default();
 
     exec.sockets().set_handle(Box::new(|addrs| {
-        if addrs
+        let addr = *addrs
             .iter()
-            .all(|a| !a.ip().is_loopback() || a.port() != 443)
-        {
-            return Err(ErrorKind::HostUnreachable);
-        }
+            .find(|a| a.ip().is_loopback() && a.port() == 443)
+            .ok_or(ErrorKind::HostUnreachable)?;
 
         let mut length = None::<u16>;
 
         Ok(OpenSocket::new(
-            ([127, 0, 0, 1], 443).into(),
+            addr,
             Box::new(move |s| {
                 let v = s.recv_stream();
                 if length.is_none() && v.len() >= 5 {
@@ -324,55 +323,52 @@ fn test_versions_controller() {
         .with_send_eof(true))
     }));
 
-    let rt = exec.runtime();
-    rt.spawn({
-        let rt = rt.clone();
-        async move {
-            let cfg = VersionOnlyConfig {
-                cfg: SimpleConfig {
-                    id: RelayId::default(),
-                    addrs: vec![([127, 0, 0, 1], 443).into()].into(),
-                    cache: Default::default(),
-                },
-                delay: false,
-                expect_version: Some(4),
-            };
-            // SAFETY: We are in integration test
-            let cont = unsafe {
-                pin!(SingleManager::<VersionOnlyController<_>>::new_test(
-                    &rt,
-                    cfg,
-                    |_| None
-                ))
-            };
+    static ADDRS: &[SocketAddr] = &[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443)];
 
-            cont.as_ref().completion().await.unwrap();
-        }
+    let rt = exec.runtime();
+    let c = cache.clone();
+    spawn(rt, |rt| async move {
+        let cfg = VersionOnlyConfig {
+            cfg: SimpleConfig {
+                id: RelayId::default(),
+                addrs: ADDRS.into(),
+                cache: c,
+            },
+            delay: false,
+            expect_version: Some(4),
+        };
+        // SAFETY: We are in integration test
+        let cont = unsafe {
+            pin!(SingleManager::<VersionOnlyController<_>>::new_test(
+                &rt,
+                cfg,
+                |_| None
+            ))
+        };
+
+        cont.as_ref().completion().await.unwrap();
     });
 
-    rt.spawn({
-        let rt = rt.clone();
-        async move {
-            let cfg = VersionOnlyConfig {
-                cfg: SimpleConfig {
-                    id: RelayId::default(),
-                    addrs: vec![([127, 0, 0, 1], 443).into()].into(),
-                    cache: Default::default(),
-                },
-                delay: true,
-                expect_version: Some(4),
-            };
-            // SAFETY: We are in integration test
-            let cont = unsafe {
-                pin!(SingleManager::<VersionOnlyController<_>>::new_test(
-                    &rt,
-                    cfg,
-                    |_| None
-                ))
-            };
+    spawn(rt, |rt| async move {
+        let cfg = VersionOnlyConfig {
+            cfg: SimpleConfig {
+                id: RelayId::default(),
+                addrs: ADDRS.into(),
+                cache,
+            },
+            delay: true,
+            expect_version: Some(4),
+        };
+        // SAFETY: We are in integration test
+        let cont = unsafe {
+            pin!(SingleManager::<VersionOnlyController<_>>::new_test(
+                &rt,
+                cfg,
+                |_| None
+            ))
+        };
 
-            cont.as_ref().completion().await.unwrap();
-        }
+        cont.as_ref().completion().await.unwrap();
     });
 
     exec.run_tasks_until_finished();

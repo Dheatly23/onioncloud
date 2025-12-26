@@ -99,19 +99,19 @@ impl<T: Send> Sink<T> for SPSCPipeSender<T> {
         let guard = &mut *inner.inner.lock();
 
         let p = &mut guard.buf[guard.end];
-        if p.is_none() {
-            *p = this.buf.take();
-            if p.is_some() {
-                guard.end = (guard.end + 1) % guard.buf.len();
-            }
-            guard.wake_recv();
-            Poll::Ready(Ok(()))
-        } else if inner.flags.load(Acquire) & 2 == 0 {
+        if inner.flags.load(Acquire) & 2 == 0 {
             Poll::Ready(if let Some(m) = this.buf.take() {
                 Err(SendError(m))
             } else {
                 Ok(())
             })
+        } else if p.is_none() {
+            *p = this.buf.take();
+            if p.is_some() {
+                guard.end = (guard.end + 1) % guard.buf.len();
+                guard.wake_recv();
+            }
+            Poll::Ready(Ok(()))
         } else {
             guard.wake_recv();
             set_option_waker(&mut guard.send_waker, cx);

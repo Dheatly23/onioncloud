@@ -101,7 +101,7 @@ impl Timers {
     }
 
     #[instrument(skip_all)]
-    pub(super) fn advance_and_wake_timers(&self) {
+    pub(super) fn advance_and_wake_timers(&self) -> usize {
         let mut n = 0;
         let cur = self.current_time();
         let mut time: Option<Instant> = None;
@@ -140,6 +140,7 @@ impl Timers {
         }
 
         trace!("woken {n} timers");
+        n
     }
 
     pub(super) fn create_timer(&self, timeout: Option<Instant>) -> TestTimer {

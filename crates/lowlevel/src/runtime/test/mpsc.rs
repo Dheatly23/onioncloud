@@ -145,19 +145,19 @@ impl<T: Send> Sink<T> for MPSCPipeSender<T> {
         let guard = &mut *inner.inner.lock();
 
         let p = &mut guard.buf[guard.end];
-        if p.is_none() {
-            *p = this.buf.take();
-            if p.is_some() {
-                guard.end = (guard.end + 1) % guard.buf.len();
-            }
-            guard.wake_recv();
-            Poll::Ready(Ok(()))
-        } else if inner.receiver.load(Acquire) == 0 {
+        if inner.receiver.load(Acquire) == 0 {
             Poll::Ready(if let Some(m) = this.buf.take() {
                 Err(SendError(m))
             } else {
                 Ok(())
             })
+        } else if p.is_none() {
+            *p = this.buf.take();
+            if p.is_some() {
+                guard.end = (guard.end + 1) % guard.buf.len();
+                guard.wake_recv();
+            }
+            Poll::Ready(Ok(()))
         } else {
             guard.wake_recv();
             if *this.r#gen == guard.send_wakers_gen
