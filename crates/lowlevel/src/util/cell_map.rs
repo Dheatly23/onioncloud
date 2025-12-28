@@ -355,7 +355,7 @@ impl<R: Runtime, Cell: 'static + Send, Meta> HandlerData<R, Cell, Meta> {
                 }
             }
             _ => {
-                ret = this.send.poll_flush(cx);
+                ret = this.send.poll_ready(cx);
                 *this.send_state = match ret {
                     Poll::Ready(Ok(_)) => SendState::Ready,
                     Poll::Ready(Err(_)) => SendState::Closed,

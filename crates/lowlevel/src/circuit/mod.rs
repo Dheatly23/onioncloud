@@ -84,7 +84,7 @@ impl<'a, 'b, R: Runtime, S: 'static + Send, C: 'static + Send, M> CircuitInput<'
             *self.sender_state = match self.sender_state {
                 SenderState::Ready => return true,
                 SenderState::Closed | SenderState::Pending => return false,
-                SenderState::Start => match self.sender.as_mut().poll_flush(self.cx) {
+                SenderState::Start => match self.sender.as_mut().poll_ready(self.cx) {
                     Ready(Ok(())) => SenderState::Ready,
                     Ready(Err(_)) => SenderState::Closed,
                     Pending => SenderState::Pending,
