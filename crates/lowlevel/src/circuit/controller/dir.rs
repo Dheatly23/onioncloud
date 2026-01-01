@@ -588,6 +588,7 @@ impl<R: Runtime, C: 'static + Send + Sync + Clone + CellCache> SteadyState<R, C>
                 ..
             })) = send.send(r)
             {
+                debug_assert_eq!(id.generation, self.generation);
                 // Instantly discards newly created stream
                 input.stream_map().remove(&id.inner);
                 self.generation = self.generation.wrapping_sub(1);

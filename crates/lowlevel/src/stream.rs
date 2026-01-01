@@ -27,8 +27,8 @@ use crate::cell::relay::{IntoRelay, Relay, RelayVersion, cast};
 use crate::circuit::NewStream;
 use crate::errors::CircuitClosedError;
 use crate::runtime::{Runtime, SendError};
+use crate::util::GenerationalData;
 use crate::util::cell_map::NewHandler;
-use crate::util::{GenerationalData, gen_cached};
 
 type CachedCell<Cache, Cell = Relay> = Cached<GenerationalData<Cell>, Cache>;
 
@@ -187,7 +187,7 @@ impl<
         let DirStreamProj { inner, state, .. } = self.as_mut().project();
         let DirStreamInnerProj {
             circ_id: &mut circ_id,
-            stream_id: &mut stream_id,
+            stream_id: &mut ref stream_id,
             cache: &mut ref cache,
             mut recv,
             ..
@@ -204,6 +204,7 @@ impl<
         }
 
         while let Some(cell) = ready!(recv.as_mut().poll_next(cx)) {
+            debug_assert_eq!(cell.generation, stream_id.generation);
             debug_assert_eq!(cell.inner.circuit, circ_id);
             debug_assert_eq!(cell.inner.stream(), stream_id.inner.into());
             let mut cell = Cached::map(cell, |c| Some(c.into_inner()));
@@ -793,6 +794,7 @@ impl InitState {
                     let Some(cell) = ready!(recv.as_mut().poll_next(cx)) else {
                         return Ready(Err(IoError::new(ErrorKind::BrokenPipe, CircuitClosedError)));
                     };
+                    debug_assert_eq!(cell.generation, stream_id.generation);
                     debug_assert_eq!(cell.inner.circuit, circ_id);
                     debug_assert_eq!(cell.inner.stream(), stream_id.inner.into());
                     let mut cell = Cached::map(cell, |c| Some(c.into_inner()));
@@ -825,6 +827,15 @@ impl InitState {
             }
         }
     }
+}
+
+fn gen_cached<C: CellCache>(
+    value: Cached<Relay, C>,
+    stream_id: &GenerationalData<NonZeroU16>,
+) -> Cached<GenerationalData<Relay>, C> {
+    Cached::map(value, |value| {
+        GenerationalData::new(value, stream_id.generation)
+    })
 }
 
 #[cfg(test)]

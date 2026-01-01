@@ -24,7 +24,7 @@ use futures_io::{AsyncRead, AsyncWrite};
 use pin_project::pin_project;
 use scopeguard::guard_on_unwind;
 
-use crate::cache::{Cachable, Cached, CellCache};
+use crate::cache::{Cachable, CellCache};
 use crate::crypto::EdPublicKey;
 use crate::runtime::{Runtime, Timer};
 pub use buffer::*;
@@ -598,16 +598,6 @@ impl<T: ?Sized> GenerationalData<T> {
             inner: f(self.inner),
         }
     }
-}
-
-/// Transform `Cached<T, C>` into `Cached<GenerationalData<T>, C>`
-pub(crate) fn gen_cached<T: Cachable, C: CellCache, U>(
-    value: Cached<T, C>,
-    generation: &GenerationalData<U>,
-) -> Cached<GenerationalData<T>, C> {
-    Cached::map(value, |value| {
-        GenerationalData::new(value, generation.generation)
-    })
 }
 
 #[cfg(test)]
