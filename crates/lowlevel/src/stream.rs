@@ -1,23 +1,23 @@
 use std::error::Error;
+use std::future::poll_fn;
 use std::io::{Error as IoError, ErrorKind, IoSlice, IoSliceMut, Result as IoResult};
 use std::iter::from_fn;
 use std::mem::take;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::Poll::*;
 use std::task::{Context, Poll};
 
-use flume::SendError;
-use flume::r#async::{RecvStream, SendSink};
-use futures_core::{Stream as _, ready};
+use futures_core::{Stream, ready};
 use futures_io::{AsyncBufRead, AsyncRead, AsyncWrite};
-use futures_sink::Sink as _;
+use futures_sink::Sink;
 use futures_util::AsyncWriteExt as _;
 use pin_project::pin_project;
-use tracing::{debug, info, instrument, trace};
+use tracing::{debug, info, info_span, instrument, trace, warn};
 
 use crate::cache::{Cached, CellCache, CellCacheExt};
+use crate::cell::relay::begin_dir::RelayBeginDir;
+use crate::cell::relay::connected::RelayConnected;
 use crate::cell::relay::data::RelayData;
 use crate::cell::relay::drop::RelayDrop;
 use crate::cell::relay::end::{EndReason, RelayEnd};
@@ -25,10 +25,12 @@ use crate::cell::relay::sendme::RelaySendme;
 use crate::cell::relay::v0::{RELAY_DATA_LENGTH, RelayExt};
 use crate::cell::relay::{IntoRelay, Relay, RelayVersion, cast};
 use crate::circuit::NewStream;
+use crate::errors::CircuitClosedError;
+use crate::runtime::{Runtime, SendError};
 use crate::util::cell_map::NewHandler;
+use crate::util::{GenerationalData, gen_cached};
 
-type CacheTy = Arc<dyn Send + Sync + CellCache>;
-type CachedCell<C = Relay> = Cached<C, CacheTy>;
+type CachedCell<Cache, Cell = Relay> = Cached<GenerationalData<Cell>, Cache>;
 
 /// Directory stream type.
 ///
@@ -41,16 +43,10 @@ type CachedCell<C = Relay> = Cached<C, CacheTy>;
 ///
 /// Don't forget to close stream to ensure proper closing sequence.
 /// When closing, all reads will be dropped and no further bytes will be returned.
-#[pin_project(project = DirStreamProj)]
-pub struct DirStream {
-    cache: CacheTy,
-    circ_id: NonZeroU32,
-    stream_id: NonZeroU16,
-
+#[pin_project(!Unpin, project = DirStreamProj)]
+pub struct DirStream<Cache, Send, Recv> {
     #[pin]
-    send: SendSink<'static, CachedCell>,
-    #[pin]
-    recv: RecvStream<'static, CachedCell>,
+    inner: DirStreamInner<Cache, Send, Recv>,
 
     recv_buf: [u8; RELAY_DATA_LENGTH],
     recv_buf_len: usize,
@@ -60,41 +56,79 @@ pub struct DirStream {
     state: State,
 }
 
+#[pin_project(!Unpin, project = DirStreamInnerProj)]
+struct DirStreamInner<Cache, Send, Recv> {
+    circ_id: NonZeroU32,
+    stream_id: GenerationalData<NonZeroU16>,
+    cache: Cache,
+    #[pin]
+    send: Send,
+    #[pin]
+    recv: Recv,
+}
+
 enum State {
+    Init(InitState),
+    InitShutdown(InitState, EndReason),
     Normal,
     ShutdownRequest(EndReason),
     Shutdown,
 }
 
-impl DirStream {
-    /// Create new [`DirStream`].
-    ///
-    /// # Parameters
-    /// - `cache` : Cell cache.
-    /// - `data` : Parameter for new stream.
-    pub fn new(cache: Arc<dyn Send + Sync + CellCache>, data: NewStream<CachedCell>) -> Self {
-        let NewStream {
-            circ_id,
-            inner:
-                NewHandler {
-                    id: stream_id,
-                    receiver: recv,
-                    sender: send,
-                },
-        } = data;
+/// Opens a new [`DirStream`] using RELAY_BEGIN_DIR.
+pub fn open_dir_stream<Cache: 'static + Send + Sync + Clone + CellCache, R: Runtime>(
+    cache: Cache,
+    data: NewStream<GenerationalData<NonZeroU16>, R, CachedCell<Cache>>,
+) -> DirStream<Cache, R::MPSCSender<CachedCell<Cache>>, R::SPSCReceiver<CachedCell<Cache>>> {
+    let NewStream {
+        circ_id,
+        inner:
+            NewHandler {
+                id: stream_id,
+                sender: send,
+                receiver: recv,
+            },
+    } = data;
+    DirStream::new(
+        cache,
+        circ_id,
+        stream_id,
+        send,
+        recv,
+        InitState::BeginDirStart,
+    )
+}
 
+impl<
+    C: 'static + Send + Sync + Clone + CellCache,
+    S: Sink<CachedCell<C>, Error = SendError<CachedCell<C>>>,
+    R: Stream<Item = CachedCell<C>>,
+> DirStream<C, S, R>
+{
+    #[inline(always)]
+    fn new(
+        cache: C,
+        circ_id: NonZeroU32,
+        stream_id: GenerationalData<NonZeroU16>,
+        send: S,
+        recv: R,
+        state: InitState,
+    ) -> Self {
         Self {
-            cache,
-            circ_id,
-            stream_id: stream_id.try_into().expect("invalid stream ID"),
+            inner: DirStreamInner {
+                circ_id,
+                stream_id,
+                cache,
+                send,
+                recv,
+            },
+
             recv_buf: [0; RELAY_DATA_LENGTH],
             recv_buf_len: 0,
             send_buf: [0; RELAY_DATA_LENGTH],
             send_buf_len: 0,
-            state: State::Normal,
 
-            send: send.into_sink(),
-            recv: recv.into_stream(),
+            state: State::Init(state),
         }
     }
 
@@ -103,35 +137,65 @@ impl DirStream {
     /// Using [`Self::poll_close`] does not give any reason.
     /// Use this to provide explicit reason instead.
     pub fn close_with(self: Pin<&mut Self>, reason: EndReason) {
-        if let state @ State::Normal = self.project().state {
-            *state = State::ShutdownRequest(reason);
+        let state = self.project().state;
+        match state {
+            State::Normal => *state = State::ShutdownRequest(reason),
+            State::Init(init) => *state = State::InitShutdown(init.clone(), reason),
+            _ => (),
         }
     }
 
     /// Async wrapper for [`Self::close_with`].
     pub async fn close_with_async(mut self: Pin<&mut Self>, reason: EndReason) -> IoResult<()> {
+        poll_fn(|cx| self.as_mut().poll_init(cx)).await?;
         self.as_mut().close_with(reason);
         self.close().await
     }
 
     /// Returns `true` if stream is closing.
     pub fn is_closed(&self) -> bool {
-        !matches!(self.state, State::Normal)
+        matches!(
+            self.state,
+            State::InitShutdown(_, _) | State::ShutdownRequest(_) | State::Shutdown
+        )
+    }
+
+    fn poll_init(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
+        let DirStreamProj { inner, state, .. } = self.project();
+        let (init, reason) = match state {
+            State::Init(init) => (init, None),
+            State::InitShutdown(init, reason) => (init, Some(reason)),
+            _ => return Ready(Ok(())),
+        };
+
+        *state = if ready!(init.run_init(inner, cx))? {
+            if let Some(reason) = reason {
+                State::ShutdownRequest(reason.clone())
+            } else {
+                State::Shutdown
+            }
+        } else {
+            State::Normal
+        };
+        Ready(Ok(()))
     }
 
     fn poll_read_until_data(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<IoResult<Option<RelayData>>> {
-        let DirStreamProj {
+        let DirStreamProj { inner, state, .. } = self.as_mut().project();
+        let DirStreamInnerProj {
             circ_id: &mut circ_id,
             stream_id: &mut stream_id,
-            cache,
-            state,
+            cache: &mut ref cache,
             mut recv,
             ..
-        } = self.as_mut().project();
-        let cache: &(dyn Send + Sync + CellCache) = &cache;
+        } = inner.project();
+        debug_assert!(
+            !matches!(state, State::Init(_) | State::InitShutdown(_, _)),
+            "state is init"
+        );
 
         if !matches!(state, State::Normal) {
             // Stream closing
@@ -140,9 +204,9 @@ impl DirStream {
         }
 
         while let Some(cell) = ready!(recv.as_mut().poll_next(cx)) {
-            debug_assert_eq!(cell.circuit, circ_id);
-            debug_assert_eq!(cell.stream(), stream_id.into());
-            let mut cell = Cached::map(cell, Some);
+            debug_assert_eq!(cell.inner.circuit, circ_id);
+            debug_assert_eq!(cell.inner.stream(), stream_id.inner.into());
+            let mut cell = Cached::map(cell, |c| Some(c.into_inner()));
 
             if let Some(cell) =
                 cast::<RelayData>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
@@ -173,7 +237,7 @@ impl DirStream {
                 cache.discard(cell);
             } else if let Some(cell) = Cached::transpose(cell) {
                 // NOTE: Potential protocol violation
-                trace!("unhandled cell with command {} received", cell.command());
+                debug!("unhandled cell with command {} received", cell.command());
             }
         }
 
@@ -182,15 +246,23 @@ impl DirStream {
 
     fn poll_flush_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
         let DirStreamProj {
-            circ_id: &mut circ_id,
-            stream_id: &mut stream_id,
-            cache: &mut ref cache,
+            inner,
             state,
             send_buf,
             send_buf_len,
-            mut send,
             ..
         } = self.project();
+        let DirStreamInnerProj {
+            circ_id: &mut circ_id,
+            stream_id: &mut ref stream_id,
+            cache: &mut ref cache,
+            mut send,
+            ..
+        } = inner.project();
+        debug_assert!(
+            !matches!(state, State::Init(_) | State::InitShutdown(_, _)),
+            "state is init"
+        );
 
         if *send_buf_len == 0 {
             return Ready(Ok(()));
@@ -199,21 +271,23 @@ impl DirStream {
         // Flush write buffer.
         if !handle_write_err(ready!(send.as_mut().poll_ready(cx))) {
             let n = take(send_buf_len);
-            let cell = RelayData::new(cache.get_cached(), stream_id, &send_buf[..n])
-                .unwrap()
-                .try_into_relay(circ_id, RelayVersion::V0)
-                .unwrap();
-            if !handle_write_err(send.as_mut().start_send(cache.cache(cell))) {
+            let cell = <_>::try_into_relay_cached(
+                cache.cache(
+                    RelayData::new(cache.get_cached(), stream_id.inner, &send_buf[..n]).unwrap(),
+                ),
+                circ_id,
+                RelayVersion::V0,
+            )
+            .unwrap();
+            if !handle_write_err(send.as_mut().start_send(gen_cached(cell, stream_id))) {
                 trace!("flushed {n} bytes");
                 return Ready(Ok(()));
             }
         }
 
+        debug!("failed to flush buffer");
         *state = State::Shutdown;
-        Ready(Err(IoError::new(
-            ErrorKind::WriteZero,
-            "failed to flush buffer",
-        )))
+        Ready(Err(IoError::new(ErrorKind::WriteZero, CircuitClosedError)))
     }
 }
 
@@ -221,13 +295,20 @@ fn map_io_err(e: impl 'static + Error + Send + Sync) -> IoError {
     IoError::other(Box::new(e))
 }
 
-impl AsyncRead for DirStream {
-    #[instrument(level = "trace", skip_all, fields(circ_id = self.circ_id, stream_id = self.stream_id))]
+impl<
+    C: 'static + Send + Sync + Clone + CellCache,
+    S: Sink<CachedCell<C>, Error = SendError<CachedCell<C>>>,
+    R: Stream<Item = CachedCell<C>>,
+> AsyncRead for DirStream<C, S, R>
+{
+    #[instrument(level = "trace", skip_all, fields(circ_id = self.inner.circ_id, stream_id = self.inner.stream_id.inner))]
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<IoResult<usize>> {
+        ready!(self.as_mut().poll_init(cx))?;
+
         let DirStreamProj {
             recv_buf,
             recv_buf_len,
@@ -242,12 +323,12 @@ impl AsyncRead for DirStream {
             n
         } else if let Some(cell) = ready!(self.as_mut().poll_read_until_data(cx))? {
             let DirStreamProj {
-                cache: &mut ref cache,
+                inner,
                 recv_buf,
                 recv_buf_len,
                 ..
             } = self.project();
-            let cell = (**cache).cache_b(cell);
+            let cell = inner.cache.cache_b(cell);
             let data = cell.data();
 
             debug_assert_eq!(*recv_buf_len, 0);
@@ -272,12 +353,14 @@ impl AsyncRead for DirStream {
         Ready(Ok(n))
     }
 
-    #[instrument(level = "trace", skip_all, fields(circ_id = self.circ_id, stream_id = self.stream_id))]
+    #[instrument(level = "trace", skip_all, fields(circ_id = self.inner.circ_id, stream_id = self.inner.stream_id.inner))]
     fn poll_read_vectored(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<IoResult<usize>> {
+        ready!(self.as_mut().poll_init(cx))?;
+
         let DirStreamProj {
             recv_buf,
             recv_buf_len,
@@ -302,12 +385,12 @@ impl AsyncRead for DirStream {
             n
         } else if let Some(cell) = ready!(self.as_mut().poll_read_until_data(cx))? {
             let DirStreamProj {
-                cache: &mut ref cache,
+                inner,
                 recv_buf,
                 recv_buf_len,
                 ..
             } = self.project();
-            let cell = (**cache).cache_b(cell);
+            let cell = inner.cache.cache_b(cell);
             let mut s = cell.data();
 
             debug_assert_eq!(*recv_buf_len, 0);
@@ -336,9 +419,16 @@ impl AsyncRead for DirStream {
     }
 }
 
-impl AsyncBufRead for DirStream {
-    #[instrument(level = "trace", skip_all, fields(circ_id = self.circ_id, stream_id = self.stream_id))]
+impl<
+    C: 'static + Send + Sync + Clone + CellCache,
+    S: Sink<CachedCell<C>, Error = SendError<CachedCell<C>>>,
+    R: Stream<Item = CachedCell<C>>,
+> AsyncBufRead for DirStream<C, S, R>
+{
+    #[instrument(level = "trace", skip_all, fields(circ_id = self.inner.circ_id, stream_id = self.inner.stream_id.inner))]
     fn poll_fill_buf(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<&[u8]>> {
+        ready!(self.as_mut().poll_init(cx))?;
+
         if self.recv_buf_len == 0 {
             // Fill buffer
             if !matches!(self.state, State::Normal) {
@@ -346,12 +436,12 @@ impl AsyncBufRead for DirStream {
                 ready!(self.as_mut().poll_close(cx))?;
             } else if let Some(cell) = ready!(self.as_mut().poll_read_until_data(cx))? {
                 let DirStreamProj {
-                    cache,
+                    inner,
                     recv_buf,
                     recv_buf_len,
                     ..
                 } = self.as_mut().project();
-                let cell = (**cache).cache_b(cell);
+                let cell = inner.cache.cache_b(cell);
                 let data = cell.data();
 
                 // Copy data into buffer
@@ -368,7 +458,7 @@ impl AsyncBufRead for DirStream {
         Ready(Ok(&recv_buf[RELAY_DATA_LENGTH - *recv_buf_len..]))
     }
 
-    #[instrument(level = "trace", skip_all, fields(circ_id = self.circ_id, stream_id = self.stream_id, amount = amount))]
+    #[instrument(level = "trace", skip_all, fields(circ_id = self.inner.circ_id, stream_id = self.inner.stream_id.inner, amount = amount))]
     fn consume(self: Pin<&mut Self>, amount: usize) {
         let p = self.project().recv_buf_len;
         *p = match (*p).checked_sub(amount) {
@@ -378,15 +468,27 @@ impl AsyncBufRead for DirStream {
     }
 }
 
-fn handle_write_err(ret: Result<(), SendError<CachedCell>>) -> bool {
+fn handle_write_err<T>(ret: Result<(), SendError<T>>) -> bool {
     let Err(_) = ret else { return false };
+    drop(ret);
     debug!("circuit disconnected");
     true
 }
 
-impl AsyncWrite for DirStream {
-    #[instrument(level = "trace", skip_all, fields(circ_id = self.circ_id, stream_id = self.stream_id))]
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<IoResult<usize>> {
+impl<
+    C: 'static + Send + Sync + Clone + CellCache,
+    S: Sink<CachedCell<C>, Error = SendError<CachedCell<C>>>,
+    R: Stream<Item = CachedCell<C>>,
+> AsyncWrite for DirStream<C, S, R>
+{
+    #[instrument(level = "trace", skip_all, fields(circ_id = self.inner.circ_id, stream_id = self.inner.stream_id.inner))]
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<IoResult<usize>> {
+        ready!(self.as_mut().poll_init(cx))?;
+
         let n = if !matches!(self.state, State::Normal) {
             // Stream is closed. Reuse poll_close
             ready!(self.poll_close(cx))?;
@@ -394,30 +496,39 @@ impl AsyncWrite for DirStream {
         } else if self.send_buf_len.saturating_add(buf.len()) >= RELAY_DATA_LENGTH {
             // Avoids copying to buffer
             let DirStreamProj {
-                circ_id: &mut circ_id,
-                stream_id: &mut stream_id,
-                cache: &mut ref cache,
+                inner,
                 state,
                 send_buf,
                 send_buf_len,
-                mut send,
                 ..
             } = self.project();
+            let DirStreamInnerProj {
+                circ_id: &mut circ_id,
+                stream_id: &mut ref stream_id,
+                cache: &mut ref cache,
+                mut send,
+                ..
+            } = inner.project();
 
             let mut ok = !handle_write_err(ready!(send.as_mut().poll_ready(cx)));
             let mut n = 0;
 
             if ok {
                 n = RELAY_DATA_LENGTH - *send_buf_len;
-                let cell = RelayData::new_multipart(
-                    cache.get_cached(),
-                    stream_id,
-                    [&send_buf[..take(send_buf_len)], &buf[..n]],
+                let cell = <_>::try_into_relay_cached(
+                    cache.cache(
+                        RelayData::new_multipart(
+                            cache.get_cached(),
+                            stream_id.inner,
+                            [&send_buf[..take(send_buf_len)], &buf[..n]],
+                        )
+                        .unwrap(),
+                    ),
+                    circ_id,
+                    RelayVersion::V0,
                 )
-                .unwrap()
-                .try_into_relay(circ_id, RelayVersion::V0)
                 .unwrap();
-                ok = !handle_write_err(send.as_mut().start_send(cache.cache(cell)));
+                ok = !handle_write_err(send.as_mut().start_send(gen_cached(cell, stream_id)));
             }
 
             if ok {
@@ -447,27 +558,33 @@ impl AsyncWrite for DirStream {
         Ready(Ok(n))
     }
 
-    #[instrument(level = "trace", skip_all, fields(circ_id = self.circ_id, stream_id = self.stream_id))]
+    #[instrument(level = "trace", skip_all, fields(circ_id = self.inner.circ_id, stream_id = self.inner.stream_id.inner))]
     fn poll_write_vectored(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         mut bufs: &[IoSlice<'_>],
     ) -> Poll<IoResult<usize>> {
+        ready!(self.as_mut().poll_init(cx))?;
+
         let n = if !matches!(self.state, State::Normal) {
             // Stream is closed. Reuse poll_close
             ready!(self.poll_close(cx))?;
             0
         } else {
             let DirStreamProj {
-                circ_id: &mut circ_id,
-                stream_id: &mut stream_id,
-                cache: &mut ref cache,
+                inner,
                 state,
                 send_buf,
                 send_buf_len,
-                mut send,
                 ..
             } = self.project();
+            let DirStreamInnerProj {
+                circ_id: &mut circ_id,
+                stream_id: &mut ref stream_id,
+                cache: &mut ref cache,
+                mut send,
+                ..
+            } = inner.project();
             debug_assert!(*send_buf_len < RELAY_DATA_LENGTH);
 
             let mut ok = !handle_write_err(ready!(send.as_mut().poll_ready(cx)));
@@ -502,11 +619,16 @@ impl AsyncWrite for DirStream {
                         n += i;
                         Some(&buf[..i])
                     });
-                    let cell = RelayData::new_multipart(cache.get_cached(), stream_id, it)
-                        .unwrap()
-                        .try_into_relay(circ_id, RelayVersion::V0)
-                        .unwrap();
-                    ok = !handle_write_err(send.as_mut().start_send(cache.cache(cell)));
+                    let cell = <_>::try_into_relay_cached(
+                        cache.cache(
+                            RelayData::new_multipart(cache.get_cached(), stream_id.inner, it)
+                                .unwrap(),
+                        ),
+                        circ_id,
+                        RelayVersion::V0,
+                    )
+                    .unwrap();
+                    ok = !handle_write_err(send.as_mut().start_send(gen_cached(cell, stream_id)));
                 } else {
                     // Copy bytes to buffer
                     let mut d = &mut send_buf[*send_buf_len..];
@@ -537,22 +659,24 @@ impl AsyncWrite for DirStream {
         Ready(Ok(n))
     }
 
-    #[instrument(level = "trace", skip_all, fields(circ_id = self.circ_id, stream_id = self.stream_id))]
+    #[instrument(level = "trace", skip_all, fields(circ_id = self.inner.circ_id, stream_id = self.inner.stream_id.inner))]
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
+        ready!(self.as_mut().poll_init(cx))?;
+
         if !matches!(self.state, State::Shutdown) && self.send_buf_len > 0 {
             // Requesting closing, but there are data in write buffer.
             ready!(self.as_mut().poll_flush_buf(cx)?);
         }
 
-        let DirStreamProj {
+        let DirStreamProj { inner, state, .. } = self.project();
+        let DirStreamInnerProj {
             circ_id: &mut circ_id,
-            stream_id: &mut stream_id,
+            stream_id: &mut ref stream_id,
             cache: &mut ref cache,
-            state,
             mut send,
             mut recv,
             ..
-        } = self.project();
+        } = inner.project();
 
         loop {
             // Read and drop all cells
@@ -572,12 +696,18 @@ impl AsyncWrite for DirStream {
 
                     let reason = reason.clone();
                     *state = State::Shutdown;
-                    let cell = RelayEnd::new(cache.get_cached(), stream_id, reason)
-                        .try_into_relay(circ_id, RelayVersion::V0)
-                        .unwrap();
-                    if handle_write_err(send.as_mut().start_send(cache.cache(cell))) {
+                    let cell = <_>::try_into_relay_cached(
+                        cache.cache(RelayEnd::new(cache.get_cached(), stream_id.inner, reason)),
+                        circ_id,
+                        RelayVersion::V0,
+                    )
+                    .unwrap();
+                    if handle_write_err(send.as_mut().start_send(gen_cached(cell, stream_id))) {
                         break;
                     }
+                }
+                State::Init(_) | State::InitShutdown(_, _) => {
+                    unreachable!("state must not be init")
                 }
             }
         }
@@ -585,8 +715,10 @@ impl AsyncWrite for DirStream {
         Ready(Ok(()))
     }
 
-    #[instrument(level = "trace", skip_all, fields(circ_id = self.circ_id, stream_id = self.stream_id))]
+    #[instrument(level = "trace", skip_all, fields(circ_id = self.inner.circ_id, stream_id = self.inner.stream_id.inner))]
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
+        ready!(self.as_mut().poll_init(cx))?;
+
         if !matches!(self.state, State::Normal) {
             // Stream is closed
             return self.poll_close(cx);
@@ -594,13 +726,104 @@ impl AsyncWrite for DirStream {
 
         ready!(self.as_mut().poll_flush_buf(cx)?);
 
-        let DirStreamProj { state, send, .. } = self.project();
+        let DirStreamProj { inner, state, .. } = self.project();
 
-        if handle_write_err(ready!(send.poll_flush(cx))) {
+        if handle_write_err(ready!(inner.project().send.poll_flush(cx))) {
             *state = State::Shutdown;
         }
 
         Ready(Ok(()))
+    }
+}
+
+#[derive(Debug, Clone)]
+enum InitState {
+    BeginDirStart,
+    BeginDirSend,
+    BeginDirConnected,
+}
+
+impl InitState {
+    fn run_init<
+        C: 'static + Send + Sync + Clone + CellCache,
+        S: Sink<CachedCell<C>, Error = SendError<CachedCell<C>>>,
+        R: Stream<Item = CachedCell<C>>,
+    >(
+        &mut self,
+        inner: Pin<&mut DirStreamInner<C, S, R>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<IoResult<bool>> {
+        let DirStreamInnerProj {
+            circ_id: &mut circ_id,
+            stream_id: &mut ref stream_id,
+            cache: &mut ref cache,
+            mut send,
+            mut recv,
+        } = inner.project();
+
+        loop {
+            let _g = info_span!("run_init", state = ?self).entered();
+            match self {
+                Self::BeginDirStart => {
+                    let mut ret = ready!(send.as_mut().poll_ready(cx));
+                    if ret.is_ok() {
+                        let cell =
+                            cache.cache(RelayBeginDir::new(cache.get_cached(), stream_id.inner));
+                        let cell = <_>::try_into_relay_cached(cell, circ_id, RelayVersion::V0)
+                            .expect("relay conversion must succeed");
+                        let cell = gen_cached(cell, stream_id);
+                        ret = send.as_mut().start_send(cell);
+                    }
+
+                    if ret.is_err() {
+                        drop(ret);
+                        return Ready(Err(IoError::new(ErrorKind::BrokenPipe, CircuitClosedError)));
+                    }
+
+                    *self = Self::BeginDirSend;
+                }
+                Self::BeginDirSend => {
+                    if ready!(send.as_mut().poll_flush(cx)).is_err() {
+                        return Ready(Err(IoError::new(ErrorKind::BrokenPipe, CircuitClosedError)));
+                    }
+
+                    *self = Self::BeginDirConnected;
+                }
+                Self::BeginDirConnected => loop {
+                    let Some(cell) = ready!(recv.as_mut().poll_next(cx)) else {
+                        return Ready(Err(IoError::new(ErrorKind::BrokenPipe, CircuitClosedError)));
+                    };
+                    debug_assert_eq!(cell.inner.circuit, circ_id);
+                    debug_assert_eq!(cell.inner.stream(), stream_id.inner.into());
+                    let mut cell = Cached::map(cell, |c| Some(c.into_inner()));
+
+                    if let Some(cell) =
+                        cast::<RelayEnd>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
+                    {
+                        // RELAY_END cell
+                        let reason = cache.cache_b(cell).reason();
+                        info!(%reason, "stream closed");
+                        return Ready(Ok(true));
+                    } else if let Some(cell) =
+                        cast::<RelayConnected>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
+                    {
+                        // RELAY_CONNECTED cell
+                        let cell = cache.cache_b(cell);
+                        if cfg!(debug_assertions)
+                            && let Some((ip, ttl)) = cell.data()
+                        {
+                            warn!("expected empty RELAY_CONNECTED cell, got ({ip}, {ttl})");
+                        }
+
+                        debug!("stream initialized");
+                        return Ready(Ok(false));
+                    } else if let Some(cell) = Cached::transpose(cell) {
+                        // NOTE: Potential protocol violation
+                        debug!("unhandled cell with command {} received", cell.command());
+                    }
+                },
+            }
+        }
     }
 }
 
@@ -611,65 +834,29 @@ mod tests {
     use std::future::Future;
     use std::mem::transmute;
     use std::pin::pin;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering::*};
     use std::time::Duration;
 
-    use flume::{Receiver, Sender, bounded};
-    use futures_util::{AsyncReadExt, SinkExt, StreamExt};
-    use pin_project::pinned_drop;
+    use futures_util::{AsyncReadExt as _, SinkExt as _, StreamExt as _};
     use proptest::collection::vec;
     use proptest::prelude::*;
     use test_log::test;
-    use tokio::runtime::{Builder, Runtime};
-    use tokio::task::{JoinError, JoinHandle};
-    use tokio::time::timeout;
-    use tracing::{Instrument, Span, debug, info_span};
 
     use crate::cache::StandardCellCache;
+    use crate::runtime::test::{TestExecutor, TestRuntime};
 
-    fn make_rt() -> Runtime {
-        Builder::new_current_thread().enable_time().build().unwrap()
-    }
+    fn run_test<F>(f: impl FnOnce(TestRuntime) -> F)
+    where
+        F: 'static + Send + Future,
+        F::Output: 'static + Send,
+    {
+        let mut exec = TestExecutor::default();
 
-    const TIMEOUT: Duration = Duration::from_secs(1);
+        let rt = exec.runtime();
+        rt.spawn(f(rt.clone()));
 
-    fn spawn(
-        f: impl Future<Output = ()> + Send + 'static,
-    ) -> impl Future<Output = Result<(), JoinError>> {
-        #[pin_project(PinnedDrop)]
-        struct Wrapper(#[pin] JoinHandle<()>);
-
-        #[pinned_drop]
-        impl PinnedDrop for Wrapper {
-            fn drop(self: Pin<&mut Self>) {
-                if std::thread::panicking() {
-                    self.0.abort();
-                }
-            }
-        }
-
-        impl Future for Wrapper {
-            type Output = Result<(), JoinError>;
-
-            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                self.project().0.poll(cx)
-            }
-        }
-
-        Wrapper(tokio::spawn(async move {
-            timeout(TIMEOUT, f).await.expect("timeout");
-        }))
-    }
-
-    fn run_test(rt: &Runtime, f: impl Future<Output = ()> + Send + 'static) {
-        rt.block_on(async move {
-            timeout(TIMEOUT, f).await.expect("timeout");
-        });
-    }
-
-    fn id() -> u64 {
-        static ID: AtomicU64 = AtomicU64::new(0);
-        ID.fetch_add(1, Relaxed)
+        exec.run_tasks_until_finished();
     }
 
     fn data_strat() -> impl Strategy<Value = (Vec<u8>, Vec<usize>)> {
@@ -681,18 +868,32 @@ mod tests {
     }
 
     const CIRC_ID: NonZeroU32 = NonZeroU32::new(465620).unwrap();
-    const STREAM_ID: NonZeroU16 = NonZeroU16::new(561).unwrap();
+    const STREAM_ID: GenerationalData<NonZeroU16> =
+        GenerationalData::new(NonZeroU16::new(561).unwrap(), 485283);
 
-    fn new_stream(cache: CacheTy) -> (DirStream, Sender<CachedCell>, Receiver<CachedCell>) {
-        let (s1, r1) = bounded(4);
-        let (s2, r2) = bounded(4);
+    type CacheTy = Arc<StandardCellCache>;
+
+    fn new_stream(
+        rt: &TestRuntime,
+        cache: CacheTy,
+    ) -> (
+        DirStream<
+            CacheTy,
+            <TestRuntime as Runtime>::MPSCSender<CachedCell<CacheTy>>,
+            <TestRuntime as Runtime>::SPSCReceiver<CachedCell<CacheTy>>,
+        >,
+        <TestRuntime as Runtime>::SPSCSender<CachedCell<CacheTy>>,
+        <TestRuntime as Runtime>::MPSCReceiver<CachedCell<CacheTy>>,
+    ) {
+        let (s1, r1) = rt.spsc_make(4);
+        let (s2, r2) = rt.mpsc_make(4);
         (
-            DirStream::new(
+            open_dir_stream::<CacheTy, TestRuntime>(
                 cache,
                 NewStream {
                     circ_id: CIRC_ID,
                     inner: NewHandler {
-                        id: STREAM_ID.into(),
+                        id: STREAM_ID,
                         receiver: r1,
                         sender: s2,
                     },
@@ -703,24 +904,59 @@ mod tests {
         )
     }
 
+    #[instrument(skip_all)]
+    async fn handle_init_stream<S, R>(cache: &CacheTy, mut send: Pin<&mut S>, mut recv: Pin<&mut R>)
+    where
+        S: Sink<CachedCell<CacheTy>, Error = SendError<CachedCell<CacheTy>>>,
+        R: Stream<Item = CachedCell<CacheTy>>,
+    {
+        {
+            let cell = recv
+                .next()
+                .await
+                .expect("should be sending RELAY_BEGIN_DIR cell");
+            let mut cell = Cached::map(cell, |c| Some(c.into_inner()));
+            let Some(cell) = cast::<RelayBeginDir>(&mut cell, RelayVersion::V0).unwrap() else {
+                panic!(
+                    "unknown cell with command {}",
+                    Cached::transpose(cell).unwrap().command()
+                );
+            };
+            cache.discard(cell);
+        }
+
+        {
+            let cell = <_>::try_into_relay_cached(
+                cache.cache(RelayConnected::new_empty(
+                    cache.get_cached(),
+                    STREAM_ID.inner,
+                )),
+                CIRC_ID,
+                RelayVersion::V0,
+            )
+            .unwrap();
+            send.send(gen_cached(cell, &STREAM_ID)).await.unwrap();
+        }
+
+        debug!("handshake done");
+    }
+
     #[test]
     fn test_read() {
-        let rt = make_rt();
-        let cache: CacheTy = Arc::new(StandardCellCache::default());
+        let cache = CacheTy::default();
 
-        #[instrument(name = "test_read", skip_all, fields(id = id))]
-        async fn f(id: u64, cache: CacheTy, data: (Vec<u8>, Vec<usize>)) {
+        async fn f(rt: TestRuntime, cache: CacheTy, data: (Vec<u8>, Vec<usize>)) {
             let data = Arc::new(data);
-            let (stream, send, recv) = new_stream(cache.clone());
+            let (stream, send, recv) = new_stream(&rt, cache.clone());
 
-            let handle = spawn({
-                let span = info_span!("send_data");
-                span.follows_from(Span::current());
-
+            rt.spawn({
                 let data = data.clone();
                 async move {
+                    let mut send = pin!(send);
+                    let mut recv = pin!(recv);
+                    handle_init_stream(&cache, send.as_mut(), recv.as_mut()).await;
+
                     info!("sending data");
-                    let mut send = send.into_sink();
                     let mut s = &data.0[..];
                     for &i in &data.1 {
                         let b;
@@ -730,11 +966,15 @@ mod tests {
                         }
 
                         info!("sending {} bytes", b.len());
-                        let cell = RelayData::new(cache.get_cached(), STREAM_ID, b)
-                            .unwrap()
-                            .try_into_relay(CIRC_ID, RelayVersion::V0)
-                            .unwrap();
-                        send.feed(cache.cache(cell)).await.unwrap();
+                        let cell = <_>::try_into_relay_cached(
+                            cache.cache(
+                                RelayData::new(cache.get_cached(), STREAM_ID.inner, b).unwrap(),
+                            ),
+                            CIRC_ID,
+                            RelayVersion::V0,
+                        )
+                        .unwrap();
+                        send.feed(gen_cached(cell, &STREAM_ID)).await.unwrap();
                         if s.is_empty() {
                             break;
                         }
@@ -744,19 +984,22 @@ mod tests {
                         let b;
                         (b, s) = s.split_at(RELAY_DATA_LENGTH.min(s.len()));
                         info!("sending {} bytes", b.len());
-                        let cell = RelayData::new(cache.get_cached(), STREAM_ID, b)
-                            .unwrap()
-                            .try_into_relay(CIRC_ID, RelayVersion::V0)
-                            .unwrap();
-                        send.feed(cache.cache(cell)).await.unwrap();
+                        let cell = <_>::try_into_relay_cached(
+                            cache.cache(
+                                RelayData::new(cache.get_cached(), STREAM_ID.inner, b).unwrap(),
+                            ),
+                            CIRC_ID,
+                            RelayVersion::V0,
+                        )
+                        .unwrap();
+                        send.feed(gen_cached(cell, &STREAM_ID)).await.unwrap();
                     }
                     send.flush().await.unwrap();
                     debug!("send done");
 
-                    let mut recv = recv.into_stream();
                     let mut cell = Cached::map(
                         recv.next().await.expect("should be sending closing cell"),
-                        Some,
+                        |c| Some(c.into_inner()),
                     );
                     let Some(cell) = cast::<RelayEnd>(&mut cell, RelayVersion::V0).unwrap() else {
                         panic!(
@@ -767,7 +1010,6 @@ mod tests {
                     cache.discard(cell);
                     info!("received end cell");
                 }
-                .instrument(span)
             });
 
             info!("reading data");
@@ -792,31 +1034,27 @@ mod tests {
             info!("closing");
             stream.close().await.unwrap();
             debug!("close success");
-
-            handle.await.unwrap();
         }
 
-        proptest!(move |(data in data_strat())| run_test(&rt, f(id(), cache.clone(), data)));
+        proptest!(move |(data in data_strat())| run_test(|rt| f(rt, cache.clone(), data)));
     }
 
     #[test]
     fn test_read_vectored() {
-        let rt = make_rt();
-        let cache: CacheTy = Arc::new(StandardCellCache::default());
+        let cache = CacheTy::default();
 
-        #[instrument(name = "test_read_vectored", skip_all, fields(id = id))]
-        async fn f(id: u64, cache: CacheTy, data: (Vec<u8>, Vec<usize>)) {
+        async fn f(rt: TestRuntime, cache: CacheTy, data: (Vec<u8>, Vec<usize>)) {
             let data = Arc::new(data);
-            let (stream, send, recv) = new_stream(cache.clone());
+            let (stream, send, recv) = new_stream(&rt, cache.clone());
 
-            let handle = spawn({
-                let span = info_span!("send_data");
-                span.follows_from(Span::current());
-
+            rt.spawn({
                 let data = data.clone();
                 async move {
+                    let mut send = pin!(send);
+                    let mut recv = pin!(recv);
+                    handle_init_stream(&cache, send.as_mut(), recv.as_mut()).await;
+
                     info!("sending data");
-                    let mut send = send.into_sink();
                     let mut s = &data.0[..];
                     for &i in &data.1 {
                         let b;
@@ -826,11 +1064,15 @@ mod tests {
                         }
 
                         info!("sending {} bytes", b.len());
-                        let cell = RelayData::new(cache.get_cached(), STREAM_ID, b)
-                            .unwrap()
-                            .try_into_relay(CIRC_ID, RelayVersion::V0)
-                            .unwrap();
-                        send.feed(cache.cache(cell)).await.unwrap();
+                        let cell = <_>::try_into_relay_cached(
+                            cache.cache(
+                                RelayData::new(cache.get_cached(), STREAM_ID.inner, b).unwrap(),
+                            ),
+                            CIRC_ID,
+                            RelayVersion::V0,
+                        )
+                        .unwrap();
+                        send.feed(gen_cached(cell, &STREAM_ID)).await.unwrap();
                         if s.is_empty() {
                             break;
                         }
@@ -840,19 +1082,22 @@ mod tests {
                         let b;
                         (b, s) = s.split_at(RELAY_DATA_LENGTH.min(s.len()));
                         info!("sending {} bytes", b.len());
-                        let cell = RelayData::new(cache.get_cached(), STREAM_ID, b)
-                            .unwrap()
-                            .try_into_relay(CIRC_ID, RelayVersion::V0)
-                            .unwrap();
-                        send.feed(cache.cache(cell)).await.unwrap();
+                        let cell = <_>::try_into_relay_cached(
+                            cache.cache(
+                                RelayData::new(cache.get_cached(), STREAM_ID.inner, b).unwrap(),
+                            ),
+                            CIRC_ID,
+                            RelayVersion::V0,
+                        )
+                        .unwrap();
+                        send.feed(gen_cached(cell, &STREAM_ID)).await.unwrap();
                     }
                     send.flush().await.unwrap();
                     debug!("send done");
 
-                    let mut recv = recv.into_stream();
                     let mut cell = Cached::map(
                         recv.next().await.expect("should be sending closing cell"),
-                        Some,
+                        |c| Some(c.into_inner()),
                     );
                     let Some(cell) = cast::<RelayEnd>(&mut cell, RelayVersion::V0).unwrap() else {
                         panic!(
@@ -863,7 +1108,6 @@ mod tests {
                     cache.discard(cell);
                     info!("received end cell");
                 }
-                .instrument(span)
             });
 
             info!("reading data");
@@ -898,27 +1142,20 @@ mod tests {
             info!("closing");
             stream.close().await.unwrap();
             debug!("close success");
-
-            handle.await.unwrap();
         }
 
-        proptest!(move |(data in data_strat())| run_test(&rt, f(id(), cache.clone(), data)));
+        proptest!(move |(data in data_strat())| run_test(|rt| f(rt, cache.clone(), data)));
     }
 
     #[test]
     fn test_write() {
-        let rt = make_rt();
-        let cache: CacheTy = Arc::new(StandardCellCache::default());
+        let cache = CacheTy::default();
 
-        #[instrument(name = "test_write", skip_all, fields(id = id))]
-        async fn f(id: u64, cache: CacheTy, data: (Vec<u8>, Vec<usize>)) {
+        async fn f(rt: TestRuntime, cache: CacheTy, data: (Vec<u8>, Vec<usize>)) {
             let data = Arc::new(data);
-            let (stream, send, recv) = new_stream(cache.clone());
+            let (stream, send, recv) = new_stream(&rt, cache.clone());
 
-            let handle = spawn({
-                let span = info_span!("send_data");
-                span.follows_from(Span::current());
-
+            rt.spawn({
                 let data = data.clone();
                 async move {
                     let mut stream = pin!(stream);
@@ -949,18 +1186,20 @@ mod tests {
                     stream.as_mut().close().await.unwrap();
                     debug!("close done");
                 }
-                .instrument(span)
             });
 
+            let mut send = pin!(send);
+            let mut recv = pin!(recv);
+            handle_init_stream(&cache, send.as_mut(), recv.as_mut()).await;
+
             info!("reading data");
-            let mut recv = recv.into_stream();
             let mut v = vec![0; data.0.len()];
             let mut n = 0;
             while n < v.len() {
                 let cell = {
                     let mut cell = Cached::map(
                         recv.next().await.expect("stream should not be dropped"),
-                        Some,
+                        |c| Some(c.into_inner()),
                     );
                     let Some(cell) = cast::<RelayData>(&mut cell, RelayVersion::V0).unwrap() else {
                         panic!(
@@ -968,7 +1207,7 @@ mod tests {
                             Cached::transpose(cell).unwrap().command()
                         );
                     };
-                    (*cache).cache_b(cell)
+                    cache.cache_b(cell)
                 };
                 let data = cell.data();
                 v[n..n + data.len()].copy_from_slice(data);
@@ -978,33 +1217,32 @@ mod tests {
 
             assert_eq!(v, data.0);
             info!("closing");
-            let mut send = send.into_sink();
-            let cell = RelayEnd::new(cache.get_cached(), STREAM_ID, EndReason::default())
-                .try_into_relay(CIRC_ID, RelayVersion::V0)
-                .unwrap();
-            send.send(cache.cache(cell)).await.unwrap();
+            let cell = <_>::try_into_relay_cached(
+                cache.cache(RelayEnd::new(
+                    cache.get_cached(),
+                    STREAM_ID.inner,
+                    EndReason::default(),
+                )),
+                CIRC_ID,
+                RelayVersion::V0,
+            )
+            .unwrap();
+            send.send(gen_cached(cell, &STREAM_ID)).await.unwrap();
             debug!("close success");
-
-            handle.await.unwrap();
         }
 
-        proptest!(move |(data in data_strat())| run_test(&rt, f(id(), cache.clone(), data)));
+        proptest!(move |(data in data_strat())| run_test(|rt| f(rt, cache.clone(), data)));
     }
 
     #[test]
     fn test_write_vectored() {
-        let rt = make_rt();
-        let cache: CacheTy = Arc::new(StandardCellCache::default());
+        let cache = CacheTy::default();
 
-        #[instrument(name = "test_write_vectored", skip_all, fields(id = id))]
-        async fn f(id: u64, cache: CacheTy, data: (Vec<u8>, Vec<usize>)) {
+        async fn f(rt: TestRuntime, cache: CacheTy, data: (Vec<u8>, Vec<usize>)) {
             let data = Arc::new(data);
-            let (stream, send, recv) = new_stream(cache.clone());
+            let (stream, send, recv) = new_stream(&rt, cache.clone());
 
-            let handle = spawn({
-                let span = info_span!("send_data");
-                span.follows_from(Span::current());
-
+            rt.spawn({
                 let data = data.clone();
                 async move {
                     let mut stream = pin!(stream);
@@ -1035,18 +1273,20 @@ mod tests {
                     debug!("close done");
                     stream.as_mut().close().await.unwrap();
                 }
-                .instrument(span)
             });
 
+            let mut send = pin!(send);
+            let mut recv = pin!(recv);
+            handle_init_stream(&cache, send.as_mut(), recv.as_mut()).await;
+
             info!("reading data");
-            let mut recv = recv.into_stream();
             let mut v = vec![0; data.0.len()];
             let mut n = 0;
             while n < v.len() {
                 let cell = {
                     let mut cell = Cached::map(
                         recv.next().await.expect("stream should not be dropped"),
-                        Some,
+                        |c| Some(c.into_inner()),
                     );
                     let Some(cell) = cast::<RelayData>(&mut cell, RelayVersion::V0).unwrap() else {
                         panic!(
@@ -1054,7 +1294,7 @@ mod tests {
                             Cached::transpose(cell).unwrap().command()
                         );
                     };
-                    (*cache).cache_b(cell)
+                    cache.cache_b(cell)
                 };
                 let data = cell.data();
                 v[n..n + data.len()].copy_from_slice(data);
@@ -1065,16 +1305,20 @@ mod tests {
 
             assert_eq!(v, data.0);
             info!("closing");
-            let mut send = send.into_sink();
-            let cell = RelayEnd::new(cache.get_cached(), STREAM_ID, EndReason::default())
-                .try_into_relay(CIRC_ID, RelayVersion::V0)
-                .unwrap();
-            send.send(cache.cache(cell)).await.unwrap();
+            let cell = <_>::try_into_relay_cached(
+                cache.cache(RelayEnd::new(
+                    cache.get_cached(),
+                    STREAM_ID.inner,
+                    EndReason::default(),
+                )),
+                CIRC_ID,
+                RelayVersion::V0,
+            )
+            .unwrap();
+            send.send(gen_cached(cell, &STREAM_ID)).await.unwrap();
             debug!("close success");
-
-            handle.await.unwrap();
         }
 
-        proptest!(move |(data in data_strat())| run_test(&rt, f(id(), cache.clone(), data)));
+        proptest!(move |(data in data_strat())| run_test(|rt| f(rt, cache.clone(), data)));
     }
 }

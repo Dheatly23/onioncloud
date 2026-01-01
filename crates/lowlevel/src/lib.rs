@@ -7,7 +7,7 @@ pub mod errors;
 pub mod linkver;
 pub mod parse;
 pub mod runtime;
-//pub mod stream;
+pub mod stream;
 pub mod util;
 
 pub(crate) mod private {

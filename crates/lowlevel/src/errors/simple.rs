@@ -331,10 +331,16 @@ impl CircuitHandshakeError {
 /// Channel is closed.
 #[derive(Error)]
 #[error("channel is closed")]
-#[non_exhaustive]
 pub struct ChannelClosedError;
 
 display2debug! {ChannelClosedError}
+
+/// Circuit is closed.
+#[derive(Error)]
+#[error("circuit is closed")]
+pub struct CircuitClosedError;
+
+display2debug! {CircuitClosedError}
 
 pub(crate) enum NetdocParseErrorType {
     InvalidKeywordChar,

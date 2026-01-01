@@ -24,7 +24,7 @@ use futures_io::{AsyncRead, AsyncWrite};
 use pin_project::pin_project;
 use scopeguard::guard_on_unwind;
 
-use crate::cache::{Cachable, CellCache};
+use crate::cache::{Cachable, Cached, CellCache};
 use crate::crypto::EdPublicKey;
 use crate::runtime::{Runtime, Timer};
 pub use buffer::*;
@@ -454,10 +454,13 @@ pub(crate) const fn c_max_usize(a: usize, b: usize) -> usize {
     if a >= b { a } else { b }
 }
 
+/// [`GenerationalData`] generation type.
+pub type GenerationTy = u64;
+
 /// Data type wrapping data with  generational reference.
 pub struct GenerationalData<T: ?Sized> {
     /// Generation value.
-    pub generation: u64,
+    pub generation: GenerationTy,
 
     /// Wrapped value.
     pub inner: T,
@@ -545,7 +548,7 @@ impl<T: Cachable> Cachable for GenerationalData<T> {
 impl<T> GenerationalData<T> {
     /// Create new [`GenerationalData`].
     #[inline]
-    pub const fn new(value: T, generation: u64) -> Self {
+    pub const fn new(value: T, generation: GenerationTy) -> Self {
         Self {
             generation,
             inner: value,
@@ -562,13 +565,13 @@ impl<T> GenerationalData<T> {
 impl<T: ?Sized> GenerationalData<T> {
     /// Gets generation value.
     #[inline(always)]
-    pub const fn generation(&self) -> u64 {
+    pub const fn generation(&self) -> GenerationTy {
         self.generation
     }
 
     /// Sets generation value.
     #[inline(always)]
-    pub const fn set_generation(&mut self, generation: u64) {
+    pub const fn set_generation(&mut self, generation: GenerationTy) {
         self.generation = generation;
     }
 
@@ -595,6 +598,16 @@ impl<T: ?Sized> GenerationalData<T> {
             inner: f(self.inner),
         }
     }
+}
+
+/// Transform `Cached<T, C>` into `Cached<GenerationalData<T>, C>`
+pub(crate) fn gen_cached<T: Cachable, C: CellCache, U>(
+    value: Cached<T, C>,
+    generation: &GenerationalData<U>,
+) -> Cached<GenerationalData<T>, C> {
+    Cached::map(value, |value| {
+        GenerationalData::new(value, generation.generation)
+    })
 }
 
 #[cfg(test)]
