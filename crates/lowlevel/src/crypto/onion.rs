@@ -296,7 +296,7 @@ pub struct OnionLayerData {
 /// use std::sync::Arc;
 ///
 /// use onioncloud_lowlevel::crypto::onion::OnionLayerFast;
-/// use onioncloud_lowlevel::cache::StandardCellCache;
+/// use onioncloud_lowlevel::cache::{StandardCellCache, CellCacheExt};
 ///
 /// let cache = Arc::<StandardCellCache>::default();
 /// let id = std::num::NonZeroU32::new(1).unwrap();
@@ -305,7 +305,7 @@ pub struct OnionLayerData {
 /// let client = OnionLayerFast::new();
 ///
 /// // Send CREATE2 cell to server
-/// let cell = client.create_cell(id, &cache);
+/// let cell = cache.cache(client.create_cell(id, &cache));
 ///
 /// // Start server and send CREATED2 cell to client
 /// let (server, cell) = OnionLayerFast::derive_server_cached(&cell).unwrap();

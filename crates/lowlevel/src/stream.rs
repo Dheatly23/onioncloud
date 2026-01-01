@@ -847,7 +847,6 @@ mod tests {
     use std::pin::pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering::*};
-    use std::time::Duration;
 
     use futures_util::{AsyncReadExt as _, SinkExt as _, StreamExt as _};
     use proptest::collection::vec;

@@ -86,8 +86,9 @@ impl<K: Hash + Eq, R: Runtime, Cell: 'static + Send, Meta> CellMap<K, R, Cell, M
     /// ```
     /// use onioncloud_lowlevel::util::cell_map::CellMap;
     /// use onioncloud_lowlevel::cell::Cell;
+    /// use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
     ///
-    /// let circ_map = CellMap::<Cell>::new(16, 16);
+    /// let circ_map = CellMap::<u32, TokioRuntime, Cell, ()>::new(&TokioRuntime, 16, 16);
     /// ```
     pub fn new(runtime: &R, handler_cap: usize, aggregate_cap: usize) -> Self {
         assert_ne!(handler_cap, 0, "handler channel size is zero");
@@ -1131,7 +1132,6 @@ mod tests {
 
     use std::future::Future;
     use std::pin::pin;
-    use std::time::{Duration, Instant};
 
     use futures_util::{SinkExt as _, StreamExt as _};
     use tracing::{Instrument as _, info, info_span, instrument};
