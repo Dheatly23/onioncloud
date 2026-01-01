@@ -9,16 +9,16 @@ use futures_util::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{sleep, timeout};
 use tracing::{info, warn};
 
-use onioncloud_lowlevel::cache::{CellCache, StandardCellCache};
+use onioncloud_lowlevel::cache::StandardCellCache;
 use onioncloud_lowlevel::cell::padding::{NegotiateCommand, NegotiateCommandV0};
 use onioncloud_lowlevel::channel::ChannelConfig;
 use onioncloud_lowlevel::channel::controller::{UserConfig, UserControlMsg, UserController};
-use onioncloud_lowlevel::channel::manager::ChannelManager;
+use onioncloud_lowlevel::channel::manager::SingleManager as ChannelManager;
 use onioncloud_lowlevel::circuit::controller::dir::{DirConfig, DirControlMsg, DirController};
-use onioncloud_lowlevel::circuit::manager::SingleManager;
+use onioncloud_lowlevel::circuit::manager::SingleManager as CircuitManager;
 use onioncloud_lowlevel::crypto::relay::{RelayId, from_str as relay_from_str};
 use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
-use onioncloud_lowlevel::stream::DirStream;
+use onioncloud_lowlevel::stream::open_dir_stream;
 
 #[tokio::main]
 async fn main() {
@@ -61,8 +61,10 @@ async fn main() {
     }
 
     impl UserConfig for Config {
-        fn get_cache(&self) -> Arc<dyn Send + Sync + CellCache> {
-            self.cache.clone()
+        type Cache = Arc<StandardCellCache>;
+
+        fn get_cache(&self) -> &Self::Cache {
+            &self.cache
         }
 
         fn get_padding_param(&self, _: u16) -> NegotiateCommand {
@@ -74,8 +76,7 @@ async fn main() {
     }
 
     let cache = Arc::<StandardCellCache>::default();
-
-    let mut v = ChannelManager::<_, UserController<Config>>::new(TokioRuntime);
+    let rt = TokioRuntime;
 
     info!("creating channel");
 
@@ -84,15 +85,17 @@ async fn main() {
         addrs: addrs.into(),
         cache: cache.clone(),
     };
-    let mut channel = v.create(cfg, ());
+    let mut channel = pin!(ChannelManager::<UserController<_, _>>::new(&rt, cfg));
 
     struct ConfigDir {
-        cache: Arc<dyn Send + Sync + CellCache>,
+        cache: Arc<StandardCellCache>,
     }
 
     impl DirConfig for ConfigDir {
-        fn get_cache(&self) -> Arc<dyn Send + Sync + CellCache> {
-            self.cache.clone()
+        type Cache = Arc<StandardCellCache>;
+
+        fn get_cache(&self) -> &Self::Cache {
+            &self.cache
         }
     }
 
@@ -101,9 +104,11 @@ async fn main() {
     let cfg = ConfigDir {
         cache: cache.clone(),
     };
-    let (new_circ, mut circuit) =
-        SingleManager::<_, DirController<ConfigDir>>::new(TokioRuntime, cfg, ());
+    let (new_circ, circuit) = CircuitManager::<DirController<_, _>>::new(&rt, cfg);
+    let mut circuit = pin!(circuit);
     channel
+        .as_mut()
+        .as_ref()
         .send_control(UserControlMsg::NewCircuit(new_circ))
         .await
         .unwrap();
@@ -112,10 +117,10 @@ async fn main() {
 
     let new_stream = {
         let (recv, msg) = DirControlMsg::new_stream();
-        circuit.into_ref().send_control(msg).await.unwrap();
+        circuit.as_mut().as_ref().send_control(msg).await.unwrap();
         recv.await.expect("new stream result should exist").unwrap()
     };
-    let mut stream = pin!(DirStream::new(cache.clone(), new_stream));
+    let mut stream = pin!(open_dir_stream(cache.clone(), new_stream));
 
     info!("sleeping for 5 seconds");
     sleep(Duration::from_secs(5)).await;
@@ -152,18 +157,16 @@ async fn main() {
     info!("starting graceful shutdown");
 
     stream.close().await.unwrap();
-    drop(stream);
     circuit
-        .into_ref()
+        .as_ref()
         .send_and_completion(DirControlMsg::Shutdown)
         .await
         .unwrap();
-    drop(circuit);
     channel
+        .as_ref()
         .send_and_completion(UserControlMsg::Shutdown)
         .await
         .unwrap();
-    drop(channel);
 
     info!("shutdown successful");
 }
