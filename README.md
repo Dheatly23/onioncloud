@@ -13,6 +13,16 @@ The aim of this project is to:
 2. Implement gateway towards already existing web server.
 3. Implement workers library that can be seamlessly integrated into ordinary Rust web server.
 
+## State of the Project
+
+In short: can connect to relay, open directory stream, and fetch data.
+
+You can run `simple_dir_request` example. It will connect to a relay and fetch consensus file.
+
+```
+RELAY_ID=<id> RELAY_ADDRS=<addr>,<addr> cargo run -p onioncloud-lowlevel --example simple_dir_request
+```
+
 ## Plan
 
 1. Essentially rewrite Arti (again).
@@ -87,4 +97,4 @@ Our policy in designing this project is as follows:
 - No async trait/AFIT, it's PITA to reason about.
 - `zerocopy` for parsing packets/cells.
 
-Future contributors _must_ follows these policy. Future ones might be added.
+Future contributors generally should follows these policy. Future ones might be added.
