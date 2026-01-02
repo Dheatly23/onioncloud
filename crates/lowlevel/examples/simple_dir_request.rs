@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use futures_util::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{sleep, timeout};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use onioncloud_lowlevel::cache::StandardCellCache;
 use onioncloud_lowlevel::cell::padding::{NegotiateCommand, NegotiateCommandV0};
@@ -22,7 +22,14 @@ use onioncloud_lowlevel::stream::open_dir_stream;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
+        .with_writer(std::io::stderr)
+        .init();
 
     let id = match var("RELAY_ID") {
         Ok(v) => relay_from_str(&v).unwrap(),
@@ -148,8 +155,14 @@ async fn main() {
     {
         warn!("timed out");
     }
-    info!("read response: {}", String::from_utf8_lossy(&s));
-    drop(s);
+
+    let s = match String::from_utf8(s) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("UTF8 conversion error: {e}");
+            String::new()
+        }
+    };
 
     info!("sleeping for 5 seconds");
     sleep(Duration::from_secs(5)).await;
@@ -169,4 +182,6 @@ async fn main() {
         .unwrap();
 
     info!("shutdown successful");
+
+    println!("{s}");
 }
