@@ -54,6 +54,7 @@ pub struct DirStream<Cache, Send, Recv> {
     send_buf_len: usize,
 
     state: State,
+    end_reason: Option<EndReason>,
 }
 
 #[pin_project(!Unpin, project = DirStreamInnerProj)]
@@ -68,10 +69,13 @@ struct DirStreamInner<Cache, Send, Recv> {
 }
 
 enum State {
+    /// Init state. Must call `poll_init` to finish initialization.
     Init(InitState),
-    InitShutdown(InitState, EndReason),
+    /// Normal operation. `end_reason` must be None.
     Normal,
-    ShutdownRequest(EndReason),
+    /// Shutdown request. Write buffer flushing happened here.
+    ShutdownRequest,
+    /// Shutdown sequence. All data must be flushed, and any remaining ones will be discarded.
     Shutdown,
 }
 
@@ -129,6 +133,7 @@ impl<
             send_buf_len: 0,
 
             state: State::Init(state),
+            end_reason: None,
         }
     }
 
@@ -137,12 +142,17 @@ impl<
     /// Using [`Self::poll_close`] does not give any reason.
     /// Use this to provide explicit reason instead.
     pub fn close_with(self: Pin<&mut Self>, reason: EndReason) {
-        let state = self.project().state;
+        let DirStreamProj {
+            state, end_reason, ..
+        } = self.project();
         match state {
-            State::Normal => *state = State::ShutdownRequest(reason),
-            State::Init(init) => *state = State::InitShutdown(init.clone(), reason),
-            _ => (),
+            State::Normal => *state = State::ShutdownRequest,
+            State::Init(_) => (),
+            State::Shutdown | State::ShutdownRequest => return,
         }
+
+        debug_assert!(end_reason.is_none(), "end reason is not None");
+        *end_reason = Some(reason);
     }
 
     /// Async wrapper for [`Self::close_with`].
@@ -155,36 +165,42 @@ impl<
     /// Returns `true` if stream is closing.
     pub fn is_closed(&self) -> bool {
         matches!(
-            self.state,
-            State::InitShutdown(_, _) | State::ShutdownRequest(_) | State::Shutdown
+            self,
+            Self {
+                state: State::Shutdown | State::ShutdownRequest,
+                ..
+            } | Self {
+                end_reason: Some(_),
+                ..
+            },
         )
     }
 
     fn poll_init(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
         let DirStreamProj { inner, state, .. } = self.project();
-        let (init, reason) = match state {
-            State::Init(init) => (init, None),
-            State::InitShutdown(init, reason) => (init, Some(reason)),
-            _ => return Ready(Ok(())),
+        let State::Init(init) = state else {
+            return Ready(Ok(()));
         };
 
         *state = if ready!(init.run_init(inner, cx))? {
-            if let Some(reason) = reason {
-                State::ShutdownRequest(reason.clone())
-            } else {
-                State::Shutdown
-            }
+            State::Shutdown
         } else {
             State::Normal
         };
         Ready(Ok(()))
     }
 
+    #[instrument(skip_all)]
     fn poll_read_until_data(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<IoResult<Option<RelayData>>> {
-        let DirStreamProj { inner, state, .. } = self.as_mut().project();
+        let DirStreamProj {
+            inner,
+            state,
+            end_reason,
+            ..
+        } = self.as_mut().project();
         let DirStreamInnerProj {
             circ_id: &mut circ_id,
             stream_id: &mut ref stream_id,
@@ -192,16 +208,15 @@ impl<
             mut recv,
             ..
         } = inner.project();
-        debug_assert!(
-            !matches!(state, State::Init(_) | State::InitShutdown(_, _)),
-            "state is init"
-        );
+        debug_assert!(!matches!(state, State::Init(_)), "state is init");
 
         if !matches!(state, State::Normal) {
             // Stream closing
-            ready!(self.poll_close(cx))?;
+            ready!(self.close_inner(cx))?;
             return Ready(Ok(None));
         }
+
+        debug_assert!(end_reason.is_none(), "end reason is not None");
 
         while let Some(cell) = ready!(recv.as_mut().poll_next(cx)) {
             debug_assert_eq!(cell.generation, stream_id.generation);
@@ -223,8 +238,10 @@ impl<
                 // RELAY_END cell
                 let reason = cache.cache_b(cell).reason();
                 info!(%reason, "stream closed");
-                *state = State::Shutdown;
-                ready!(self.poll_close(cx))?;
+
+                // Ensure remaining data is flushed.
+                *state = State::ShutdownRequest;
+                ready!(self.close_inner(cx))?;
                 break;
             } else if let Some(cell) =
                 cast::<RelayDrop>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
@@ -245,6 +262,7 @@ impl<
         Ready(Ok(None))
     }
 
+    #[instrument(skip_all)]
     fn poll_flush_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
         let DirStreamProj {
             inner,
@@ -260,10 +278,7 @@ impl<
             mut send,
             ..
         } = inner.project();
-        debug_assert!(
-            !matches!(state, State::Init(_) | State::InitShutdown(_, _)),
-            "state is init"
-        );
+        debug_assert!(!matches!(state, State::Init(_)), "state is init");
 
         if *send_buf_len == 0 {
             return Ready(Ok(()));
@@ -289,6 +304,69 @@ impl<
         debug!("failed to flush buffer");
         *state = State::Shutdown;
         Ready(Err(IoError::new(ErrorKind::WriteZero, CircuitClosedError)))
+    }
+
+    #[instrument(skip_all)]
+    fn close_inner(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
+        debug_assert!(!matches!(self.state, State::Init(_)), "state is init");
+
+        loop {
+            let DirStreamProj {
+                inner,
+                state,
+                end_reason,
+                send_buf_len: &mut ref send_buf_len,
+                ..
+            } = self.as_mut().project();
+            let DirStreamInnerProj {
+                circ_id: &mut circ_id,
+                stream_id: &mut ref stream_id,
+                cache: &mut ref cache,
+                mut send,
+                mut recv,
+                ..
+            } = inner.project();
+
+            // Read and drop all cells
+            while let Ready(Some(_)) = recv.as_mut().poll_next(cx) {}
+
+            match state {
+                State::Normal => {
+                    debug_assert!(end_reason.is_none(), "end reason is not None");
+                    *state = State::ShutdownRequest;
+                    *end_reason = Some(EndReason::Done);
+                }
+                State::ShutdownRequest => {
+                    if *send_buf_len > 0 {
+                        // Requesting closing, but there are data in write buffer.
+                        ready!(self.as_mut().poll_flush_buf(cx)?);
+                    } else {
+                        // Flushing done, set state to shutdown.
+                        *state = State::Shutdown;
+                    }
+                }
+                State::Shutdown => {
+                    if handle_write_err(ready!(send.as_mut().poll_flush(cx))) {
+                        break;
+                    }
+                    let Some(reason) = end_reason.take() else {
+                        break;
+                    };
+                    let cell = <_>::try_into_relay_cached(
+                        cache.cache(RelayEnd::new(cache.get_cached(), stream_id.inner, reason)),
+                        circ_id,
+                        RelayVersion::V0,
+                    )
+                    .unwrap();
+                    if handle_write_err(send.as_mut().start_send(gen_cached(cell, stream_id))) {
+                        break;
+                    }
+                }
+                State::Init(_) => unreachable!("state must not be init"),
+            }
+        }
+
+        Ready(Ok(()))
     }
 }
 
@@ -434,7 +512,7 @@ impl<
             // Fill buffer
             if !matches!(self.state, State::Normal) {
                 // Stream closing
-                ready!(self.as_mut().poll_close(cx))?;
+                ready!(self.as_mut().close_inner(cx))?;
             } else if let Some(cell) = ready!(self.as_mut().poll_read_until_data(cx))? {
                 let DirStreamProj {
                     inner,
@@ -491,8 +569,8 @@ impl<
         ready!(self.as_mut().poll_init(cx))?;
 
         let n = if !matches!(self.state, State::Normal) {
-            // Stream is closed. Reuse poll_close
-            ready!(self.poll_close(cx))?;
+            // Stream closing
+            ready!(self.close_inner(cx))?;
             0
         } else if self.send_buf_len.saturating_add(buf.len()) >= RELAY_DATA_LENGTH {
             // Avoids copying to buffer
@@ -568,8 +646,8 @@ impl<
         ready!(self.as_mut().poll_init(cx))?;
 
         let n = if !matches!(self.state, State::Normal) {
-            // Stream is closed. Reuse poll_close
-            ready!(self.poll_close(cx))?;
+            // Stream closing
+            ready!(self.close_inner(cx))?;
             0
         } else {
             let DirStreamProj {
@@ -663,57 +741,7 @@ impl<
     #[instrument(level = "trace", skip_all, fields(circ_id = self.inner.circ_id, stream_id = self.inner.stream_id.inner))]
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
         ready!(self.as_mut().poll_init(cx))?;
-
-        if !matches!(self.state, State::Shutdown) && self.send_buf_len > 0 {
-            // Requesting closing, but there are data in write buffer.
-            ready!(self.as_mut().poll_flush_buf(cx)?);
-        }
-
-        let DirStreamProj { inner, state, .. } = self.project();
-        let DirStreamInnerProj {
-            circ_id: &mut circ_id,
-            stream_id: &mut ref stream_id,
-            cache: &mut ref cache,
-            mut send,
-            mut recv,
-            ..
-        } = inner.project();
-
-        loop {
-            // Read and drop all cells
-            while let Ready(Some(_)) = recv.as_mut().poll_next(cx) {}
-
-            match state {
-                State::Normal => *state = State::ShutdownRequest(EndReason::Done),
-                State::Shutdown => {
-                    handle_write_err(ready!(send.as_mut().poll_flush(cx)));
-                    break;
-                }
-                State::ShutdownRequest(reason) => {
-                    if handle_write_err(ready!(send.as_mut().poll_ready(cx))) {
-                        *state = State::Shutdown;
-                        break;
-                    }
-
-                    let reason = reason.clone();
-                    *state = State::Shutdown;
-                    let cell = <_>::try_into_relay_cached(
-                        cache.cache(RelayEnd::new(cache.get_cached(), stream_id.inner, reason)),
-                        circ_id,
-                        RelayVersion::V0,
-                    )
-                    .unwrap();
-                    if handle_write_err(send.as_mut().start_send(gen_cached(cell, stream_id))) {
-                        break;
-                    }
-                }
-                State::Init(_) | State::InitShutdown(_, _) => {
-                    unreachable!("state must not be init")
-                }
-            }
-        }
-
-        Ready(Ok(()))
+        self.close_inner(cx)
     }
 
     #[instrument(level = "trace", skip_all, fields(circ_id = self.inner.circ_id, stream_id = self.inner.stream_id.inner))]
@@ -721,8 +749,8 @@ impl<
         ready!(self.as_mut().poll_init(cx))?;
 
         if !matches!(self.state, State::Normal) {
-            // Stream is closed
-            return self.poll_close(cx);
+            // Stream closing
+            return self.close_inner(cx);
         }
 
         ready!(self.as_mut().poll_flush_buf(cx)?);
