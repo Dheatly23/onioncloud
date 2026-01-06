@@ -68,6 +68,7 @@ struct DirStreamInner<Cache, Send, Recv> {
     recv: Recv,
 }
 
+/// State of [`DirStream`].
 enum State {
     /// Init state. Must call `poll_init` to finish initialization.
     Init(InitState),
@@ -79,6 +80,7 @@ enum State {
     Shutdown,
 }
 
+#[allow(clippy::type_complexity)]
 /// Opens a new [`DirStream`] using RELAY_BEGIN_DIR.
 pub fn open_dir_stream<Cache: 'static + Send + Sync + Clone + CellCache, R: Runtime>(
     cache: Cache,
@@ -177,13 +179,27 @@ impl<
     }
 
     fn poll_init(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
-        let DirStreamProj { inner, state, .. } = self.project();
+        let DirStreamProj {
+            inner,
+            state,
+            end_reason,
+            send_buf_len,
+            recv_buf_len,
+            ..
+        } = self.project();
         let State::Init(init) = state else {
             return Ready(Ok(()));
         };
 
+        debug_assert_eq!(*send_buf_len, 0);
+        debug_assert_eq!(*recv_buf_len, 0);
+
         *state = if ready!(init.run_init(inner, cx))? {
+            // Peer closing our stream. Straight to shutdown.
             State::Shutdown
+        } else if end_reason.is_some() {
+            // `close_with` is called while initializing.
+            State::ShutdownRequest
         } else {
             State::Normal
         };
@@ -765,10 +781,15 @@ impl<
     }
 }
 
+/// Init state stages.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone)]
 enum InitState {
+    /// Start of RELAY_BEGIN_DIR.
     BeginDirStart,
+    /// RELAY_BEGIN_DIR queued for sending.
     BeginDirSend,
+    /// RELAY_BEGIN_DIR sent. Waiting for RELAY_CONNECTED.
     BeginDirConnected,
 }
 
@@ -874,7 +895,6 @@ mod tests {
     use std::mem::transmute;
     use std::pin::pin;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering::*};
 
     use futures_util::{AsyncReadExt as _, SinkExt as _, StreamExt as _};
     use proptest::collection::vec;
