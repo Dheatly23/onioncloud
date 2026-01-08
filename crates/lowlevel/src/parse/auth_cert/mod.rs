@@ -286,6 +286,7 @@ mod tests {
     use base64ct::{Encoder, LineEnding};
     use chrono::format::strftime::StrftimeItems;
     use chrono::{DateTime, Utc};
+    use proptest::collection::vec;
     use proptest::prelude::*;
     use rand::thread_rng;
     use rsa::pkcs1v15::SigningKey;
@@ -378,48 +379,53 @@ kHgepW7IkJFnbeYWVaFDMDr+QwXHSj9SBySlkLlOxix+nopDQZAQQDkeL65ZRLI4
             )
         };
 
-        proptest!(|(
-            published: u32,
-            expired: u32,
-            addr in any::<Option<(IpAddr, u16)>>().prop_map(|v| v.map(|(ip, port)| SocketAddr::new(ip, port))),
-        )| {
-            let published = SystemTime::UNIX_EPOCH + Duration::from_secs(published.into());
-            let expired = SystemTime::UNIX_EPOCH + Duration::from_secs(expired.into());
+        proptest!(|(v in vec((
+            any::<u32>().prop_map(|v| SystemTime::UNIX_EPOCH + Duration::from_secs(v.into())),
+            any::<u32>().prop_map(|v| SystemTime::UNIX_EPOCH + Duration::from_secs(v.into())),
+            any::<Option<(IpAddr, u16)>>().prop_map(|v| v.map(|(ip, port)| SocketAddr::new(ip, port))),
+        ), 1..=32))| {
+            let mut s = String::new();
 
-            let mut s = String::from("dir-key-certificate-version 3\n");
-            if let Some(addr) = &addr {
-                writeln!(s, "dir-address {addr}").unwrap();
+            for (published, expired, addr) in &v {
+                let start = s.len();
+                writeln!(s, "dir-key-certificate-version 3").unwrap();
+                if let Some(addr) = addr {
+                    writeln!(s, "dir-address {addr}").unwrap();
+                }
+                writeln!(s, "fingerprint {}", print_hex(&fingerprint)).unwrap();
+                write!(s, "dir-key-published ").unwrap();
+                write_datetime(&mut s, (*published).into());
+                writeln!(s, "").unwrap();
+                write!(s, "dir-key-expires ").unwrap();
+                write_datetime(&mut s, (*expired).into());
+                write!(s, "\ndir-identity-key\n{id_key}").unwrap();
+                write!(s, "dir-signing-key\n{id_key}").unwrap();
+                writeln!(s, "dir-key-crosscert\n-----BEGIN ID SIGNATURE-----\n{crosscert}\n-----END ID SIGNATURE-----").unwrap();
+                writeln!(s, "dir-key-certification").unwrap();
+                let sig = sign_key.sign(&s.as_bytes()[start..]);
+                writeln!(s, "-----BEGIN SIGNATURE-----\n{}\n-----END SIGNATURE-----", encode_sig(sig)).unwrap();
             }
-            writeln!(s, "fingerprint {}", print_hex(&fingerprint)).unwrap();
-            write!(s, "dir-key-published ").unwrap();
-            write_datetime(&mut s, published.into());
-            writeln!(s, "").unwrap();
-            write!(s, "dir-key-expires ").unwrap();
-            write_datetime(&mut s, expired.into());
-            write!(s, "\ndir-identity-key\n{id_key}").unwrap();
-            write!(s, "dir-signing-key\n{id_key}").unwrap();
-            writeln!(s, "dir-key-crosscert\n-----BEGIN ID SIGNATURE-----\n{crosscert}\n-----END ID SIGNATURE-----").unwrap();
-            writeln!(s, "dir-key-certification").unwrap();
-            let sig = sign_key.sign(s.as_bytes());
-            writeln!(s, "-----BEGIN SIGNATURE-----\n{}\n-----END SIGNATURE-----", encode_sig(sig)).unwrap();
 
             let mut parser = Parser::new(&s);
-            let Item {
-                fingerprint: fingerprint_,
-                published: published_,
-                expired: expired_,
-                address,
-                id_key,
-                sign_key,
-                ..
-            } = parser.next().unwrap().unwrap();
 
-            assert_eq!(fingerprint_, fingerprint);
-            assert_eq!(published_, published);
-            assert_eq!(expired_, expired);
-            assert_eq!(address, addr);
-            assert_eq!(RsaPublicKey::from(id_key), public_key);
-            assert_eq!(RsaPublicKey::from(sign_key), public_key);
+            for (published, expired, addr) in v {
+                let Item {
+                    fingerprint: fingerprint_,
+                    published: published_,
+                    expired: expired_,
+                    address,
+                    id_key,
+                    sign_key,
+                    ..
+                } = parser.next().unwrap().unwrap();
+
+                assert_eq!(fingerprint_, fingerprint);
+                assert_eq!(published_, published);
+                assert_eq!(expired_, expired);
+                assert_eq!(address, addr);
+                assert_eq!(RsaPublicKey::from(id_key), public_key);
+                assert_eq!(RsaPublicKey::from(sign_key), public_key);
+            }
 
             if let Some(i) = parser.next() {
                 panic!("expect None, got {:?}", i.as_ref().map(|v| v.s));
