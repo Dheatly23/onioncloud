@@ -7,8 +7,7 @@ pub(crate) fn parse_date(s: &str) -> Option<NaiveDate> {
     let mut i = 0;
     loop {
         match s.as_bytes().get(i)? {
-            b'-' if i < 4 => break,
-            b'0' if i == 0 => return None,
+            b'-' if i >= 4 => break,
             b'0'..=b'9' => i += 1,
             _ => return None,
         }
@@ -53,4 +52,28 @@ pub(crate) fn parse_time(s: &str) -> Option<NaiveTime> {
     let second = (st - b'0') * 10 + (sd - b'0');
 
     NaiveTime::from_hms_opt(hour.into(), minute.into(), second.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use chrono::{Datelike as _, Timelike as _};
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_parse_date(date in (0i32..).prop_filter_map("invalid date", NaiveDate::from_num_days_from_ce_opt)) {
+            let s = format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day());
+            let res = parse_date(&s).unwrap();
+            assert_eq!(res, date);
+        }
+
+        #[test]
+        fn test_parse_time(time in (..86400u32).prop_filter_map("invalid time", |t| NaiveTime::from_num_seconds_from_midnight_opt(t, 0))) {
+            let s = format!("{:02}:{:02}:{:02}", time.hour(), time.minute(), time.second());
+            let res = parse_time(&s).unwrap();
+            assert_eq!(res, time);
+        }
+    }
 }

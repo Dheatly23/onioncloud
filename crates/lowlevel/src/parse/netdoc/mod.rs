@@ -71,8 +71,19 @@ impl<'a> Iterator for NetdocParser<'a> {
     type Item = Result<Item<'a>, NetdocParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.end.get() <= self.off.get() {
-            return None;
+        loop {
+            if self.end.get() <= self.off.get() {
+                return None;
+            }
+
+            let start = self.off.get();
+            // SAFETY: Indices is within string.
+            let b = unsafe { self.s.as_bytes().get_unchecked(start) };
+            // Skip empty lines
+            if *b != b'\n' {
+                break;
+            }
+            self.off.set(start + 1);
         }
 
         let start = self.off.get();
@@ -228,8 +239,19 @@ impl<'a> Iterator for NetdocParser<'a> {
 
 impl DoubleEndedIterator for NetdocParser<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        if self.end.get() <= self.off.get() {
-            return None;
+        loop {
+            if self.end.get() <= self.off.get() {
+                return None;
+            }
+
+            let end = self.end.get();
+            // SAFETY: Indices is within string
+            let s = unsafe { self.s.get_unchecked(..end) };
+            // Skip empty lines
+            if !s.ends_with("\n\n") {
+                break;
+            }
+            self.end.set(end - 1);
         }
 
         let end = self.end.get();
@@ -390,6 +412,14 @@ impl DoubleEndedIterator for NetdocParser<'_> {
 impl FusedIterator for NetdocParser<'_> {}
 
 impl<'a> Item<'a> {
+    /// Gets raw item string.
+    ///
+    /// It excludes trailing newline.
+    #[inline(always)]
+    pub fn raw_string(&self) -> &'a str {
+        self.s
+    }
+
     /// Keyword of item.
     pub fn keyword(&self) -> &'a str {
         let o = if self.is_opt { 4 } else { 0 };
@@ -465,7 +495,7 @@ impl<'a> Item<'a> {
         self.line_len
     }
 
-    /// Returns total length of item (including object and trailing newline).
+    /// Returns total length of item (including object but excluding trailing newline).
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.s.len()
