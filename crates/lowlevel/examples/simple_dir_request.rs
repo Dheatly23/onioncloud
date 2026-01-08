@@ -18,7 +18,7 @@ use onioncloud_lowlevel::circuit::controller::dir::{DirConfig, DirControlMsg, Di
 use onioncloud_lowlevel::circuit::manager::SingleManager as CircuitManager;
 use onioncloud_lowlevel::crypto::relay::{RelayId, from_str as relay_from_str};
 use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
-use onioncloud_lowlevel::stream::open_dir_stream;
+use onioncloud_lowlevel::stream::from_new_stream;
 
 #[tokio::main]
 async fn main() {
@@ -127,7 +127,7 @@ async fn main() {
         circuit.as_mut().as_ref().send_control(msg).await.unwrap();
         recv.await.expect("new stream result should exist").unwrap()
     };
-    let mut stream = pin!(open_dir_stream(cache.clone(), new_stream));
+    let mut stream = pin!(from_new_stream(cache.clone(), new_stream));
 
     info!("sleeping for 5 seconds");
     sleep(Duration::from_secs(5)).await;

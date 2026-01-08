@@ -8,7 +8,8 @@ use std::pin::Pin;
 use std::task::Poll::*;
 use std::task::{Context, Poll};
 
-use futures_core::{Stream, ready};
+use futures_core::ready;
+use futures_core::stream::{FusedStream, Stream};
 use futures_io::{AsyncBufRead, AsyncRead, AsyncWrite};
 use futures_sink::Sink;
 use futures_util::AsyncWriteExt as _;
@@ -80,12 +81,31 @@ enum State {
     Shutdown,
 }
 
-#[allow(clippy::type_complexity)]
-/// Opens a new [`DirStream`] using RELAY_BEGIN_DIR.
-pub fn open_dir_stream<Cache: 'static + Send + Sync + Clone + CellCache, R: Runtime>(
-    cache: Cache,
-    data: NewStream<GenerationalData<NonZeroU16>, R, CachedCell<Cache>>,
-) -> DirStream<Cache, R::MPSCSender<CachedCell<Cache>>, R::SPSCReceiver<CachedCell<Cache>>> {
+/// Return type of [`from_new_stream`].
+pub type DirStreamTy<R, C> = DirStream<
+    C,
+    <R as Runtime>::MPSCSender<CachedCell<C>>,
+    <R as Runtime>::SPSCReceiver<CachedCell<C>>,
+>;
+
+/// Boxed [`DirStream`].
+///
+/// Cache type cannot be boxed.
+pub type BoxedDirStream<C> = DirStream<
+    C,
+    Box<dyn Sink<CachedCell<C>, Error = SendError<CachedCell<C>>>>,
+    Box<dyn FusedStreamTr<Item = CachedCell<C>>>,
+>;
+
+/// Auto-impl trait for [`Stream`] and [`FusedStream`].
+pub trait FusedStreamTr: Stream + FusedStream {}
+impl<T: Stream + FusedStream> FusedStreamTr for T {}
+
+/// Opens a new [`DirStream`] from [`NewStream`].
+pub fn from_new_stream<C: 'static + Send + Sync + Clone + CellCache, R: Runtime>(
+    cache: C,
+    data: NewStream<GenerationalData<NonZeroU16>, R, CachedCell<C>>,
+) -> DirStreamTy<R, C> {
     let NewStream {
         circ_id,
         inner:
@@ -95,20 +115,13 @@ pub fn open_dir_stream<Cache: 'static + Send + Sync + Clone + CellCache, R: Runt
                 receiver: recv,
             },
     } = data;
-    DirStream::new(
-        cache,
-        circ_id,
-        stream_id,
-        send,
-        recv,
-        InitState::BeginDirStart,
-    )
+    DirStream::new_dir_stream(cache, circ_id, stream_id, send, recv)
 }
 
 impl<
     C: 'static + Send + Sync + Clone + CellCache,
     S: Sink<CachedCell<C>, Error = SendError<CachedCell<C>>>,
-    R: Stream<Item = CachedCell<C>>,
+    R: Stream<Item = CachedCell<C>> + FusedStream,
 > DirStream<C, S, R>
 {
     #[inline(always)]
@@ -136,6 +149,69 @@ impl<
 
             state: State::Init(state),
             end_reason: None,
+        }
+    }
+
+    /// Opens a new directory stream.
+    #[inline(always)]
+    pub fn new_dir_stream(
+        cache: C,
+        circ_id: NonZeroU32,
+        stream_id: GenerationalData<NonZeroU16>,
+        send: S,
+        recv: R,
+    ) -> Self {
+        Self::new(
+            cache,
+            circ_id,
+            stream_id,
+            send,
+            recv,
+            InitState::BeginDirStart,
+        )
+    }
+
+    /// Box sender and receiver.
+    pub fn into_boxed(self) -> BoxedDirStream<C>
+    where
+        S: 'static,
+        R: 'static,
+    {
+        let Self {
+            inner:
+                DirStreamInner {
+                    circ_id,
+                    stream_id,
+                    cache,
+                    send,
+                    recv,
+                },
+
+            recv_buf,
+            recv_buf_len,
+            send_buf,
+            send_buf_len,
+
+            state,
+            end_reason,
+        } = self;
+
+        BoxedDirStream {
+            inner: DirStreamInner {
+                circ_id,
+                stream_id,
+                cache,
+                send: Box::new(send),
+                recv: Box::new(recv),
+            },
+
+            recv_buf,
+            recv_buf_len,
+            send_buf,
+            send_buf_len,
+
+            state,
+            end_reason,
         }
     }
 
@@ -393,7 +469,7 @@ fn map_io_err(e: impl 'static + Error + Send + Sync) -> IoError {
 impl<
     C: 'static + Send + Sync + Clone + CellCache,
     S: Sink<CachedCell<C>, Error = SendError<CachedCell<C>>>,
-    R: Stream<Item = CachedCell<C>>,
+    R: Stream<Item = CachedCell<C>> + FusedStream,
 > AsyncRead for DirStream<C, S, R>
 {
     #[instrument(level = "trace", skip_all, fields(circ_id = self.inner.circ_id, stream_id = self.inner.stream_id.inner))]
@@ -517,7 +593,7 @@ impl<
 impl<
     C: 'static + Send + Sync + Clone + CellCache,
     S: Sink<CachedCell<C>, Error = SendError<CachedCell<C>>>,
-    R: Stream<Item = CachedCell<C>>,
+    R: Stream<Item = CachedCell<C>> + FusedStream,
 > AsyncBufRead for DirStream<C, S, R>
 {
     #[instrument(level = "trace", skip_all, fields(circ_id = self.inner.circ_id, stream_id = self.inner.stream_id.inner))]
@@ -573,7 +649,7 @@ fn handle_write_err<T>(ret: Result<(), SendError<T>>) -> bool {
 impl<
     C: 'static + Send + Sync + Clone + CellCache,
     S: Sink<CachedCell<C>, Error = SendError<CachedCell<C>>>,
-    R: Stream<Item = CachedCell<C>>,
+    R: Stream<Item = CachedCell<C>> + FusedStream,
 > AsyncWrite for DirStream<C, S, R>
 {
     #[instrument(level = "trace", skip_all, fields(circ_id = self.inner.circ_id, stream_id = self.inner.stream_id.inner))]
@@ -797,7 +873,7 @@ impl InitState {
     fn run_init<
         C: 'static + Send + Sync + Clone + CellCache,
         S: Sink<CachedCell<C>, Error = SendError<CachedCell<C>>>,
-        R: Stream<Item = CachedCell<C>>,
+        R: Stream<Item = CachedCell<C>> + FusedStream,
     >(
         &mut self,
         inner: Pin<&mut DirStreamInner<C, S, R>>,
@@ -935,18 +1011,14 @@ mod tests {
         rt: &TestRuntime,
         cache: CacheTy,
     ) -> (
-        DirStream<
-            CacheTy,
-            <TestRuntime as Runtime>::MPSCSender<CachedCell<CacheTy>>,
-            <TestRuntime as Runtime>::SPSCReceiver<CachedCell<CacheTy>>,
-        >,
+        DirStreamTy<TestRuntime, CacheTy>,
         <TestRuntime as Runtime>::SPSCSender<CachedCell<CacheTy>>,
         <TestRuntime as Runtime>::MPSCReceiver<CachedCell<CacheTy>>,
     ) {
         let (s1, r1) = rt.spsc_make(4);
         let (s2, r2) = rt.mpsc_make(4);
         (
-            open_dir_stream::<CacheTy, TestRuntime>(
+            from_new_stream::<_, TestRuntime>(
                 cache,
                 NewStream {
                     circ_id: CIRC_ID,

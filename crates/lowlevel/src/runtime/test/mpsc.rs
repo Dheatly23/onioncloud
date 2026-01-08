@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::*;
 use std::task::{Context, Poll, Waker};
 
-use futures_core::stream::Stream;
+use futures_core::stream::{FusedStream, Stream};
 use futures_sink::Sink;
 use parking_lot::Mutex;
 use pin_project::{pin_project, pinned_drop};
@@ -260,6 +260,19 @@ impl<T: Send> Stream for MPSCPipeReceiver<T> {
             set_option_waker(&mut guard.recv_waker, cx);
             Poll::Pending
         }
+    }
+}
+
+impl<T: Send> FusedStream for MPSCPipeReceiver<T> {
+    fn is_terminated(&self) -> bool {
+        // SAFETY: This is originally created from Box.
+        let inner = unsafe { self.0.as_ref() };
+
+        if inner.senders.load(Acquire) > 0 {
+            return false;
+        }
+        let guard = inner.inner.lock();
+        guard.buf[guard.start].is_none()
     }
 }
 

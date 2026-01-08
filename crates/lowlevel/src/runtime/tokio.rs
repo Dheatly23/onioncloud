@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use flume::r#async::{RecvStream as FlumeRecvStream, SendSink as FlumeSendSink};
 use flume::{bounded, unbounded};
-use futures_core::stream::Stream as FutStream;
+use futures_core::stream::{FusedStream, Stream as FutStream};
 use futures_io::{AsyncRead, AsyncWrite};
 use futures_sink::Sink;
 use pin_project::pin_project;
@@ -257,6 +257,12 @@ impl<T: 'static + Send> FutStream for RecvStream<T> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.project().0.poll_next(cx)
+    }
+}
+
+impl<T: 'static + Send> FusedStream for RecvStream<T> {
+    fn is_terminated(&self) -> bool {
+        self.0.is_terminated()
     }
 }
 

@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::time::Instant;
 
-use futures_core::stream::Stream as FuturesStream;
+use futures_core::stream::{FusedStream, Stream as FutStream};
 use futures_io::{AsyncRead, AsyncWrite};
 use futures_sink::Sink;
 
@@ -123,7 +123,9 @@ pub trait PipeSender<T>: crate::private::Sealed + Send + Sink<T, Error = SendErr
 }
 
 /// Trait for pipe receiver.
-pub trait PipeReceiver<T>: crate::private::Sealed + Send + FuturesStream<Item = T> {
+pub trait PipeReceiver<T>:
+    crate::private::Sealed + Send + FutStream<Item = T> + FusedStream
+{
     /// Checks if pipe is disconnected.
     fn is_disconnected(&self) -> bool;
 }
