@@ -31,7 +31,6 @@ use onioncloud_lowlevel::linkver::StandardLinkver;
 use onioncloud_lowlevel::runtime::Runtime;
 use onioncloud_lowlevel::runtime::test::{OpenSocket, TestExecutor};
 use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
-use onioncloud_lowlevel::util::cell_map::CellMap;
 use onioncloud_lowlevel::util::sans_io::event::{ChannelClosed, ChildCellMsg, ControlMsg, Timeout};
 use onioncloud_lowlevel::util::sans_io::{CellMsgPause, Handle};
 

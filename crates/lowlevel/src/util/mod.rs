@@ -428,6 +428,7 @@ pub(crate) fn print_ed(key: &EdPublicKey) -> impl Debug + Display {
     S(a)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn print_bytes(s: &[u8]) -> impl '_ + Display {
     struct S<'a>(&'a [u8]);
 
@@ -441,13 +442,6 @@ pub(crate) fn print_bytes(s: &[u8]) -> impl '_ + Display {
     }
 
     S(s)
-}
-
-pub(crate) fn option_ord_min<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
-    match (a, b) {
-        (v, None) | (None, v) => v,
-        (Some(a), Some(b)) => Some(a.min(b)),
-    }
 }
 
 pub(crate) const fn c_max_usize(a: usize, b: usize) -> usize {
