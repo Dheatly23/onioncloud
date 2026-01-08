@@ -452,7 +452,7 @@ impl<'a> Item<'a> {
 
     /// Return `true` if item has object.
     pub fn has_object(&self) -> bool {
-        self.line_len == self.s.len()
+        self.line_len != self.s.len()
     }
 
     /// Returns byte offset of item.
