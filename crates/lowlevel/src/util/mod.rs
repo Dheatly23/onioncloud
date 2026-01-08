@@ -2,6 +2,7 @@ mod buffer;
 pub mod cell_map;
 //pub mod channel;
 //pub mod circuit;
+pub(crate) mod parse;
 pub mod sans_io;
 
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};

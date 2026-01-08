@@ -122,3 +122,15 @@ pub enum DirControllerError {
     #[error(transparent)]
     CellLengthOverflowError(#[from] super::CellLengthOverflowError),
 }
+
+/// Directory authority certificate processing error.
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum AuthCertError {
+    #[error(transparent)]
+    NetdocParseError(#[from] super::NetdocParseError),
+    #[error(transparent)]
+    CertFormatError(#[from] super::CertFormatError),
+    #[error(transparent)]
+    CertVerifyError(#[from] super::CertVerifyError),
+}

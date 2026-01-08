@@ -418,11 +418,22 @@ impl<'a> Item<'a> {
         }
     }
 
+    /// Raw object string.
+    ///
+    /// Returns the entire object string, including trailing newline.
+    pub fn object_raw(&self) -> Option<&'a str> {
+        if !self.has_object() {
+            return None;
+        }
+        // SAFETY: Indices is within string
+        unsafe { Some(self.s.get_unchecked(self.line_len + 1..)) }
+    }
+
     /// Optional object of item.
     ///
     /// If exist, returns tuple of object keyword and content.
     pub fn object(&self) -> Option<(&'a str, &'a str)> {
-        if self.line_len == self.s.len() {
+        if !self.has_object() {
             return None;
         }
         let start_kw = self.line_len + 1 + BEGIN.len();
@@ -439,6 +450,11 @@ impl<'a> Item<'a> {
         }
     }
 
+    /// Return `true` if item has object.
+    pub fn has_object(&self) -> bool {
+        self.line_len == self.s.len()
+    }
+
     /// Returns byte offset of item.
     pub fn byte_offset(&self) -> usize {
         self.byte_off
@@ -447,6 +463,12 @@ impl<'a> Item<'a> {
     /// Returns length of item line (excluding object and trailing newline).
     pub fn line_len(&self) -> usize {
         self.line_len
+    }
+
+    /// Returns total length of item (including object and trailing newline).
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.s.len()
     }
 }
 
