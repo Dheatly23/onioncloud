@@ -18,7 +18,7 @@ use std::task::Poll::*;
 use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
-use base64ct::{Base64Url, Encoding};
+use base64ct::{Base64, Encoding};
 use futures_core::future::FusedFuture;
 use futures_core::ready;
 use futures_io::{AsyncRead, AsyncWrite};
@@ -424,7 +424,7 @@ pub(crate) fn print_ed(key: &EdPublicKey) -> impl Debug + Display {
     }
 
     let mut a = [0; LEN];
-    let s = Base64Url::encode(key, &mut a).unwrap();
+    let s = Base64::encode(key, &mut a).unwrap();
     assert_eq!(s.len(), LEN);
     S(a)
 }
@@ -602,8 +602,12 @@ pub(crate) use tests::*;
 mod tests {
     use super::*;
 
+    use ed25519_dalek::SecretKey;
+    use once_cell::sync::OnceCell;
     use proptest::collection::vec;
     use proptest::prelude::*;
+    use rsa::RsaPrivateKey;
+    use rsa::pkcs1::DecodeRsaPrivateKey as _;
 
     use crate::cache::{CellCache, TestCache};
     use crate::cell::dispatch::{CellType, WithCellConfig};
@@ -708,6 +712,42 @@ mod tests {
 
     pub(crate) fn var_cell_strat() -> impl Strategy<Value = Vec<u8>> {
         vec(any::<u8>(), 0..=1024)
+    }
+
+    /// Gets test RSA private key.
+    pub(crate) fn test_rsa_pk() -> &'static RsaPrivateKey {
+        static KEY: OnceCell<RsaPrivateKey> = OnceCell::new();
+        KEY.get_or_init(||
+        // Stolen from arti test data :)
+        RsaPrivateKey::from_pkcs1_pem(
+            r"
+-----BEGIN RSA PRIVATE KEY-----
+MIICXAIBAAKBgQDNg5E85lyFRFXHVQRs+cOHFuLh9iPs/mbvDbGY0RBAUyiSjrj8
+9kEUqWPW5TLDxiS4BFihZz5jvGu1wncMMxxc/d6F4fhh0QRl4TcOwI7pi3jZKHWS
++x5/JcRZkhbGjVgZ65NbzZTHQRjvJAfrsGvGUUaOw8nefp/rgmEEfdw1hQIDAQAB
+AoGAUK0IU87enRYxUjnGrfzyS9KpKCkW+073G3rVr/bKGWZLtBTA+9SzwaepYM/C
+uOXMvkw+esXr0P1DjyuSzkA2LnoeTxsznKvb59roUTMVh13b1VmHmySMBSX4+i90
+jUMpGK9di83KMqLL1HGsmI6iLzNEjFc1B2WBd8jNFgsJl6ECQQD9rhZDhtf7Tn8E
+MbNMIrPSge1PSw05f7SL+nEvRpS/G0TiLdnmBl2hrV/AHITlqgQMZgvpOOnRoEq9
+cbWHf29pAkEAz2S24+bZBGxMv/GGScwACPSpEOPdxKdSd39gPLHq5na/FLzpgddE
+U+uIaO8rpzIkm0+LUv6+vO5NEmHDH/WtvQJALquNawTuzUwmsAXYv6QOwyamGxVq
+rG5jL/F2S0VH7lS8+oOG9/up1CnKWNSmWn5J2mIXxON0mN1Ngsbdp7z5KQJADOlI
+OYf1msDjRk/S/GUm22ff3p1RAR0plSbo5t5ssUxTOQdJwjuUlWTkaSP6o74LaV/a
+XKBfX4O2aJ6Ndz/kQQJBAKC9k6WHAbw6CF87TMEldlPXqcfeT3qswhNJXgkt1zTY
+SrdzFgs07XrrqKVgMcO5qmdWeVFbUo/0fbgGVLNQDgQ=
+-----END RSA PRIVATE KEY-----
+",
+        )
+        .unwrap())
+    }
+
+    /// Gets test Ed25519 private key.
+    pub(crate) fn test_ed_pk() -> SecretKey {
+        [
+            0x1c, 0x3f, 0x4b, 0xcd, 0xa8, 0x7b, 0xda, 0x24, 0xf6, 0x50, 0x97, 0xa9, 0xbc, 0x38,
+            0xec, 0x86, 0x12, 0x61, 0xde, 0x14, 0x65, 0xd0, 0x54, 0xa9, 0x97, 0xc8, 0x6d, 0x7d,
+            0x2f, 0x28, 0x9d, 0x2e,
+        ]
     }
 
     #[test]
