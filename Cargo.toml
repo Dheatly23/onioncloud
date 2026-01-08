@@ -50,6 +50,13 @@ features = [
   "backtrace",
 ]
 
+[workspace.dependencies.chrono]
+version = "0.4"
+default-features = false
+features = [
+  "std",
+]
+
 [workspace.dependencies.ed25519-dalek]
 version = "2"
 default-features = false
