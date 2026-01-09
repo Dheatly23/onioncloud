@@ -61,6 +61,20 @@ mod tests {
     use chrono::{Datelike as _, Timelike as _};
     use proptest::prelude::*;
 
+    #[test]
+    fn test_parse_date_empty_string_fail() {
+        if let Some(v) = parse_date("") {
+            panic!("parser expected to fail, got {v}");
+        }
+    }
+
+    #[test]
+    fn test_parse_time_empty_string_fail() {
+        if let Some(v) = parse_time("") {
+            panic!("parser expected to fail, got {v}");
+        }
+    }
+
     proptest! {
         #[test]
         fn test_parse_date(date in (0i32..).prop_filter_map("invalid date", NaiveDate::from_num_days_from_ce_opt)) {
@@ -74,6 +88,46 @@ mod tests {
             let s = format!("{:02}:{:02}:{:02}", time.hour(), time.minute(), time.second());
             let res = parse_time(&s).unwrap();
             assert_eq!(res, time);
+        }
+
+        #[test]
+        fn test_parse_date_fail(s in prop_oneof![
+            // Truncate year
+            (0..1000u16, 1..13u8, 1..32u8, ..4usize).prop_map(|(y, m, d, w)| format!("{y:0w$}-{m:02}-{d:02}")),
+            // Truncate month
+            (0..9999u16, 1..10u8, 1..32u8).prop_map(|(y, m, d)| format!("{y:04}-{m}-{d:02}")),
+            // Truncate day
+            (0..9999u16, 1..13u8, 1..10u8).prop_map(|(y, m, d)| format!("{y:04}-{m:02}-{d}")),
+            // Missing year
+            (1..13u8, 1..32u8, any::<bool>()).prop_map(|(m, d, s)| format!("{}{m:02}-{d:02}", if s { "-" } else { "" })),
+            // Missing month
+            (0..9999u16, 1..32u8, any::<bool>(), any::<bool>()).prop_map(|(y, d, s1, s2)| format!("{y:04}{}{}{d:02}", if s1 { "-" } else { "" }, if s2 { "-" } else { "" })),
+            // Missing day
+            (0..9999u16, 1..13u8, any::<bool>()).prop_map(|(y, m, s)| format!("{y:04}-{m:02}{}", if s { "-" } else { "" })),
+        ]) {
+            if let Some(v) = parse_date(&s) {
+                panic!("parser expected to fail, got {v}");
+            }
+        }
+
+        #[test]
+        fn test_parse_time_fail(s in prop_oneof![
+            // Truncate hour
+            (0..10u8, 0..60u8, 0..60u8).prop_map(|(h, m, s)| format!("{h}:{m:02}:{s:02}")),
+            // Truncate minute
+            (0..24u8, 0..10u8, 0..60u8).prop_map(|(h, m, s)| format!("{h:02}:{m}:{s:02}")),
+            // Truncate second
+            (0..24u8, 0..60u8, 0..10u8).prop_map(|(h, m, s)| format!("{h:02}:{m:02}:{s}")),
+            // Missing hour
+            (0..60u8, 0..60u8, any::<bool>()).prop_map(|(m, s, t)| format!("{}{m:02}:{s:02}", if t { ":" } else { "" })),
+            // Missing minute
+            (0..24u8, 0..60u8, any::<bool>(), any::<bool>()).prop_map(|(h, s, t1, t2)| format!("{h:02}{}{}{s:02}", if t1 { ":" } else { "" }, if t2 { ":" } else { "" })),
+            // Missing second
+            (0..24u8, 0..60u8, any::<bool>()).prop_map(|(h, m, t)| format!("{h:02}:{m:02}{}", if t { ":" } else { "" })),
+        ]) {
+            if let Some(v) = parse_time(&s) {
+                panic!("parser expected to fail, got {v}");
+            }
         }
     }
 }
