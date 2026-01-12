@@ -133,14 +133,17 @@ impl<'a> Parser<'a> {
         let mut crosscert = None;
         let signature;
 
-        let mut tmp = Vec::with_capacity(1024);
+        let mut tmp = [0; 2048];
 
         loop {
             let item = self.inner.next().ok_or(CertFormatError)??;
 
-            match (item.keyword(), item.object()) {
+            match item.keyword() {
                 // dir-address is at most once
-                ("dir-address", None) if address.is_none() => {
+                "dir-address" => {
+                    if address.is_some() {
+                        return Err(CertFormatError.into());
+                    }
                     address = Some(
                         item.arguments()
                             .next()
@@ -152,81 +155,86 @@ impl<'a> Parser<'a> {
                     );
                 }
                 // fingerprint is exactly once
-                ("fingerprint", None) if fingerprint.is_none() => {
-                    fingerprint = Some(
-                        item.arguments()
-                            .next()
-                            .map(relay_from_str)
-                            .transpose()
-                            .ok()
-                            .flatten()
-                            .ok_or(CertFormatError)?,
-                    );
+                "fingerprint" => {
+                    if fingerprint.is_some() {
+                        return Err(CertFormatError.into());
+                    }
+                    fingerprint = match item.arguments().next().map(relay_from_str) {
+                        Some(Ok(v)) => Some(v),
+                        _ => return Err(CertFormatError.into()),
+                    };
                 }
                 // dir-key-published is exactly once
-                ("dir-key-published", None) if published.is_none() => {
-                    published = Some(
-                        args_date_time(&mut item.arguments())
-                            .map(SystemTime::from)
-                            .ok_or(CertFormatError)?,
-                    );
+                "dir-key-published" => {
+                    if published.is_some() {
+                        return Err(CertFormatError.into());
+                    }
+                    published = Some(SystemTime::from(
+                        args_date_time(&mut item.arguments()).ok_or(CertFormatError)?,
+                    ));
                 }
                 // dir-key-expires is exactly once
-                ("dir-key-expires", None) if expired.is_none() => {
-                    expired = Some(
-                        args_date_time(&mut item.arguments())
-                            .map(SystemTime::from)
-                            .ok_or(CertFormatError)?,
-                    );
+                "dir-key-expires" => {
+                    if expired.is_some() {
+                        return Err(CertFormatError.into());
+                    }
+                    expired = Some(SystemTime::from(
+                        args_date_time(&mut item.arguments()).ok_or(CertFormatError)?,
+                    ));
                 }
                 // dir-identity-key has object, without extra args, and is exactly once
-                ("dir-identity-key", Some(_))
-                    if item.arguments().next().is_none() && identity.is_none() =>
-                {
-                    identity = Some(
+                "dir-identity-key" => {
+                    if item.arguments().next().is_some() || identity.is_some() {
+                        return Err(CertFormatError.into());
+                    }
+                    identity = Some(VerifyingKey::<Sha1>::from(
                         <RsaPublicKey as DecodeRsaPublicKey>::from_pkcs1_pem(
-                            item.object_raw().expect("object must exist"),
+                            item.object_raw().ok_or(CertFormatError)?,
                         )
-                        .ok()
-                        .map(VerifyingKey::<Sha1>::from)
-                        .ok_or(CertFormatError)?,
-                    );
+                        .map_err(|_| CertVerifyError)?,
+                    ));
                 }
                 // dir-signing-key has object, without extra args, and is exactly once
-                ("dir-signing-key", Some(_))
-                    if item.arguments().next().is_none() && signing.is_none() =>
-                {
-                    signing = Some(
+                "dir-signing-key" => {
+                    if item.arguments().next().is_some() || signing.is_some() {
+                        return Err(CertFormatError.into());
+                    }
+                    signing = Some(VerifyingKey::<Sha1>::from(
                         <RsaPublicKey as DecodeRsaPublicKey>::from_pkcs1_pem(
-                            item.object_raw().expect("object must exist"),
+                            item.object_raw().ok_or(CertFormatError)?,
                         )
-                        .ok()
-                        .map(VerifyingKey::<Sha1>::from)
-                        .ok_or(CertFormatError)?,
-                    );
+                        .map_err(|_| CertVerifyError)?,
+                    ));
                 }
                 // dir-key-crosscert has object, without extra args, and is exactly once
-                ("dir-key-crosscert", Some(("ID SIGNATURE" | "SIGNATURE", s)))
-                    if item.arguments().next().is_none() && crosscert.is_none() =>
-                {
-                    crosscert = Some(decode_sig(&mut tmp, s.as_bytes()).ok_or(CertFormatError)?);
+                "dir-key-crosscert" => {
+                    if item.arguments().next().is_some() || crosscert.is_some() {
+                        return Err(CertFormatError.into());
+                    }
+                    let Some(("ID SIGNATURE" | "SIGNATURE", s)) = item.object() else {
+                        return Err(CertFormatError.into());
+                    };
+                    crosscert = Some(decode_sig(&mut tmp, s.as_bytes())?);
                 }
                 // dir-key-certification has object, without extra args, and is exactly once
-                ("dir-key-certification", Some(("SIGNATURE", s)))
-                    if item.arguments().next().is_none() =>
-                {
-                    signature = decode_sig(&mut tmp, s.as_bytes()).ok_or(CertFormatError)?;
+                "dir-key-certification" => {
+                    if item.arguments().next().is_some() {
+                        return Err(CertFormatError.into());
+                    }
+                    let Some(("SIGNATURE", s)) = item.object() else {
+                        return Err(CertFormatError.into());
+                    };
+                    signature = decode_sig(&mut tmp, s.as_bytes())?;
 
                     end_off = item.byte_offset() + item.len() + 1;
                     end_msg = item.byte_offset() + item.line_len() + 1;
 
                     break;
                 }
-                _ => return Err(CertFormatError.into()),
+                // Unknown keyword, skip
+                _ => (),
             }
         }
-
-        drop(tmp);
 
         let (
             Some(fingerprint),
@@ -348,14 +356,14 @@ impl<'a> Item<'a> {
     }
 }
 
-fn decode_sig(tmp: &mut Vec<u8>, s: &[u8]) -> Option<Signature> {
-    tmp.clear();
-    Decoder::<Base64>::new_wrapped(s, 64)
-        .ok()?
-        .decode_to_end(tmp)
-        .ok()?
-        .try_into()
-        .ok()
+fn decode_sig(tmp: &mut [u8], s: &[u8]) -> Result<Signature, CertVerifyError> {
+    let mut decoder = Decoder::<Base64>::new_wrapped(s, 64).map_err(|_| CertVerifyError)?;
+    let tmp = tmp
+        .get_mut(..decoder.remaining_len())
+        .ok_or(CertVerifyError)?;
+    let v = decoder.decode(tmp).map_err(|_| CertVerifyError)?;
+    drop(decoder);
+    v.try_into().map_err(|_| CertVerifyError.into())
 }
 
 #[cfg(test)]
@@ -386,7 +394,7 @@ mod tests {
         let mut buf = [0; 1024];
         let mut enc = Encoder::<Base64>::new_wrapped(&mut buf, 64, LineEnding::LF).unwrap();
         enc.encode(&Box::<[u8]>::from(sig)).unwrap();
-        String::from_utf8(enc.finish_with_remaining().unwrap().0.into()).unwrap()
+        enc.finish().unwrap().into()
     }
 
     #[test]
