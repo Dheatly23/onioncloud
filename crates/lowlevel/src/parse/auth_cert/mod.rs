@@ -358,10 +358,7 @@ impl<'a> Item<'a> {
 
 fn decode_sig(tmp: &mut [u8], s: &str) -> Result<Signature, CertVerifyError> {
     // Remove trailing whitespace.
-    let s = match s.as_bytes() {
-        [s @ .., b'\r', b'\n'] | [s @ .., b'\r'] | [s @ .., b'\n'] => s,
-        s => s,
-    };
+    let ([s @ .., b'\r', b'\n'] | [s @ .., b'\r' | b'\n'] | s) = s.as_bytes();
 
     let mut decoder = Decoder::<Base64>::new_wrapped(s, 64).map_err(|_| CertVerifyError)?;
     let tmp = tmp
