@@ -89,8 +89,7 @@ pub struct Item<'a> {
 
 impl<'a> Parser<'a> {
     /// Create new [`Parser`].
-    #[inline(always)]
-    pub fn new(s: &'a str) -> Self {
+    pub const fn new(s: &'a str) -> Self {
         Self {
             inner: NetdocParser::new(s),
         }
@@ -107,7 +106,6 @@ impl<'a> Parser<'a> {
     ///
     /// assert_eq!(parser.original_string(), s);
     /// ```
-    #[inline(always)]
     pub const fn original_string(&self) -> &'a str {
         self.inner.original_string()
     }

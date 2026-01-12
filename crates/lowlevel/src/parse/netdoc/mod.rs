@@ -51,7 +51,7 @@ const ENDL: &str = "-----";
 
 impl<'a> NetdocParser<'a> {
     /// Create new [`NetdocParser`] to parse string.
-    pub fn new(s: &'a str) -> Self {
+    pub const fn new(s: &'a str) -> Self {
         Self {
             s,
             off: Cell::new(0),
