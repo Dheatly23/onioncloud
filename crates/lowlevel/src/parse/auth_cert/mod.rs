@@ -2,6 +2,7 @@
 //!
 //! Parses and validate directory authority certificates (at `/tor/keys/all`).
 
+use std::iter::FusedIterator;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::SystemTime;
@@ -18,14 +19,56 @@ use subtle::ConstantTimeEq;
 use tracing::error;
 
 use super::misc::args_date_time;
-use super::netdoc::NetdocParser;
+use super::netdoc::{Item as NetdocItem, NetdocParser};
 use crate::crypto::relay::{RelayId, from_str as relay_from_str};
 use crate::errors::{AuthCertError, CertFormatError, CertVerifyError};
 
+/// Directory authority certificate parser.
+///
+/// Parses data into [`Item`]s.
+/// Items are returned incrementally, allowing for zero-copy parsing.
+///
+/// Stability guarantee are the same as [`NetdocParser`].
+///
+/// # Example
+///
+/// ```
+/// use onioncloud_lowlevel::parse::auth_cert::Parser;
+/// use onioncloud_lowlevel::errors::AuthCertError;
+///
+/// fn parse_cert(s: &str) -> Result<(), AuthCertError> {
+///     for item in Parser::new(s) {
+///         // Return the error value.
+///         let item = item?;
+///
+///         // Do stuff with item.
+///     }
+///
+///     // Do more stuff.
+///
+///     Ok(())
+/// }
+/// ```
 pub struct Parser<'a> {
     inner: NetdocParser<'a>,
+    is_valid: bool,
 }
 
+/// An item from [`Parser`].
+///
+/// Use destructuring assignment to retrieve fields _without_ cloning them.
+///
+/// # Example
+///
+/// ```
+/// use onioncloud_lowlevel::parse::auth_cert::Item;
+///
+/// fn process_item(item: Item<'_>) {
+///     // Do stuff with item
+///     let Item { fingerprint, id_key, sign_key, .. } = item;
+///     // Do more stuff with fields
+/// }
+/// ```
 pub struct Item<'a> {
     s: &'a str,
     byte_off: usize,
@@ -51,30 +94,34 @@ impl<'a> Parser<'a> {
     pub fn new(s: &'a str) -> Self {
         Self {
             inner: NetdocParser::new(s),
+            is_valid: true,
         }
     }
 
     /// Gets the original string.
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::parse::auth_cert::Parser;
+    ///
+    /// // Doesn't have to be a valid certificate.
+    /// let s = "abc";
+    /// let parser = Parser::new(s);
+    ///
+    /// assert_eq!(parser.original_string(), s);
+    /// ```
     #[inline(always)]
     pub const fn original_string(&self) -> &'a str {
         self.inner.original_string()
     }
-}
 
-impl<'a> Iterator for Parser<'a> {
-    type Item = Result<Item<'a>, AuthCertError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let item = match self.inner.next()? {
-            Ok(v) => v,
-            Err(e) => return Some(Err(e.into())),
-        };
+    #[inline(always)]
+    fn parse(&mut self, item: NetdocItem<'_>) -> Result<Item<'a>, AuthCertError> {
         // Starting item
         if item.keyword() != "dir-key-certificate-version"
             || item.arguments().next() != Some("3")
             || item.has_object()
         {
-            return Some(Err(CertFormatError.into()));
+            return Err(CertFormatError.into());
         }
 
         let start_off = item.byte_offset();
@@ -93,87 +140,93 @@ impl<'a> Iterator for Parser<'a> {
         let mut tmp = Vec::with_capacity(1024);
 
         loop {
-            let item = match self.inner.next() {
-                Some(Ok(v)) => v,
-                Some(Err(e)) => return Some(Err(e.into())),
-                None => return Some(Err(CertFormatError.into())),
-            };
+            let item = self.inner.next().ok_or(CertFormatError)??;
 
             match (item.keyword(), item.object()) {
                 // dir-address is at most once
                 ("dir-address", None) if address.is_none() => {
-                    address = match item.arguments().next().map(SocketAddr::from_str) {
-                        Some(Ok(v)) => Some(v),
-                        _ => return Some(Err(CertFormatError.into())),
-                    };
+                    address = Some(
+                        item.arguments()
+                            .next()
+                            .map(SocketAddr::from_str)
+                            .transpose()
+                            .ok()
+                            .flatten()
+                            .ok_or(CertFormatError)?,
+                    );
                 }
                 // fingerprint is exactly once
                 ("fingerprint", None) if fingerprint.is_none() => {
-                    fingerprint = match item.arguments().next().map(relay_from_str) {
-                        Some(Ok(v)) => Some(v),
-                        _ => return Some(Err(CertFormatError.into())),
-                    };
+                    fingerprint = Some(
+                        item.arguments()
+                            .next()
+                            .map(relay_from_str)
+                            .transpose()
+                            .ok()
+                            .flatten()
+                            .ok_or(CertFormatError)?,
+                    );
                 }
                 // dir-key-published is exactly once
                 ("dir-key-published", None) if published.is_none() => {
-                    published = match args_date_time(&mut item.arguments()) {
-                        Some(v) => Some(SystemTime::from(v)),
-                        _ => return Some(Err(CertFormatError.into())),
-                    };
+                    published = Some(
+                        args_date_time(&mut item.arguments())
+                            .map(SystemTime::from)
+                            .ok_or(CertFormatError)?,
+                    );
                 }
                 // dir-key-expires is exactly once
                 ("dir-key-expires", None) if expired.is_none() => {
-                    expired = match args_date_time(&mut item.arguments()) {
-                        Some(v) => Some(SystemTime::from(v)),
-                        _ => return Some(Err(CertFormatError.into())),
-                    };
+                    expired = Some(
+                        args_date_time(&mut item.arguments())
+                            .map(SystemTime::from)
+                            .ok_or(CertFormatError)?,
+                    );
                 }
                 // dir-identity-key has object, without extra args, and is exactly once
                 ("dir-identity-key", Some(_))
                     if item.arguments().next().is_none() && identity.is_none() =>
                 {
-                    identity = match <RsaPublicKey as DecodeRsaPublicKey>::from_pkcs1_pem(
-                        item.object_raw().expect("object must exist"),
-                    ) {
-                        Ok(v) => Some(VerifyingKey::<Sha1>::from(v)),
-                        _ => return Some(Err(CertFormatError.into())),
-                    };
+                    identity = Some(
+                        <RsaPublicKey as DecodeRsaPublicKey>::from_pkcs1_pem(
+                            item.object_raw().expect("object must exist"),
+                        )
+                        .ok()
+                        .map(VerifyingKey::<Sha1>::from)
+                        .ok_or(CertFormatError)?,
+                    );
                 }
                 // dir-signing-key has object, without extra args, and is exactly once
                 ("dir-signing-key", Some(_))
                     if item.arguments().next().is_none() && signing.is_none() =>
                 {
-                    signing = match <RsaPublicKey as DecodeRsaPublicKey>::from_pkcs1_pem(
-                        item.object_raw().expect("object must exist"),
-                    ) {
-                        Ok(v) => Some(VerifyingKey::<Sha1>::from(v)),
-                        _ => return Some(Err(CertFormatError.into())),
-                    };
+                    signing = Some(
+                        <RsaPublicKey as DecodeRsaPublicKey>::from_pkcs1_pem(
+                            item.object_raw().expect("object must exist"),
+                        )
+                        .ok()
+                        .map(VerifyingKey::<Sha1>::from)
+                        .ok_or(CertFormatError)?,
+                    );
                 }
                 // dir-key-crosscert has object, without extra args, and is exactly once
                 ("dir-key-crosscert", Some(("ID SIGNATURE" | "SIGNATURE", s)))
                     if item.arguments().next().is_none() && crosscert.is_none() =>
                 {
-                    crosscert = match decode_sig(&mut tmp, s.as_bytes()) {
-                        Some(v) => Some(v),
-                        _ => return Some(Err(CertFormatError.into())),
-                    };
+                    crosscert = Some(decode_sig(&mut tmp, s.as_bytes()).ok_or(CertFormatError)?);
                 }
                 // dir-key-certification has object, without extra args, and is exactly once
                 ("dir-key-certification", Some(("SIGNATURE", s)))
                     if item.arguments().next().is_none() =>
                 {
-                    signature = match decode_sig(&mut tmp, s.as_bytes()) {
-                        Some(v) => v,
-                        _ => return Some(Err(CertFormatError.into())),
-                    };
+                    signature = decode_sig(&mut tmp, s.as_bytes()).ok_or(CertFormatError)?;
 
                     end_off = item.byte_offset() + item.len() + 1;
                     end_msg = item.byte_offset() + item.line_len() + 1;
 
                     break;
                 }
-                _ => return Some(Err(CertFormatError.into())),
+                _ => return Err(CertFormatError.into()),
             }
         }
 
@@ -195,15 +248,15 @@ impl<'a> Iterator for Parser<'a> {
             crosscert,
         )
         else {
-            return Some(Err(CertFormatError.into()));
+            return Err(CertFormatError.into());
         };
 
         // Verify certificate
         {
             let msg = &self.inner.original_string().as_bytes()[start_off..end_msg];
-            if identity.verify(msg, &signature).is_err() {
-                return Some(Err(CertVerifyError.into()));
-            }
+            identity
+                .verify(msg, &signature)
+                .map_err(|_| CertVerifyError)?;
             drop(signature);
         }
 
@@ -214,25 +267,30 @@ impl<'a> Iterator for Parser<'a> {
                     error!(
                         "cannot re-encode identity key (normally this should not happen): {e:?}"
                     );
-                    return Some(Err(CertVerifyError.into()));
+                    return Err(CertVerifyError.into());
                 }
             };
 
             // Verify fingerprint
             let hashed = RelayId::from(Sha1::digest(msg.into_vec()));
             if !bool::from(fingerprint.ct_eq(&hashed)) {
-                return Some(Err(CertVerifyError.into()));
+                return Err(CertVerifyError.into());
             }
 
             // Verify crosscert
-            if signing.verify_prehash(&hashed, &crosscert).is_err() {
-                return Some(Err(CertVerifyError.into()));
-            }
+            signing
+                .verify_prehash(&hashed, &crosscert)
+                .map_err(|_| CertVerifyError)?;
             drop(crosscert);
         }
 
-        Some(Ok(Item {
-            s: &self.inner.original_string()[start_off..end_off],
+        Ok(Item {
+            // SAFETY: Indices are valid.
+            s: unsafe {
+                self.inner
+                    .original_string()
+                    .get_unchecked(start_off..end_off)
+            },
             byte_off: start_off,
 
             fingerprint,
@@ -242,11 +300,37 @@ impl<'a> Iterator for Parser<'a> {
 
             id_key: identity,
             sign_key: signing,
-        }))
+        })
     }
 }
 
+impl<'a> Iterator for Parser<'a> {
+    type Item = Result<Item<'a>, AuthCertError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.is_valid {
+            return None;
+        }
+        let item = match self.inner.next()? {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e.into())),
+        };
+
+        let ret = self.parse(item);
+        self.is_valid = ret.is_ok();
+        Some(ret)
+    }
+}
+
+impl FusedIterator for Parser<'_> {}
+
 impl<'a> Item<'a> {
+    /// Returns total length of certificate (including trailing newline).
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.s.len()
+    }
+
     /// Returns byte offset of item.
     #[inline(always)]
     pub fn byte_offset(&self) -> usize {
@@ -383,28 +467,61 @@ kHgepW7IkJFnbeYWVaFDMDr+QwXHSj9SBySlkLlOxix+nopDQZAQQDkeL65ZRLI4
             )
         };
 
+        #[derive(Debug, Clone, Copy)]
+        enum Items {
+            Address,
+            Fingerprint,
+            Published,
+            Expired,
+            IdentityKey,
+            SigningKey,
+            Crosscert,
+        }
+
         proptest!(|(v in vec((
             any::<u32>().prop_map(|v| SystemTime::UNIX_EPOCH + Duration::from_secs(v.into())),
             any::<u32>().prop_map(|v| SystemTime::UNIX_EPOCH + Duration::from_secs(v.into())),
             any::<Option<(IpAddr, u16)>>().prop_map(|v| v.map(|(ip, port)| SocketAddr::new(ip, port))),
+            Just([
+                Items::Address,
+                Items::Fingerprint,
+                Items::Published,
+                Items::Expired,
+                Items::IdentityKey,
+                Items::SigningKey,
+                Items::Crosscert,
+            ]).prop_shuffle(),
         ), 1..=32))| {
             let mut s = String::new();
 
-            for (published, expired, addr) in &v {
+            for (published, expired, addr, keys) in &v {
                 let start = s.len();
                 writeln!(s, "dir-key-certificate-version 3").unwrap();
-                if let Some(addr) = addr {
-                    writeln!(s, "dir-address {addr}").unwrap();
+
+                for key in keys {
+                    match key {
+                        Items::Address => {
+                            if let Some(addr) = addr {
+                                writeln!(s, "dir-address {addr}").unwrap();
+                            }
+                        }
+                        Items::Fingerprint => writeln!(s, "fingerprint {}", print_hex(&fingerprint)).unwrap(),
+                        Items::Published => {
+                            write!(s, "dir-key-published ").unwrap();
+                            write_datetime(&mut s, (*published).into());
+                            writeln!(s, "").unwrap();
+                        }
+                        Items::Expired => {
+                            write!(s, "dir-key-expires ").unwrap();
+                            write_datetime(&mut s, (*expired).into());
+                            writeln!(s, "").unwrap();
+                        }
+                        Items::IdentityKey => write!(s, "dir-identity-key\n{id_key}").unwrap(),
+                        Items::SigningKey => write!(s, "dir-signing-key\n{id_key}").unwrap(),
+                        Items::Crosscert => writeln!(s, "dir-key-crosscert\n-----BEGIN ID SIGNATURE-----\n{crosscert}\n-----END ID SIGNATURE-----").unwrap(),
+                    }
                 }
-                writeln!(s, "fingerprint {}", print_hex(&fingerprint)).unwrap();
-                write!(s, "dir-key-published ").unwrap();
-                write_datetime(&mut s, (*published).into());
-                writeln!(s, "").unwrap();
-                write!(s, "dir-key-expires ").unwrap();
-                write_datetime(&mut s, (*expired).into());
-                write!(s, "\ndir-identity-key\n{id_key}").unwrap();
-                write!(s, "dir-signing-key\n{id_key}").unwrap();
-                writeln!(s, "dir-key-crosscert\n-----BEGIN ID SIGNATURE-----\n{crosscert}\n-----END ID SIGNATURE-----").unwrap();
+
                 writeln!(s, "dir-key-certification").unwrap();
                 let sig = sign_key.sign(&s.as_bytes()[start..]);
                 writeln!(s, "-----BEGIN SIGNATURE-----\n{}\n-----END SIGNATURE-----", encode_sig(sig)).unwrap();
@@ -412,7 +529,7 @@ kHgepW7IkJFnbeYWVaFDMDr+QwXHSj9SBySlkLlOxix+nopDQZAQQDkeL65ZRLI4
 
             let mut parser = Parser::new(&s);
 
-            for (published, expired, addr) in v {
+            for (published, expired, addr, _) in v {
                 let Item {
                     fingerprint: fingerprint_,
                     published: published_,
