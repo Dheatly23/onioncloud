@@ -548,4 +548,13 @@ kHgepW7IkJFnbeYWVaFDMDr+QwXHSj9SBySlkLlOxix+nopDQZAQQDkeL65ZRLI4
             }
         });
     }
+
+    proptest! {
+        #[test]
+        fn test_auth_cert_empty(s in "\n*") {
+            if let Some(i) = Parser::new(&s).next() {
+                panic!("expect None, got {:?}", i.as_ref().map(|v| v.s));
+            }
+        }
+    }
 }
