@@ -7,9 +7,10 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::SystemTime;
 
-use base64ct::{Base64, Decoder};
+use base64ct::{Base64, Decoder, Error as B64Error};
 use digest::Digest;
 use rsa::RsaPublicKey;
+use rsa::pkcs1::der::pem::BASE64_WRAP_WIDTH;
 use rsa::pkcs1::{DecodeRsaPublicKey, EncodeRsaPublicKey};
 use rsa::pkcs1v15::{Signature, VerifyingKey};
 use rsa::signature::Verifier;
@@ -187,24 +188,14 @@ impl<'a> Parser<'a> {
                     if item.arguments().next().is_some() || identity.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    identity = Some(VerifyingKey::<Sha1>::from(
-                        <RsaPublicKey as DecodeRsaPublicKey>::from_pkcs1_pem(
-                            item.object_raw().ok_or(CertFormatError)?,
-                        )
-                        .map_err(|_| CertVerifyError)?,
-                    ));
+                    identity = Some(decode_cert(&mut tmp, &item)?);
                 }
                 // dir-signing-key has object, without extra args, and is exactly once
                 "dir-signing-key" => {
                     if item.arguments().next().is_some() || signing.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    signing = Some(VerifyingKey::<Sha1>::from(
-                        <RsaPublicKey as DecodeRsaPublicKey>::from_pkcs1_pem(
-                            item.object_raw().ok_or(CertFormatError)?,
-                        )
-                        .map_err(|_| CertVerifyError)?,
-                    ));
+                    signing = Some(decode_cert(&mut tmp, &item)?);
                 }
                 // dir-key-crosscert has object, without extra args, and is exactly once
                 "dir-key-crosscert" => {
@@ -356,18 +347,33 @@ impl<'a> Item<'a> {
     }
 }
 
-fn decode_sig(tmp: &mut [u8], s: &str) -> Result<Signature, CertVerifyError> {
-    // Remove trailing whitespace.
-    let ([s @ .., b'\r', b'\n'] | [s @ .., b'\r' | b'\n'] | s) = s.as_bytes();
+fn map_b64_err(e: B64Error) -> AuthCertError {
+    match e {
+        B64Error::InvalidEncoding => CertFormatError.into(),
+        B64Error::InvalidLength => CertVerifyError.into(),
+    }
+}
 
-    let mut decoder = Decoder::<Base64>::new_wrapped(s, 64).map_err(|_| CertVerifyError)?;
-    let tmp = tmp
-        .get_mut(..decoder.remaining_len())
-        .ok_or(CertVerifyError)?;
-    let v = decoder.decode(tmp).map_err(|_| CertVerifyError)?;
-    drop(decoder);
+fn decode_b64<'a>(tmp: &'a mut [u8], s: &str) -> Result<&'a [u8], AuthCertError> {
+    let mut d =
+        Decoder::<Base64>::new_wrapped(s.as_bytes(), BASE64_WRAP_WIDTH).map_err(map_b64_err)?;
+    let tmp = tmp.get_mut(..d.remaining_len()).ok_or(CertVerifyError)?;
+    d.decode(tmp).map_err(map_b64_err)
+}
 
-    v.try_into().map_err(|_| CertVerifyError.into())
+fn decode_cert(tmp: &mut [u8], item: &NetdocItem<'_>) -> Result<VerifyingKey<Sha1>, AuthCertError> {
+    let Some(("RSA PUBLIC KEY", s)) = item.object() else {
+        return Err(CertFormatError.into());
+    };
+    RsaPublicKey::from_pkcs1_der(decode_b64(tmp, s)?)
+        .map(|v| v.into())
+        .map_err(|_| CertVerifyError.into())
+}
+
+fn decode_sig(tmp: &mut [u8], s: &str) -> Result<Signature, AuthCertError> {
+    decode_b64(tmp, s)?
+        .try_into()
+        .map_err(|_| CertVerifyError.into())
 }
 
 #[cfg(test)]
