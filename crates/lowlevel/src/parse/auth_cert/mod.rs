@@ -260,8 +260,12 @@ impl<'a> Item<'a> {
     }
 
     /// Verify published and expired dates.
-    pub fn verify_expiry(&self, now: SystemTime) -> bool {
-        self.published > now || self.expired <= now
+    pub fn verify_expiry(&self, now: SystemTime) -> Result<(), CertVerifyError> {
+        if self.published > now && self.expired <= now {
+            Ok(())
+        } else {
+            Err(CertVerifyError)
+        }
     }
 }
 

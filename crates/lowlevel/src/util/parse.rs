@@ -4,16 +4,23 @@ use chrono::{NaiveDate, NaiveTime};
 
 /// Parse date in form of `YYYY-MM-DD`.
 pub(crate) fn parse_date(s: &str) -> Option<NaiveDate> {
+    let s = s.as_bytes();
+    let mut year = 0i32;
     let mut i = 0;
     loop {
-        match s.as_bytes().get(i)? {
-            b'-' if i >= 4 => break,
-            b'0'..=b'9' => i += 1,
+        match s.get(i)? {
+            b'-' if i >= 4 => {
+                i += 1;
+                break;
+            }
+            c @ b'0'..=b'9' => {
+                year = year.checked_mul(10)?.checked_add((c - b'0').into())?;
+                i += 1;
+            }
             _ => return None,
         }
     }
 
-    let year = s[..i].parse::<i32>().ok()?;
     // Extremely naive month and day parsing :)
     let [
         mt @ b'0'..=b'9',
@@ -21,7 +28,7 @@ pub(crate) fn parse_date(s: &str) -> Option<NaiveDate> {
         b'-',
         dt @ b'0'..=b'9',
         dd @ b'0'..=b'9',
-    ] = &s.as_bytes()[i + 1..]
+    ] = &s[i..]
     else {
         return None;
     };
@@ -35,13 +42,13 @@ pub(crate) fn parse_date(s: &str) -> Option<NaiveDate> {
 pub(crate) fn parse_time(s: &str) -> Option<NaiveTime> {
     // Extremely naive hour, minute, and second parsing :)
     let [
-        ht @ b'0'..=b'9',
+        ht @ b'0'..=b'2',
         hd @ b'0'..=b'9',
         b':',
-        mt @ b'0'..=b'9',
+        mt @ b'0'..=b'5',
         md @ b'0'..=b'9',
         b':',
-        st @ b'0'..=b'9',
+        st @ b'0'..=b'5',
         sd @ b'0'..=b'9',
     ] = s.as_bytes()
     else {
@@ -77,7 +84,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn test_parse_date(date in (0i32..).prop_filter_map("invalid date", NaiveDate::from_num_days_from_ce_opt)) {
+        fn test_parse_date(date in (-366i32..).prop_filter_map("invalid date", |t| NaiveDate::from_num_days_from_ce_opt(t).filter(|v| v.year() >= 0))) {
             let s = format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day());
             let res = parse_date(&s).unwrap();
             assert_eq!(res, date);
