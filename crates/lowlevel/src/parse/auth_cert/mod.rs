@@ -214,7 +214,7 @@ impl<'a> Parser<'a> {
                     let Some(("ID SIGNATURE" | "SIGNATURE", s)) = item.object() else {
                         return Err(CertFormatError.into());
                     };
-                    crosscert = Some(decode_sig(&mut tmp, s.as_bytes())?);
+                    crosscert = Some(decode_sig(&mut tmp, s)?);
                 }
                 // dir-key-certification has object, without extra args, and is exactly once
                 "dir-key-certification" => {
@@ -224,7 +224,7 @@ impl<'a> Parser<'a> {
                     let Some(("SIGNATURE", s)) = item.object() else {
                         return Err(CertFormatError.into());
                     };
-                    signature = decode_sig(&mut tmp, s.as_bytes())?;
+                    signature = decode_sig(&mut tmp, s)?;
 
                     end_off = item.byte_offset() + item.len() + 1;
                     end_msg = item.byte_offset() + item.line_len() + 1;
@@ -356,13 +356,20 @@ impl<'a> Item<'a> {
     }
 }
 
-fn decode_sig(tmp: &mut [u8], s: &[u8]) -> Result<Signature, CertVerifyError> {
+fn decode_sig(tmp: &mut [u8], s: &str) -> Result<Signature, CertVerifyError> {
+    // Remove trailing whitespace.
+    let s = match s.as_bytes() {
+        [s @ .., b'\r', b'\n'] | [s @ .., b'\r'] | [s @ .., b'\n'] => s,
+        s => s,
+    };
+
     let mut decoder = Decoder::<Base64>::new_wrapped(s, 64).map_err(|_| CertVerifyError)?;
     let tmp = tmp
         .get_mut(..decoder.remaining_len())
         .ok_or(CertVerifyError)?;
     let v = decoder.decode(tmp).map_err(|_| CertVerifyError)?;
     drop(decoder);
+
     v.try_into().map_err(|_| CertVerifyError.into())
 }
 
