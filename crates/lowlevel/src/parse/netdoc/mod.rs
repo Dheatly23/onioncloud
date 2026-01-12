@@ -65,6 +65,13 @@ impl<'a> NetdocParser<'a> {
     pub const fn original_string(&self) -> &'a str {
         self.s
     }
+
+    /// Force terminate parser.
+    ///
+    /// Afterwards it's guaranteed to stop iterating.
+    pub fn terminate(&mut self) {
+        self.end.set(0);
+    }
 }
 
 impl<'a> Iterator for NetdocParser<'a> {

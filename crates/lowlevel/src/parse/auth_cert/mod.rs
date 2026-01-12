@@ -51,7 +51,6 @@ use crate::errors::{AuthCertError, CertFormatError, CertVerifyError};
 /// ```
 pub struct Parser<'a> {
     inner: NetdocParser<'a>,
-    is_valid: bool,
 }
 
 /// An item from [`Parser`].
@@ -94,7 +93,6 @@ impl<'a> Parser<'a> {
     pub fn new(s: &'a str) -> Self {
         Self {
             inner: NetdocParser::new(s),
-            is_valid: true,
         }
     }
 
@@ -308,16 +306,15 @@ impl<'a> Iterator for Parser<'a> {
     type Item = Result<Item<'a>, AuthCertError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if !self.is_valid {
-            return None;
-        }
         let item = match self.inner.next()? {
             Ok(v) => v,
             Err(e) => return Some(Err(e.into())),
         };
 
         let ret = self.parse(item);
-        self.is_valid = ret.is_ok();
+        if ret.is_err() {
+            self.inner.terminate();
+        }
         Some(ret)
     }
 }
