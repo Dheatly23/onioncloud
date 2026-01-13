@@ -743,8 +743,6 @@ impl<S: RTStream> StreamLike for StreamWrapper<S> {
         } = self.project();
 
         loop {
-            tls.process_new_packets()?;
-
             if pending & FLAG_FLUSH == 0 && stream.as_mut().poll_flush(cx)?.is_pending() {
                 pending |= FLAG_FLUSH;
             }
@@ -793,7 +791,9 @@ impl<S: RTStream> StreamLike for StreamWrapper<S> {
                             info!("shutting down: read end connection closed");
                             return Ok(Ready(None));
                         }
-                        Ok(_) => (),
+                        Ok(_) => {
+                            tls.process_new_packets()?;
+                        }
                         Err(e) => match e.kind() {
                             ErrorKind::Interrupted | ErrorKind::WouldBlock => break,
                             _ => return Err(e.into()),
