@@ -385,8 +385,10 @@ mod tests {
     use std::time::Duration;
 
     use base64ct::{Encoder, LineEnding};
+    use chrono::format::Item as FmtItem;
     use chrono::format::strftime::StrftimeItems;
     use chrono::{DateTime, Utc};
+    use once_cell::sync::OnceCell;
     use proptest::collection::vec;
     use proptest::prelude::*;
     use rand::thread_rng;
@@ -396,8 +398,9 @@ mod tests {
     use crate::util::{print_hex, test_rsa_pk};
 
     fn write_datetime(s: &mut String, dt: DateTime<Utc>) {
-        const FMT: StrftimeItems = StrftimeItems::new("%Y-%m-%d %H:%M:%S");
-        write!(s, "{}", dt.naive_utc().format_with_items(FMT.clone())).unwrap();
+        static FMT: OnceCell<Vec<FmtItem>> = OnceCell::new();
+        let fmt = FMT.get_or_init(|| StrftimeItems::new("%Y-%m-%d %H:%M:%S").parse().unwrap());
+        write!(s, "{}", dt.naive_utc().format_with_items(fmt.iter())).unwrap();
     }
 
     fn encode_sig(sig: Signature) -> String {
