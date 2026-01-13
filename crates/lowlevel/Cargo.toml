@@ -74,8 +74,23 @@ features = [
 
 [dev-dependencies]
 anyhow.workspace = true
+http-body-util.workspace = true
 proptest.workspace = true
 proptest-state-machine.workspace = true
+
+[dev-dependencies.clap]
+workspace = true
+features = [
+  "derive",
+  "env",
+]
+
+[dev-dependencies.hyper]
+workspace = true
+features = [
+  "client",
+  "http1",
+]
 
 [dev-dependencies.test-log]
 workspace = true
