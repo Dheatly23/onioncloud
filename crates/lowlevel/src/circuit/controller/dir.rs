@@ -190,6 +190,7 @@ impl<R: 'static + Runtime, C: 'static + Send + Sync + DirConfig> CircuitControll
 
     fn new(cfg: C, circ_id: GenerationalData<NonZeroU32>) -> Self {
         let sendme = cfg.sendme();
+        info!("sendme: {sendme:?}");
         let cfg = CfgData {
             circ_id,
             linkver: 0,
@@ -691,7 +692,7 @@ impl<R: Runtime, C: 'static + Send + Sync + Clone + CellCache> SteadyState<R, C>
                         None | Some(SendmeData::Unauth) => None,
                         Some(SendmeData::Auth(digest)) => Some(digest),
                     };
-                    match (digest, self.backward_sendme_digest.pop_front()) {
+                    match (digest, self.forward_sendme_digest.pop_front()) {
                         (_, None) => {
                             return Err(errors::CircuitProtocolError(
                                 errors::CircuitProtocolInner::UnexpectedSendme,
@@ -890,7 +891,7 @@ impl<R: Runtime, C: 'static + Send + Sync + Clone + CellCache> SteadyState<R, C>
         }
 
         while found.is_none() {
-            let Some(digest) = self.forward_sendme_digest.pop_front() else {
+            let Some(digest) = self.backward_sendme_digest.pop_front() else {
                 break;
             };
             let data = match self.sendme_ty {
@@ -905,6 +906,7 @@ impl<R: Runtime, C: 'static + Send + Sync + Clone + CellCache> SteadyState<R, C>
                 cfg.circ_id.inner,
                 RelayVersion::V0,
             )?);
+            trace!("sending circuit SENDME cell");
 
             self.backward_data_count = self
                 .backward_data_count

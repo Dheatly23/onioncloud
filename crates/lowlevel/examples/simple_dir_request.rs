@@ -25,7 +25,9 @@ use onioncloud_lowlevel::cell::padding::{NegotiateCommand, NegotiateCommandV0};
 use onioncloud_lowlevel::channel::ChannelConfig;
 use onioncloud_lowlevel::channel::controller::{UserConfig, UserControlMsg, UserController};
 use onioncloud_lowlevel::channel::manager::SingleManager as ChannelManager;
-use onioncloud_lowlevel::circuit::controller::dir::{DirConfig, DirControlMsg, DirController};
+use onioncloud_lowlevel::circuit::controller::dir::{
+    DirConfig, DirControlMsg, DirController, SendmeType,
+};
 use onioncloud_lowlevel::circuit::manager::SingleManager as CircuitManager;
 use onioncloud_lowlevel::crypto::relay::{RelayId, from_str as relay_from_str};
 use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
@@ -71,6 +73,10 @@ impl DirConfig for ConfigDir {
 
     fn get_cache(&self) -> &Self::Cache {
         &self.cache
+    }
+
+    fn sendme(&self) -> SendmeType {
+        SendmeType::Auth
     }
 }
 
@@ -194,9 +200,11 @@ async fn handle_circ(
 }
 
 async fn handle_stream(
-    stream: DirStreamTy<TokioRuntime, Arc<StandardCellCache>>,
+    mut stream: DirStreamTy<TokioRuntime, Arc<StandardCellCache>>,
     url: Uri,
 ) -> String {
+    stream.enable_sendme();
+
     info!("sleeping for 5 seconds");
     sleep(Duration::from_secs(5)).await;
 
