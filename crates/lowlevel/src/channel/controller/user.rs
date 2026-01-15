@@ -28,7 +28,9 @@ use crate::cell::padding::{
 use crate::cell::versions::Versions;
 use crate::cell::writer::CellWriter;
 use crate::cell::{Cell, CellHeader, CellLike, FixedCell, cast};
-use crate::channel::controller::ChannelController;
+use crate::channel::controller::{
+    ChannelController, DEFAULT_CHANNEL_AGGREGATE_CAP, DEFAULT_CHANNEL_CAP,
+};
 use crate::channel::{ChannelConfig, ChannelInput, ChannelOutput, NewCircuit};
 use crate::crypto::cert::{UnverifiedEdCert, UnverifiedRsaCert, extract_rsa_from_x509};
 use crate::crypto::{EdPublicKey, Sha256Output};
@@ -60,6 +62,16 @@ pub trait UserConfig: ChannelConfig + Send + Sync {
     fn get_padding_param(&self, linkver: u16) -> NegotiateCommand {
         let _ = linkver;
         NegotiateCommand::V0(NegotiateCommandV0::Stop)
+    }
+
+    /// Get circuit channel capacity.
+    fn channel_cap(&self) -> usize {
+        DEFAULT_CHANNEL_CAP
+    }
+
+    /// Get circuit aggregation channel capacity.
+    fn channel_aggregate_cap(&self) -> usize {
+        DEFAULT_CHANNEL_AGGREGATE_CAP
     }
 }
 
@@ -239,6 +251,14 @@ impl<R: 'static + Runtime, Cfg: 'static + UserConfig> ChannelController for User
     type ControlMsg = UserControlMsg<R, Cfg::Cache>;
     type Cell = CellTy<Cfg::Cache>;
     type CircMeta = CircuitMeta;
+
+    fn channel_cap(cfg: &Cfg) -> usize {
+        cfg.channel_cap()
+    }
+
+    fn channel_aggregate_cap(cfg: &Cfg) -> usize {
+        cfg.channel_aggregate_cap()
+    }
 
     fn new(_: &Self::Runtime, cfg: Self::Config) -> Self {
         Self {

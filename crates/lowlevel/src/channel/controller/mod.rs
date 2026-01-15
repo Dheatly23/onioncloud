@@ -63,18 +63,19 @@ pub trait ChannelController:
     type CircMeta: 'static + Send;
 
     /// Get circuit channel capacity.
-    fn channel_cap(cfg: &Self::Config) -> usize {
-        // Discard configuration
-        let _ = cfg;
-        256
+    fn channel_cap(_config: &Self::Config) -> usize {
+        DEFAULT_CHANNEL_CAP
     }
 
     /// Get circuit aggregation channel capacity.
-    fn channel_aggregate_cap(cfg: &Self::Config) -> usize {
-        // Discard configuration
-        let _ = cfg;
-        256
+    fn channel_aggregate_cap(_config: &Self::Config) -> usize {
+        DEFAULT_CHANNEL_AGGREGATE_CAP
     }
 
     fn new(rt: &Self::Runtime, cfg: Self::Config) -> Self;
 }
+
+/// Default circuit channel capacity.
+pub const DEFAULT_CHANNEL_CAP: usize = 256;
+/// Default circuit aggregation channel capacity.
+pub const DEFAULT_CHANNEL_AGGREGATE_CAP: usize = 256;

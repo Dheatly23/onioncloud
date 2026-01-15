@@ -257,7 +257,7 @@ async fn handle_circuit<C: 'static + CircuitController>(
     recv: <C::Runtime as Runtime>::SPSCReceiver<C::Cell>,
 ) -> bool {
     let stream_map = StreamMap::new(&rt, C::channel_cap(&cfg), C::channel_aggregate_cap(&cfg));
-    let mut controller = C::new(cfg, circ_id);
+    let mut controller = C::new(&rt, cfg, circ_id);
     controller.set_linkver(linkver);
 
     CircuitFut {

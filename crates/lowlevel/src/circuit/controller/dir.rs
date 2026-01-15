@@ -18,7 +18,9 @@ use crate::cell::relay::sendme::{RelaySendme, SendmeData};
 use crate::cell::relay::v0::RelayExt;
 use crate::cell::relay::{IntoRelay, Relay, RelayEarly, RelayVersion, cast as cast_r};
 use crate::cell::{Cell, FixedCell, cast};
-use crate::circuit::controller::CircuitController;
+use crate::circuit::controller::{
+    CircuitController, DEFAULT_CHANNEL_AGGREGATE_CAP, DEFAULT_CHANNEL_CAP,
+};
 use crate::circuit::{CircuitInput, CircuitOutput, NewStream};
 use crate::crypto::onion::{CircuitDigest, OnionLayer, OnionLayer128, OnionLayerFast, RelayDigest};
 use crate::errors;
@@ -49,6 +51,16 @@ pub trait DirConfig {
     /// NOTE: It's only called once during controller setup. It will not be called again.
     fn sendme(&self) -> SendmeType {
         SendmeType::Disabled
+    }
+
+    /// Get circuit channel capacity.
+    fn channel_cap(&self) -> usize {
+        DEFAULT_CHANNEL_CAP
+    }
+
+    /// Get circuit aggregation channel capacity.
+    fn channel_aggregate_cap(&self) -> usize {
+        DEFAULT_CHANNEL_AGGREGATE_CAP
     }
 }
 
@@ -188,7 +200,15 @@ impl<R: 'static + Runtime, C: 'static + Send + Sync + DirConfig> CircuitControll
     type StreamCell = RelayTy<C::Cache>;
     type StreamMeta = DirStreamMeta;
 
-    fn new(cfg: C, circ_id: GenerationalData<NonZeroU32>) -> Self {
+    fn channel_cap(cfg: &C) -> usize {
+        cfg.channel_cap()
+    }
+
+    fn channel_aggregate_cap(cfg: &C) -> usize {
+        cfg.channel_aggregate_cap()
+    }
+
+    fn new(_: &R, cfg: C, circ_id: GenerationalData<NonZeroU32>) -> Self {
         let sendme = cfg.sendme();
         info!("sendme: {sendme:?}");
         let cfg = CfgData {

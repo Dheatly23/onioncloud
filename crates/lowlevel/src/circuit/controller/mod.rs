@@ -72,16 +72,16 @@ pub trait CircuitController:
 
     /// Get circuit channel capacity.
     fn channel_cap(_config: &Self::Config) -> usize {
-        256
+        DEFAULT_CHANNEL_CAP
     }
 
     /// Get circuit aggregation channel capacity.
     fn channel_aggregate_cap(_config: &Self::Config) -> usize {
-        256
+        DEFAULT_CHANNEL_AGGREGATE_CAP
     }
 
     /// Create new [`CircuitController`].
-    fn new(cfg: Self::Config, circ_id: Self::CircID) -> Self;
+    fn new(rt: &Self::Runtime, cfg: Self::Config, circ_id: Self::CircID) -> Self;
 
     /// Set link version.
     ///
@@ -102,3 +102,8 @@ pub trait CircuitController:
     /// Create DESTROY cell from reason.
     fn make_destroy_cell(&mut self, reason: DestroyReason) -> Self::Cell;
 }
+
+/// Default circuit channel capacity.
+pub const DEFAULT_CHANNEL_CAP: usize = 256;
+/// Default circuit aggregation channel capacity.
+pub const DEFAULT_CHANNEL_AGGREGATE_CAP: usize = 256;

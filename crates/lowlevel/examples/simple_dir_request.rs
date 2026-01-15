@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use clap::{ArgAction, Parser};
+use clap::Parser;
 use futures_io::{AsyncRead, AsyncWrite};
 use futures_util::{FutureExt, select_biased};
 use http_body_util::{BodyExt, Empty};
