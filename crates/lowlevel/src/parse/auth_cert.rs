@@ -10,14 +10,13 @@ use std::time::SystemTime;
 use base64ct::{Base64, Decoder, Error as B64Error};
 use digest::Digest;
 use rsa::RsaPublicKey;
+use rsa::pkcs1::DecodeRsaPublicKey;
 use rsa::pkcs1::der::pem::BASE64_WRAP_WIDTH;
-use rsa::pkcs1::{DecodeRsaPublicKey, EncodeRsaPublicKey};
 use rsa::pkcs1v15::{Signature, VerifyingKey};
 use rsa::signature::Verifier;
 use rsa::signature::hazmat::PrehashVerifier;
 use sha1::Sha1;
 use subtle::ConstantTimeEq;
-use tracing::error;
 
 use super::misc::args_date_time;
 use super::netdoc::{Item as NetdocItem, NetdocParser};
@@ -188,14 +187,15 @@ impl<'a> Parser<'a> {
                     if item.arguments().next().is_some() || identity.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    identity = Some(decode_cert(&mut tmp, &item)?);
+                    let (key, der) = decode_cert(&mut tmp, &item)?;
+                    identity = Some((key, RelayId::from(Sha1::digest(der))));
                 }
                 // dir-signing-key has object, without extra args, and is exactly once
                 "dir-signing-key" => {
                     if item.arguments().next().is_some() || signing.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    signing = Some(decode_cert(&mut tmp, &item)?);
+                    signing = Some(decode_cert(&mut tmp, &item)?.0);
                 }
                 // dir-key-crosscert has object, without extra args, and is exactly once
                 "dir-key-crosscert" => {
@@ -231,7 +231,7 @@ impl<'a> Parser<'a> {
             Some(fingerprint),
             Some(published),
             Some(expired),
-            Some(identity),
+            Some((identity, hashed)),
             Some(signing),
             Some(crosscert),
         ) = (
@@ -256,18 +256,7 @@ impl<'a> Parser<'a> {
         }
 
         {
-            let msg = match identity.to_pkcs1_der() {
-                Ok(v) => v,
-                Err(e) => {
-                    error!(
-                        "cannot re-encode identity key (normally this should not happen): {e:?}"
-                    );
-                    return Err(CertVerifyError.into());
-                }
-            };
-
             // Verify fingerprint
-            let hashed = RelayId::from(Sha1::digest(msg.into_vec()));
             if !bool::from(fingerprint.ct_eq(&hashed)) {
                 return Err(CertVerifyError.into());
             }
@@ -361,13 +350,18 @@ fn decode_b64<'a>(tmp: &'a mut [u8], s: &str) -> Result<&'a [u8], AuthCertError>
     d.decode(tmp).map_err(map_b64_err)
 }
 
-fn decode_cert(tmp: &mut [u8], item: &NetdocItem<'_>) -> Result<VerifyingKey<Sha1>, AuthCertError> {
+fn decode_cert<'a>(
+    tmp: &'a mut [u8],
+    item: &NetdocItem<'_>,
+) -> Result<(VerifyingKey<Sha1>, &'a [u8]), AuthCertError> {
     let Some(("RSA PUBLIC KEY", s)) = item.object() else {
         return Err(CertFormatError.into());
     };
-    RsaPublicKey::from_pkcs1_der(decode_b64(tmp, s)?)
-        .map(|v| v.into())
-        .map_err(|_| CertVerifyError.into())
+    let der = decode_b64(tmp, s)?;
+    let Ok(key) = RsaPublicKey::from_pkcs1_der(der) else {
+        return Err(CertVerifyError.into());
+    };
+    Ok((key.into(), der))
 }
 
 fn decode_sig(tmp: &mut [u8], s: &str) -> Result<Signature, AuthCertError> {
@@ -392,6 +386,7 @@ mod tests {
     use proptest::collection::vec;
     use proptest::prelude::*;
     use rand::thread_rng;
+    use rsa::pkcs1::EncodeRsaPublicKey;
     use rsa::pkcs1v15::SigningKey;
     use rsa::signature::{RandomizedDigestSigner, Signer};
 
