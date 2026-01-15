@@ -21,6 +21,7 @@ use crate::errors::{NetdocParseError, NetdocParseErrorType as ErrType};
 /// In case of **invalid** document, it's guaranteed it will produce error value eventually and then stops.
 /// There is **no guarantee** when will error value be produced and/or it's content.
 /// Reverse order is not guaranteed to produce the exact reverse of forward iteration.
+#[derive(Clone)]
 pub struct NetdocParser<'a> {
     s: &'a str,
     off: Cell<usize>,
@@ -36,6 +37,7 @@ unsafe impl Sync for NetdocParser<'_> {}
 /// Single netdoc item.
 ///
 /// Returned by iteration of [`NetdocParser`].
+#[derive(Clone)]
 pub struct Item<'a> {
     s: &'a str,
     byte_off: usize,
@@ -510,6 +512,7 @@ impl<'a> Item<'a> {
 }
 
 /// Iterator of netdoc item arguments.
+#[derive(Clone)]
 pub struct Arguments<'a> {
     s: &'a str,
 }
