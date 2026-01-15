@@ -82,9 +82,9 @@ pub struct Item<'a> {
     pub address: Option<SocketAddr>,
 
     /// Long-term identity key.
-    pub id_key: VerifyingKey<Sha1>,
+    pub id_key: RsaPublicKey,
     /// Signing key.
-    pub sign_key: VerifyingKey<Sha1>,
+    pub sign_key: RsaPublicKey,
 }
 
 impl<'a> Parser<'a> {
@@ -282,8 +282,8 @@ impl<'a> Parser<'a> {
             expired,
             address,
 
-            id_key: identity,
-            sign_key: signing,
+            id_key: identity.into(),
+            sign_key: signing.into(),
         })
     }
 }
@@ -555,8 +555,8 @@ kHgepW7IkJFnbeYWVaFDMDr+QwXHSj9SBySlkLlOxix+nopDQZAQQDkeL65ZRLI4
                 assert_eq!(published_, published);
                 assert_eq!(expired_, expired);
                 assert_eq!(address, addr);
-                assert_eq!(RsaPublicKey::from(id_key), public_key);
-                assert_eq!(RsaPublicKey::from(sign_key), public_key);
+                assert_eq!(id_key, public_key);
+                assert_eq!(sign_key, public_key);
             }
 
             if let Some(i) = parser.next() {
