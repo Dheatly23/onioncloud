@@ -20,8 +20,9 @@ use subtle::ConstantTimeEq;
 
 use super::misc::args_date_time;
 use super::netdoc::{Item as NetdocItem, NetdocParser};
-use crate::crypto::relay::{RelayId, from_str as relay_from_str};
+use crate::crypto::relay::RelayId;
 use crate::errors::{AuthCertError, CertFormatError, CertVerifyError};
+use crate::util::parse::parse_hex;
 
 /// Directory authority certificate parser.
 ///
@@ -125,7 +126,7 @@ impl<'a> Parser<'a> {
         let end_msg;
 
         let mut address = None;
-        let mut fingerprint = None;
+        let mut fingerprint = None::<RelayId>;
         let mut published = None;
         let mut expired = None;
         let mut identity = None;
@@ -159,10 +160,12 @@ impl<'a> Parser<'a> {
                     if fingerprint.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    fingerprint = match item.arguments().next().map(relay_from_str) {
-                        Some(Ok(v)) => Some(v),
-                        _ => return Err(CertFormatError.into()),
-                    };
+                    fingerprint = Some(
+                        item.arguments()
+                            .next()
+                            .and_then(parse_hex)
+                            .ok_or(CertFormatError)?,
+                    );
                 }
                 // dir-key-published is exactly once
                 "dir-key-published" => {

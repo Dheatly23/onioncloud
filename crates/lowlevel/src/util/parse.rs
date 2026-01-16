@@ -2,6 +2,28 @@
 
 use chrono::{NaiveDate, NaiveTime};
 
+/// Parse fingerprint in form of 40-digit hexadecimal string.
+pub(crate) fn parse_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
+    // Check if byte length is valid
+    let s = s.as_bytes();
+    if s.len() != N * 2 {
+        return None;
+    }
+
+    // Process bytes
+    let mut ret = [0u8; N];
+    for (i, o) in ret.iter_mut().enumerate() {
+        let i = i * 2;
+        let (u, l) = (
+            char::from(s[i]).to_digit(16)?,
+            char::from(s[i + 1]).to_digit(16)?,
+        );
+        *o = l as u8 | ((u as u8) << 4);
+    }
+
+    Some(ret)
+}
+
 /// Parse date in form of `YYYY-MM-DD`.
 pub(crate) fn parse_date(s: &str) -> Option<NaiveDate> {
     let s = s.as_bytes();
@@ -67,6 +89,9 @@ mod tests {
 
     use chrono::{Datelike as _, Timelike as _};
     use proptest::prelude::*;
+
+    use crate::crypto::relay::RelayId;
+    use crate::util::print_hex;
 
     #[test]
     fn test_parse_date_empty_string_fail() {
@@ -134,6 +159,19 @@ mod tests {
         ]) {
             if let Some(v) = parse_time(&s) {
                 panic!("parser expected to fail, got {v}");
+            }
+        }
+
+        #[test]
+        fn test_parse_fingerprint(s in "[0-9A-Fa-f]{40}") {
+            let _: RelayId = parse_hex(&s).unwrap();
+        }
+
+        #[test]
+        fn test_parse_fingerprint_truncated(s in "[0-9A-Fa-f]{0,39}") {
+            let v: Option<RelayId> = parse_hex(&s);
+            if let Some(v) = v {
+                panic!("parser expected to fail, got {}", print_hex(&v));
             }
         }
     }
