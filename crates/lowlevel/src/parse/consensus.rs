@@ -1231,7 +1231,7 @@ impl ExitPortPolicy {
 
         for (i, v) in self.ports.iter().enumerate() {
             if let ExitPort::PortRange { from, to } = *v
-                && from <= to
+                && from >= to
             {
                 return false;
             } else if i > 0 {
@@ -1287,7 +1287,7 @@ impl ExitPort {
     pub fn contains(&self, port: u16) -> bool {
         match self {
             Self::Port(v) => *v == port,
-            Self::PortRange { from, to } => *from <= port && port >= *to,
+            Self::PortRange { from, to } => *from <= port && port <= *to,
         }
     }
 
@@ -1299,9 +1299,9 @@ impl ExitPort {
             Self::Port(v) => v.cmp(&port),
             Self::PortRange { from, to } => {
                 if port < *from {
-                    Ordering::Less
-                } else if port > *to {
                     Ordering::Greater
+                } else if port > *to {
+                    Ordering::Less
                 } else {
                     Ordering::Equal
                 }
@@ -1409,45 +1409,50 @@ mod tests {
 
     use std::fmt::Write as _;
 
+    use proptest::collection::vec;
     use proptest::prelude::*;
 
-    fn strat_exit_ports() -> impl Strategy<Value = Vec<ExitPort>> {
-        any::<[u8; 65536 / 8]>().prop_map(|a| {
-            let mut v = Vec::new();
-            let mut prev = None;
-            for (ix, i) in a.into_iter().enumerate() {
-                let ix = ix as u16 * 8 + 1;
-                for j in 0..8u16 {
-                    let Some(ix) = ix.checked_add(j) else { break };
-                    let t = i & (1 << j) != 0;
-                    if t && prev.is_none() {
-                        prev = Some(ix);
-                    } else if !t && let Some(prev) = prev.take() {
-                        v.push(if ix - 1 == prev {
-                            ExitPort::Port(prev)
-                        } else {
-                            ExitPort::PortRange {
-                                from: prev,
-                                to: ix - 1,
-                            }
-                        });
-                    }
+    type ExitPortList = [u8; 65536 / 8];
+
+    fn map_exit_ports(a: ExitPortList) -> Vec<ExitPort> {
+        let mut v = Vec::new();
+        let mut prev = None;
+        for (ix, i) in a.into_iter().enumerate() {
+            let ix = ix as u16 * 8 + 1;
+            for j in 0..8u16 {
+                let Some(ix) = ix.checked_add(j) else { break };
+                let t = i & (1 << j) != 0;
+                if t && prev.is_none() {
+                    prev = Some(ix);
+                } else if !t && let Some(prev) = prev.take() {
+                    v.push(if ix - 1 == prev {
+                        ExitPort::Port(prev)
+                    } else {
+                        ExitPort::PortRange {
+                            from: prev,
+                            to: ix - 1,
+                        }
+                    });
                 }
             }
+        }
 
-            if let Some(prev) = prev {
-                v.push(if 65535 == prev {
-                    ExitPort::Port(prev)
-                } else {
-                    ExitPort::PortRange {
-                        from: prev,
-                        to: 65535,
-                    }
-                });
-            }
+        if let Some(prev) = prev {
+            v.push(if 65535 == prev {
+                ExitPort::Port(prev)
+            } else {
+                ExitPort::PortRange {
+                    from: prev,
+                    to: 65535,
+                }
+            });
+        }
 
-            v
-        })
+        v
+    }
+
+    fn strat_exit_ports() -> impl Strategy<Value = Vec<ExitPort>> {
+        any::<ExitPortList>().prop_map(map_exit_ports)
     }
 
     #[test]
@@ -1599,6 +1604,12 @@ bQvhIDrHDXk1P/tCj3SdliUM1uKWUUvR+7i1S2du/S+vrSxT8QV6fq4BftgTc5oR
 
     proptest! {
         #[test]
+        fn test_exit_ports_valid(v in strat_exit_ports()) {
+            let mut v = ExitPortPolicy { accept: false, ports: v };
+            assert!(v.sort_validate());
+        }
+
+        #[test]
         fn test_parse_exit_ports(v in strat_exit_ports()) {
             let mut s = String::new();
             for v in &v {
@@ -1610,6 +1621,32 @@ bQvhIDrHDXk1P/tCj3SdliUM1uKWUUvR+7i1S2du/S+vrSxT8QV6fq4BftgTc5oR
 
             let r = parse_exit_ports(&s).unwrap();
             assert_eq!(r, v);
+        }
+
+        #[test]
+        fn test_exit_port_contains(
+            a: u16,
+            b: u16,
+            port: u16,
+        ) {
+            let (p, t) = if a == b {
+                (ExitPort::Port(a), port == a)
+            } else {
+                let from = a.min(b);
+                let to = a.max(b);
+                (ExitPort::PortRange { from, to }, (from..=to).contains(&port))
+            };
+            assert_eq!(p.contains(port), t);
+        }
+
+        #[test]
+        fn test_exit_port_in_ports(
+            (p, port, ok) in any::<(ExitPortList, u16)>().prop_map(|(a, p)| {
+                let ok = a[(p >> 3) as usize] & (1 << (p & 7)) != 0;
+                (map_exit_ports(a), p, ok)
+            }),
+        ) {
+            assert_eq!(ExitPort::in_ports(&p, port), ok);
         }
     }
 }
