@@ -1409,7 +1409,6 @@ mod tests {
 
     use std::fmt::Write as _;
 
-    use proptest::collection::vec;
     use proptest::prelude::*;
 
     type ExitPortList = [u8; 65536 / 8];
@@ -1418,7 +1417,7 @@ mod tests {
         let mut v = Vec::new();
         let mut prev = None;
         for (ix, i) in a.into_iter().enumerate() {
-            let ix = ix as u16 * 8 + 1;
+            let ix = ix as u16 * 8;
             for j in 0..8u16 {
                 let Some(ix) = ix.checked_add(j) else { break };
                 let t = i & (1 << j) != 0;
@@ -1641,11 +1640,12 @@ bQvhIDrHDXk1P/tCj3SdliUM1uKWUUvR+7i1S2du/S+vrSxT8QV6fq4BftgTc5oR
 
         #[test]
         fn test_exit_port_in_ports(
-            (p, port, ok) in any::<(ExitPortList, u16)>().prop_map(|(a, p)| {
-                let ok = a[(p >> 3) as usize] & (1 << (p & 7)) != 0;
-                (map_exit_ports(a), p, ok)
-            }),
+            a: ExitPortList,
+            port: u16,
         ) {
+            let ok = a[(port >> 3) as usize] & (1 << (port & 7)) != 0;
+            let p = map_exit_ports(a);
+            assert_eq!(p.iter().any(|p| p.contains(port)), ok);
             assert_eq!(ExitPort::in_ports(&p, port), ok);
         }
     }
