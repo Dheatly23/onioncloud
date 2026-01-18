@@ -1,6 +1,7 @@
 mod check;
 
 use std::cell::Cell;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::iter::{FusedIterator, from_fn};
 use std::mem::{replace, take};
 
@@ -45,6 +46,15 @@ pub struct Item<'a> {
     kw_len: usize,
     line_len: usize,
     object_len: usize,
+}
+
+impl Debug for Item<'_> {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> FmtResult {
+        fmt.debug_struct("Item")
+            .field("s", &self.s)
+            .field("byte_off", &self.byte_off)
+            .finish_non_exhaustive()
+    }
 }
 
 const BEGIN: &str = "-----BEGIN ";
@@ -512,7 +522,7 @@ impl<'a> Item<'a> {
 }
 
 /// Iterator of netdoc item arguments.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Arguments<'a> {
     s: &'a str,
 }

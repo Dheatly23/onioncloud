@@ -134,3 +134,54 @@ pub enum AuthCertError {
     #[error(transparent)]
     CertVerifyError(#[from] super::CertVerifyError),
 }
+
+/// Combined consensus processing error.
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum ConsensusError {
+    #[error(transparent)]
+    NetdocParseError(#[from] super::NetdocParseError),
+    #[error(transparent)]
+    CertFormatError(#[from] super::CertFormatError),
+    #[error(transparent)]
+    CertVerifyError(#[from] super::CertVerifyError),
+    #[error(transparent)]
+    TooManySignaturesError(#[from] super::TooManySignaturesError),
+}
+
+/// Consensus processing error.
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum ConsensusParseError {
+    #[error(transparent)]
+    NetdocParseError(#[from] super::NetdocParseError),
+    #[error(transparent)]
+    CertFormatError(#[from] super::CertFormatError),
+}
+
+remap! {
+    ConsensusParseError => ConsensusError {
+        NetdocParseError,
+        CertFormatError,
+    }
+}
+
+/// Consensus signature processing error.
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum ConsensusSignatureError {
+    #[error(transparent)]
+    CertFormatError(#[from] super::CertFormatError),
+    #[error(transparent)]
+    CertVerifyError(#[from] super::CertVerifyError),
+    #[error(transparent)]
+    TooManySignaturesError(#[from] super::TooManySignaturesError),
+}
+
+remap! {
+    ConsensusSignatureError => ConsensusError {
+        CertFormatError,
+        CertVerifyError,
+        TooManySignaturesError,
+    }
+}

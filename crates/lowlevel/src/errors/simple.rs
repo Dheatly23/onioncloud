@@ -348,3 +348,10 @@ display2debug! {CircuitClosedError}
 pub struct CellLengthOverflowError;
 
 display2debug! {CellLengthOverflowError}
+
+/// Cell length overflow.
+#[derive(Error)]
+#[error("too many signatures")]
+pub struct TooManySignaturesError;
+
+display2debug! {TooManySignaturesError}
