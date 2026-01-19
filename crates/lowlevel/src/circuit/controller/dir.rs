@@ -210,7 +210,6 @@ impl<R: 'static + Runtime, C: 'static + Send + Sync + DirConfig> CircuitControll
 
     fn new(_: &R, cfg: C, circ_id: GenerationalData<NonZeroU32>) -> Self {
         let sendme = cfg.sendme();
-        info!("sendme: {sendme:?}");
         let cfg = CfgData {
             circ_id,
             linkver: 0,
