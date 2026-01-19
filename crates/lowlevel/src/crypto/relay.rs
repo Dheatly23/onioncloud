@@ -1,5 +1,7 @@
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 
+use base64ct::{Base64Unpadded, Encoding, Error as B64Error};
+
 use crate::errors::{ParseRelayIdInner, RelayIdParseError};
 use crate::util::{print_ed, print_hex};
 
@@ -69,4 +71,16 @@ pub fn from_str(s: &str) -> Result<RelayId, RelayIdParseError> {
     }
 
     Ok(ret)
+}
+
+/// Parse a string into [`RelayIdEd`].
+///
+/// String is base64 unpadded characters.
+pub fn from_str_ed(s: &str) -> Result<RelayIdEd, RelayIdParseError> {
+    let mut ret: RelayIdEd = [0; _];
+    match Base64Unpadded::decode(s.as_bytes(), &mut ret) {
+        Ok(_) => Ok(ret),
+        Err(B64Error::InvalidEncoding) => Err(RelayIdParseError(ParseRelayIdInner::InvalidDigit)),
+        Err(B64Error::InvalidLength) => Err(RelayIdParseError(ParseRelayIdInner::TooShort)),
+    }
 }

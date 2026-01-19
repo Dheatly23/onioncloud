@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::io::{IoSlice, Result as IoResult};
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::pin::{Pin, pin};
 use std::ptr::from_mut;
 use std::sync::Arc;
@@ -29,19 +30,28 @@ use onioncloud_lowlevel::circuit::controller::dir::{
     DirConfig, DirControlMsg, DirController, SendmeType,
 };
 use onioncloud_lowlevel::circuit::manager::SingleManager as CircuitManager;
-use onioncloud_lowlevel::crypto::relay::{RelayId, from_str as relay_from_str};
+use onioncloud_lowlevel::crypto::relay::{
+    RelayId, RelayIdEd, from_str as relay_from_str, from_str_ed as relay_ed_from_str,
+};
 use onioncloud_lowlevel::runtime::tokio::TokioRuntime;
 use onioncloud_lowlevel::stream::{DirStreamTy, from_new_stream};
 
 struct Config {
     id: RelayId,
+    id_ed: Option<RelayIdEd>,
     addrs: Cow<'static, [SocketAddr]>,
     cache: Arc<StandardCellCache>,
+    channel_cap: usize,
+    channel_aggregate_cap: usize,
 }
 
 impl ChannelConfig for Config {
     fn peer_id(&self) -> &RelayId {
         &self.id
+    }
+
+    fn peer_id_ed(&self) -> Option<&RelayIdEd> {
+        self.id_ed.as_ref()
     }
 
     fn peer_addrs(&self) -> Cow<'_, [SocketAddr]> {
@@ -62,10 +72,20 @@ impl UserConfig for Config {
             high: 2000,
         })
     }
+
+    fn channel_cap(&self) -> usize {
+        self.channel_cap
+    }
+
+    fn channel_aggregate_cap(&self) -> usize {
+        self.channel_aggregate_cap
+    }
 }
 
 struct ConfigDir {
     cache: Arc<StandardCellCache>,
+    channel_cap: usize,
+    channel_aggregate_cap: usize,
 }
 
 impl DirConfig for ConfigDir {
@@ -76,7 +96,15 @@ impl DirConfig for ConfigDir {
     }
 
     fn sendme(&self) -> SendmeType {
-        SendmeType::Auth
+        SendmeType::Unauth
+    }
+
+    fn channel_cap(&self) -> usize {
+        self.channel_cap
+    }
+
+    fn channel_aggregate_cap(&self) -> usize {
+        self.channel_aggregate_cap
     }
 }
 
@@ -88,11 +116,23 @@ struct Args {
     #[arg(long, env = "RELAY_ID", value_parser = relay_from_str)]
     relay_id: RelayId,
 
+    /// Relay ed25519 identity key.
+    #[arg(long, env = "RELAY_ID_ED", value_parser = relay_ed_from_str)]
+    relay_id_ed: Option<RelayIdEd>,
+
     /// Relay socket addresses.
     ///
     /// Value is comma separated addresses.
     #[arg(long, env = "RELAY_ADDRS", required(true), value_delimiter(','))]
     relay_addrs: Vec<SocketAddr>,
+
+    /// Channel capacity.
+    #[arg(long, default_value = "256")]
+    channel_cap: NonZeroUsize,
+
+    /// Channel aggregate capacity.
+    #[arg(long, default_value = "256")]
+    channel_agg_cap: NonZeroUsize,
 
     /// URL to be fetched.
     #[arg(default_value = "/tor/keys/all")]
@@ -103,9 +143,14 @@ struct Args {
 async fn main() {
     let Args {
         relay_id: id,
+        relay_id_ed: id_ed,
         relay_addrs: addrs,
+        channel_cap,
+        channel_agg_cap,
         url,
     } = Args::parse();
+    let channel_cap = usize::from(channel_cap);
+    let channel_aggregate_cap = usize::from(channel_agg_cap);
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -123,8 +168,11 @@ async fn main() {
 
     let cfg = Config {
         id,
+        id_ed,
         addrs: addrs.into(),
         cache: cache.clone(),
+        channel_cap,
+        channel_aggregate_cap,
     };
     let mut channel = pin!(ChannelManager::<UserController<_, _>>::new(&rt, cfg));
 
@@ -132,6 +180,8 @@ async fn main() {
 
     let cfg = ConfigDir {
         cache: cache.clone(),
+        channel_cap,
+        channel_aggregate_cap,
     };
     let (new_circ, circuit) = CircuitManager::<DirController<_, _>>::new(&rt, cfg);
     channel
