@@ -225,6 +225,12 @@ impl<'a> SignatureVerifier<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flavor {
+    Consensus,
+    Microdesc,
+}
+
 /// Starts parsing consensus data.
 ///
 /// Returns a [`PreambleData`] and an [`AuthorityEntryParser`].
@@ -233,11 +239,6 @@ pub fn parse_consensus(
     doc: &str,
 ) -> Result<(PreambleData<'_>, AuthorityEntryParser<'_>), ConsensusParseError> {
     let mut parser = NetdocParser::new(doc);
-
-    enum Flavor {
-        Consensus,
-        Microdesc,
-    }
 
     let flavor = {
         let item = parser.next().ok_or(CertFormatError)??;
@@ -444,7 +445,7 @@ pub fn parse_consensus(
     };
 
     let parser = AuthorityEntryParserInner {
-        item,
+        item: Some(item),
         inner: parser,
     };
 
@@ -599,13 +600,16 @@ pub struct AuthorityEntry<'a> {
 
 #[derive(Clone)]
 struct AuthorityEntryParserInner<'a> {
-    item: NetdocItem<'a>,
+    item: Option<NetdocItem<'a>>,
     inner: NetdocParser<'a>,
 }
 
 impl<'a> AuthorityEntryParserInner<'a> {
     fn parse(&mut self) -> Result<Option<AuthorityEntry<'a>>, ConsensusParseError> {
-        if self.item.keyword() != "dir-source" {
+        let Some(item) = self.item.as_ref() else {
+            return Ok(None);
+        };
+        if item.keyword() != "dir-source" {
             // Entry does not start with dir-source, possibly ending.
             return Ok(None);
         }
@@ -618,7 +622,7 @@ impl<'a> AuthorityEntryParserInner<'a> {
         let orport;
 
         {
-            let mut args = self.item.arguments();
+            let mut args = item.arguments();
             nickname = args.next().ok_or(CertFormatError)?;
             identity = args.next().and_then(parse_hex).ok_or(CertFormatError)?;
             address = args.next().ok_or(CertFormatError)?;
@@ -639,7 +643,7 @@ impl<'a> AuthorityEntryParserInner<'a> {
         let mut contact = None;
         let mut vote_digest = None::<Sha1Output>;
 
-        self.item = loop {
+        self.item = Some(loop {
             let item = self.inner.next().ok_or(CertFormatError)??;
 
             match item.keyword() {
@@ -669,7 +673,7 @@ impl<'a> AuthorityEntryParserInner<'a> {
                 // Unknown keyword, skip
                 _ => (),
             }
-        };
+        });
 
         let (Some(contact), Some(vote_digest)) = (contact, vote_digest) else {
             return Err(CertFormatError.into());
@@ -688,15 +692,16 @@ impl<'a> AuthorityEntryParserInner<'a> {
     }
 
     fn to_relay(&mut self) -> RelayEntryParserInner<'a> {
+        let kw = self
+            .item
+            .as_ref()
+            .expect("iteration must not errored")
+            .keyword();
         debug_assert!(
-            self.item.keyword() == "r" || self.item.keyword() == "dir-source",
-            "{} is neither \"r\" or \"dir-source\"",
-            self.item.keyword()
+            kw == "r" || kw == "dir-source",
+            "{kw} is neither \"r\" or \"dir-source\""
         );
-        assert!(
-            self.item.keyword() == "r",
-            "there are more authority entry to be processed"
-        );
+        assert!(kw == "r", "there are more authority entry to be processed");
 
         RelayEntryParserInner {
             item: self.item.clone(),
@@ -709,7 +714,11 @@ impl<'a> Iterator for AuthorityEntryParserInner<'a> {
     type Item = Result<AuthorityEntry<'a>, ConsensusParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.parse().transpose()
+        let ret = self.parse();
+        if ret.is_err() {
+            self.item = None;
+        }
+        ret.transpose()
     }
 }
 
@@ -723,7 +732,7 @@ impl<'a> ConsensusAuthorityEntryParser<'a> {
     ///
     /// # Panic
     ///
-    /// Panics if iteration is not finished.
+    /// Panics if iteration is not finished or errored.
     pub fn to_relay(&mut self) -> ConsensusRelayEntryParser<'a> {
         ConsensusRelayEntryParser(self.0.to_relay())
     }
@@ -775,19 +784,182 @@ pub enum RelayEntryParser<'a> {
 
 #[derive(Clone)]
 struct RelayEntryParserInner<'a> {
-    item: NetdocItem<'a>,
+    item: Option<NetdocItem<'a>>,
     inner: NetdocParser<'a>,
 }
 
+struct RelayEntryInner<'a> {
+    pub nickname: &'a str,
+    pub identity: RelayId,
+    pub digest: Option<Sha1Output>,
+    pub publication: SystemTime,
+    pub ip: Ipv4Addr,
+    pub dirport: Option<NonZeroU16>,
+    pub orport: u16,
+    pub addr: Option<SocketAddrV6>,
+    pub status: Option<NetdocArguments<'a>>,
+    pub version: Option<&'a str>,
+    pub protocols: Option<NetdocArguments<'a>>,
+    pub bandwidth: Option<BandwidthEstimate>,
+    pub exit_ports: Option<ExitPortPolicy>,
+    pub microdesc: Option<Sha256Output>,
+}
+
 impl<'a> RelayEntryParserInner<'a> {
+    fn parse(
+        &mut self,
+        flavor: Flavor,
+    ) -> Result<Option<RelayEntryInner<'a>>, ConsensusParseError> {
+        let Some(item) = self.item.as_ref() else {
+            return Ok(None);
+        };
+        if item.keyword() != "r" {
+            // Entry does not start with r, possibly ending.
+            return Ok(None);
+        }
+
+        let nickname;
+        let identity: RelayId;
+        let mut digest = None::<Sha1Output>;
+        let publication;
+        let ip;
+        let dirport;
+        let orport;
+
+        {
+            let mut args = item.arguments();
+            nickname = args.next().ok_or(CertFormatError)?;
+            identity = args.next().ok_or(CertFormatError).and_then(parse_b64u)?;
+            if flavor == Flavor::Consensus {
+                digest = Some(args.next().ok_or(CertFormatError).and_then(parse_b64)?);
+            }
+            publication = SystemTime::from(args_date_time(&mut args).ok_or(CertFormatError)?);
+            ip = args
+                .next()
+                .and_then(|v| v.parse::<Ipv4Addr>().ok())
+                .ok_or(CertFormatError)?;
+            orport = args
+                .next()
+                .and_then(|v| v.parse::<u16>().ok())
+                .ok_or(CertFormatError)?;
+            dirport = NonZeroU16::new(
+                args.next()
+                    .and_then(|v| v.parse::<u16>().ok())
+                    .ok_or(CertFormatError)?,
+            );
+        }
+
+        let mut addr = None;
+        let mut status = None;
+        let mut version = None;
+        let mut protocols = None;
+        let mut bandwidth = None;
+        let mut exit_ports = None;
+        let mut microdesc = None;
+
+        self.item = Some(loop {
+            let item = self.inner.next().ok_or(CertFormatError)??;
+
+            match dbg!(item.keyword()) {
+                // a can be any number
+                "a" => {
+                    let a = item
+                        .arguments()
+                        .next()
+                        .and_then(|v| v.parse::<SocketAddr>().ok())
+                        .ok_or(CertFormatError)?;
+                    if addr.is_none()
+                        && let SocketAddr::V6(a) = a
+                    {
+                        addr = Some(a);
+                    }
+                }
+                // s is exactly once
+                "s" => {
+                    if status.is_some() {
+                        return Err(CertFormatError.into());
+                    }
+                    status = Some(item.arguments());
+                }
+                // v is at most once and takes the rest of the line
+                "v" => {
+                    if version.is_some() {
+                        return Err(CertFormatError.into());
+                    }
+                    version = Some(item.arguments_raw());
+                }
+                // pr is exactly once
+                "pr" => {
+                    if protocols.is_some() {
+                        return Err(CertFormatError.into());
+                    }
+                    protocols = Some(item.arguments());
+                }
+                // w is at most once
+                "w" => {
+                    if bandwidth.is_some() {
+                        return Err(CertFormatError.into());
+                    }
+                    bandwidth = Some(parse_bandwidth(&item)?);
+                }
+                // p is at most once
+                "p" if flavor == Flavor::Consensus => {
+                    if exit_ports.is_some() {
+                        return Err(CertFormatError.into());
+                    }
+                    exit_ports = Some(parse_exit_policy(&item)?);
+                }
+                // m is exactly once
+                "m" if flavor == Flavor::Microdesc => {
+                    if microdesc.is_some() {
+                        return Err(CertFormatError.into());
+                    }
+                    microdesc = Some(
+                        item.arguments()
+                            .next()
+                            .ok_or(CertFormatError)
+                            .and_then(parse_b64u)?,
+                    );
+                }
+                // r is the beginning of relay data
+                "r" => break item,
+                // directory-footer is the beginning of footer entry
+                "directory-footer" => break item,
+                // Unknown keyword, skip
+                _ => (),
+            }
+        });
+
+        Ok(Some(RelayEntryInner {
+            nickname,
+            identity,
+            digest,
+            publication,
+            ip,
+            dirport,
+            orport,
+            addr,
+            status,
+            version,
+            protocols,
+            bandwidth: bandwidth.flatten(),
+            exit_ports,
+            microdesc,
+        }))
+    }
+
     fn to_footer(&mut self) -> Result<FooterData<'a>, ConsensusParseError> {
+        let kw = self
+            .item
+            .as_ref()
+            .expect("iteration must not errored")
+            .keyword();
         debug_assert!(
-            self.item.keyword() == "r" || self.item.keyword() == "directory-footer",
-            "{} is neither \"r\" or \"directory-footer\"",
-            self.item.keyword()
+            kw == "r" || kw == "directory-footer",
+            "{kw} is neither \"r\" or \"directory-footer\""
         );
         assert!(
-            self.item.keyword() == "directory-footer",
+            kw == "directory-footer",
             "there are more relay entry to be processed"
         );
 
@@ -836,7 +1008,7 @@ impl<'a> RelayEntryParser<'a> {
     ///
     /// # Panic
     ///
-    /// Panics if iteration is not finished.
+    /// Panics if iteration is not finished or errored.
     pub fn to_footer(&mut self) -> Result<FooterData<'a>, ConsensusParseError> {
         let (Self::Consensus(ConsensusRelayEntryParser(v))
         | Self::Microdesc(MicrodescRelayEntryParser(v))) = self;
@@ -883,7 +1055,7 @@ impl<'a> ConsensusRelayEntryParser<'a> {
     ///
     /// # Panic
     ///
-    /// Panics if iteration is not finished.
+    /// Panics if iteration is not finished or errored.
     pub fn to_footer(&mut self) -> Result<FooterData<'a>, ConsensusParseError> {
         self.0.to_footer()
     }
@@ -891,113 +1063,7 @@ impl<'a> ConsensusRelayEntryParser<'a> {
 
 impl<'a> ConsensusRelayEntryParser<'a> {
     fn parse(&mut self) -> Result<Option<ConsensusRelayEntry<'a>>, ConsensusParseError> {
-        if self.0.item.keyword() != "r" {
-            // Entry does not start with r, possibly ending.
-            return Ok(None);
-        }
-
-        let nickname;
-        let identity: RelayId;
-        let digest: Sha1Output;
-        let publication;
-        let ip;
-        let dirport;
-        let orport;
-
-        {
-            let mut args = self.0.item.arguments();
-            nickname = args.next().ok_or(CertFormatError)?;
-            identity = args.next().ok_or(CertFormatError).and_then(parse_b64u)?;
-            digest = args.next().ok_or(CertFormatError).and_then(parse_b64)?;
-            publication = SystemTime::from(args_date_time(&mut args).ok_or(CertFormatError)?);
-            ip = args
-                .next()
-                .and_then(|v| v.parse::<Ipv4Addr>().ok())
-                .ok_or(CertFormatError)?;
-            orport = args
-                .next()
-                .and_then(|v| v.parse::<u16>().ok())
-                .ok_or(CertFormatError)?;
-            dirport = NonZeroU16::new(
-                args.next()
-                    .and_then(|v| v.parse::<u16>().ok())
-                    .ok_or(CertFormatError)?,
-            );
-        }
-
-        let mut addr = None;
-        let mut status = None;
-        let mut version = None;
-        let mut protocols = None;
-        let mut bandwidth = None;
-        let mut exit_ports = None;
-
-        self.0.item = loop {
-            let item = self.0.inner.next().ok_or(CertFormatError)??;
-
-            match item.keyword() {
-                // a can be any number
-                "a" => {
-                    let a = item
-                        .arguments()
-                        .next()
-                        .and_then(|v| v.parse::<SocketAddr>().ok())
-                        .ok_or(CertFormatError)?;
-                    if addr.is_none()
-                        && let SocketAddr::V6(a) = a
-                    {
-                        addr = Some(a);
-                    }
-                }
-                // s is exactly once
-                "s" => {
-                    if status.is_some() {
-                        return Err(CertFormatError.into());
-                    }
-                    status = Some(item.arguments());
-                }
-                // v is at most once and takes the rest of the line
-                "v" => {
-                    if version.is_some() {
-                        return Err(CertFormatError.into());
-                    }
-                    version = Some(item.arguments_raw());
-                }
-                // pr is exactly once
-                "pr" => {
-                    if protocols.is_some() {
-                        return Err(CertFormatError.into());
-                    }
-                    protocols = Some(item.arguments());
-                }
-                // w is at most once
-                "w" => {
-                    if bandwidth.is_some() {
-                        return Err(CertFormatError.into());
-                    }
-                    bandwidth = Some(parse_bandwidth(&item)?);
-                }
-                // p is at most once
-                "p" => {
-                    if exit_ports.is_some() {
-                        return Err(CertFormatError.into());
-                    }
-                    exit_ports = Some(parse_exit_policy(&item)?);
-                }
-                // r is the beginning of relay data
-                "r" => break item,
-                // directory-footer is the beginning of footer entry
-                "directory-footer" => break item,
-                // Unknown keyword, skip
-                _ => (),
-            }
-        };
-
-        let (Some(status), Some(protocols)) = (status, protocols) else {
-            return Err(CertFormatError.into());
-        };
-
-        Ok(Some(ConsensusRelayEntry {
+        let Some(RelayEntryInner {
             nickname,
             identity,
             digest,
@@ -1009,7 +1075,31 @@ impl<'a> ConsensusRelayEntryParser<'a> {
             status,
             version,
             protocols,
-            bandwidth: bandwidth.flatten(),
+            bandwidth,
+            exit_ports,
+            ..
+        }) = self.0.parse(Flavor::Consensus)?
+        else {
+            return Ok(None);
+        };
+
+        let (Some(status), Some(protocols)) = (status, protocols) else {
+            return Err(CertFormatError.into());
+        };
+
+        Ok(Some(ConsensusRelayEntry {
+            nickname,
+            identity,
+            digest: digest.expect("digest must exist"),
+            publication,
+            ip,
+            dirport,
+            orport,
+            addr,
+            status,
+            version,
+            protocols,
+            bandwidth,
             exit_ports,
         }))
     }
@@ -1019,7 +1109,11 @@ impl<'a> Iterator for ConsensusRelayEntryParser<'a> {
     type Item = Result<ConsensusRelayEntry<'a>, ConsensusParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.parse().transpose()
+        let ret = self.parse();
+        if ret.is_err() {
+            self.0.item = None;
+        }
+        ret.transpose()
     }
 }
 
@@ -1050,7 +1144,7 @@ impl<'a> MicrodescRelayEntryParser<'a> {
     ///
     /// # Panic
     ///
-    /// Panics if iteration is not finished.
+    /// Panics if iteration is not finished or errored.
     pub fn to_footer(&mut self) -> Result<FooterData<'a>, ConsensusParseError> {
         self.0.to_footer()
     }
@@ -1058,109 +1152,23 @@ impl<'a> MicrodescRelayEntryParser<'a> {
 
 impl<'a> MicrodescRelayEntryParser<'a> {
     fn parse(&mut self) -> Result<Option<MicrodescRelayEntry<'a>>, ConsensusParseError> {
-        if self.0.item.keyword() != "r" {
-            // Entry does not start with r, possibly ending.
+        let Some(RelayEntryInner {
+            nickname,
+            identity,
+            publication,
+            ip,
+            dirport,
+            orport,
+            addr,
+            status,
+            version,
+            protocols,
+            bandwidth,
+            microdesc,
+            ..
+        }) = self.0.parse(Flavor::Microdesc)?
+        else {
             return Ok(None);
-        }
-
-        let nickname;
-        let identity: RelayId;
-        let publication;
-        let ip;
-        let dirport;
-        let orport;
-
-        {
-            let mut args = self.0.item.arguments();
-            nickname = args.next().ok_or(CertFormatError)?;
-            identity = args.next().ok_or(CertFormatError).and_then(parse_b64u)?;
-            publication = SystemTime::from(args_date_time(&mut args).ok_or(CertFormatError)?);
-            ip = args
-                .next()
-                .and_then(|v| v.parse::<Ipv4Addr>().ok())
-                .ok_or(CertFormatError)?;
-            orport = args
-                .next()
-                .and_then(|v| v.parse::<u16>().ok())
-                .ok_or(CertFormatError)?;
-            dirport = NonZeroU16::new(
-                args.next()
-                    .and_then(|v| v.parse::<u16>().ok())
-                    .ok_or(CertFormatError)?,
-            );
-        }
-
-        let mut addr = None;
-        let mut status = None;
-        let mut version = None;
-        let mut protocols = None;
-        let mut bandwidth = None;
-        let mut microdesc = None::<Sha256Output>;
-
-        self.0.item = loop {
-            let item = self.0.inner.next().ok_or(CertFormatError)??;
-
-            match item.keyword() {
-                // a can be any number
-                "a" => {
-                    let a = item
-                        .arguments()
-                        .next()
-                        .and_then(|v| v.parse::<SocketAddr>().ok())
-                        .ok_or(CertFormatError)?;
-                    if addr.is_none()
-                        && let SocketAddr::V6(a) = a
-                    {
-                        addr = Some(a);
-                    }
-                }
-                // s is exactly once
-                "s" => {
-                    if status.is_some() {
-                        return Err(CertFormatError.into());
-                    }
-                    status = Some(item.arguments());
-                }
-                // v is at most once and takes the rest of the line
-                "v" => {
-                    if version.is_some() {
-                        return Err(CertFormatError.into());
-                    }
-                    version = Some(item.arguments_raw());
-                }
-                // pr is exactly once
-                "pr" => {
-                    if protocols.is_some() {
-                        return Err(CertFormatError.into());
-                    }
-                    protocols = Some(item.arguments());
-                }
-                // w is at most once
-                "w" => {
-                    if bandwidth.is_some() {
-                        return Err(CertFormatError.into());
-                    }
-                    bandwidth = Some(parse_bandwidth(&item)?);
-                }
-                // m is exactly once
-                "m" => {
-                    if microdesc.is_some() {
-                        return Err(CertFormatError.into());
-                    }
-                    microdesc = Some(
-                        item.arguments()
-                            .next()
-                            .ok_or(CertFormatError)
-                            .and_then(parse_b64u)?,
-                    );
-                }
-                // r is the beginning of relay data
-                "r" => break item,
-                // directory-footer is the beginning of footer entry
-                "directory-footer" => break item,
-                // Unknown keyword, skip
-                _ => (),
-            }
         };
 
         let (Some(status), Some(protocols), Some(microdesc)) = (status, protocols, microdesc)
@@ -1179,7 +1187,7 @@ impl<'a> MicrodescRelayEntryParser<'a> {
             status,
             version,
             protocols,
-            bandwidth: bandwidth.flatten(),
+            bandwidth,
             microdesc,
         }))
     }
@@ -1189,7 +1197,11 @@ impl<'a> Iterator for MicrodescRelayEntryParser<'a> {
     type Item = Result<MicrodescRelayEntry<'a>, ConsensusParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.parse().transpose()
+        let ret = self.parse();
+        if ret.is_err() {
+            self.0.item = None;
+        }
+        ret.transpose()
     }
 }
 
