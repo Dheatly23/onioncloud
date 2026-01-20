@@ -26,36 +26,32 @@ pub(crate) fn parse_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
 
 /// Parse date in form of `YYYY-MM-DD`.
 pub(crate) fn parse_date(s: &str) -> Option<NaiveDate> {
-    let s = s.as_bytes();
-    let mut year = 0i32;
-    let mut i = 0;
-    loop {
-        match s.get(i)? {
-            b'-' if i >= 4 => {
-                i += 1;
-                break;
-            }
-            c @ b'0'..=b'9' => {
-                year = year.checked_mul(10)?.checked_add((c - b'0').into())?;
-                i += 1;
-            }
-            _ => return None,
-        }
-    }
-
     // Extremely naive month and day parsing :)
     let [
+        s @ ..,
+        b'-',
         mt @ b'0'..=b'9',
         md @ b'0'..=b'9',
         b'-',
         dt @ b'0'..=b'9',
         dd @ b'0'..=b'9',
-    ] = &s[i..]
+    ] = s.as_bytes()
     else {
         return None;
     };
     let month = (mt - b'0') * 10 + (md - b'0');
     let day = (dt - b'0') * 10 + (dd - b'0');
+
+    // Year must be at least 4 digits
+    if s.len() < 4 {
+        return None;
+    }
+
+    let mut year = 0i32;
+    for &c in s {
+        let c @ b'0'..=b'9' = c else { return None };
+        year = year.checked_mul(10)?.checked_add((c - b'0').into())?;
+    }
 
     NaiveDate::from_ymd_opt(year, month.into(), day.into())
 }
@@ -136,6 +132,8 @@ mod tests {
             (0..9999u16, 1..32u8, any::<bool>(), any::<bool>()).prop_map(|(y, d, s1, s2)| format!("{y:04}{}{}{d:02}", if s1 { "-" } else { "" }, if s2 { "-" } else { "" })),
             // Missing day
             (0..9999u16, 1..13u8, any::<bool>()).prop_map(|(y, m, s)| format!("{y:04}-{m:02}{}", if s { "-" } else { "" })),
+            // Year overflow
+            (i32::MAX as u64 + 1.., 1..13u8, 1..32u8).prop_map(|(y, m, d)| format!("{y}-{m:02}-{d:02}")),
         ]) {
             if let Some(v) = parse_date(&s) {
                 panic!("parser expected to fail, got {v}");
