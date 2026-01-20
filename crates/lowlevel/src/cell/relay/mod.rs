@@ -8,6 +8,7 @@ pub mod extend;
 pub mod sendme;
 pub mod v0;
 pub mod v1;
+pub mod xon;
 
 use std::mem::transmute;
 use std::num::{NonZeroU16, NonZeroU32};
