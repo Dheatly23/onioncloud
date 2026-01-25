@@ -60,6 +60,14 @@ features = [
   "std",
 ]
 
+[workspace.dependencies.curve25519-dalek]
+version = "4"
+default-features = false
+features = [
+  "alloc",
+  "precomputed-tables",
+]
+
 [workspace.dependencies.ed25519-dalek]
 version = "2"
 default-features = false

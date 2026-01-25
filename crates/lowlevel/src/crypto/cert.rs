@@ -157,6 +157,11 @@ impl<'a> UnverifiedEdCert<'a> {
     ///
     /// **NOTE: All extensions must be processed before verifying!**
     pub fn verify(self, pk: &EdPublicKey) -> Result<(), errors::CertVerifyError> {
+        self.verify2(&VerifyingKey::from_bytes(pk)?)
+    }
+
+    /// Same as [`Self::verify`], but accepts [`VerifyingKey`].
+    pub fn verify2(self, pk: &VerifyingKey) -> Result<(), errors::CertVerifyError> {
         let sig = EdSignature::ref_from_bytes(self.rest).map_err(|_| errors::CertVerifyError)?;
 
         // SAFETY: sig is within data.
@@ -165,7 +170,7 @@ impl<'a> UnverifiedEdCert<'a> {
                 .get_unchecked(..(sig as *const EdSignature).byte_offset_from(self.data) as usize)
         };
 
-        VerifyingKey::from_bytes(pk)?.verify_strict(msg, &sig.into())?;
+        pk.verify_strict(msg, &sig.into())?;
         if !verify_exp(self.header.expiry.get()) {
             return Err(errors::CertVerifyError);
         }

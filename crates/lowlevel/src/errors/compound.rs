@@ -3,6 +3,8 @@ use std::io::Error as IoError;
 use rustls::Error as RustlsError;
 use thiserror::Error;
 
+use crate::parse::misc::Error as MiscError;
+
 macro_rules! remap {
     (#pat $from:ident $to:ident $v:ident $var:ident) => {
         $from::$var($v)
@@ -135,6 +137,12 @@ pub enum AuthCertError {
     CertVerifyError(#[from] super::CertVerifyError),
 }
 
+impl From<MiscError> for AuthCertError {
+    fn from(v: MiscError) -> Self {
+        v.to_err()
+    }
+}
+
 /// Combined consensus processing error.
 #[derive(Error, Debug)]
 #[non_exhaustive]
@@ -183,5 +191,29 @@ remap! {
         CertFormatError,
         CertVerifyError,
         TooManySignaturesError,
+    }
+}
+
+impl From<MiscError> for ConsensusSignatureError {
+    fn from(v: MiscError) -> Self {
+        v.to_err()
+    }
+}
+
+/// Descriptor processing error.
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum DescriptorError {
+    #[error(transparent)]
+    NetdocParseError(#[from] super::NetdocParseError),
+    #[error(transparent)]
+    CertFormatError(#[from] super::CertFormatError),
+    #[error(transparent)]
+    CertVerifyError(#[from] super::CertVerifyError),
+}
+
+impl From<MiscError> for DescriptorError {
+    fn from(v: MiscError) -> Self {
+        v.to_err()
     }
 }

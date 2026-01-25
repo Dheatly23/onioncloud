@@ -3,6 +3,9 @@ pub mod onion;
 pub mod relay;
 pub(crate) mod tls;
 
+use curve25519_dalek::edwards::EdwardsPoint;
+use curve25519_dalek::montgomery::MontgomeryPoint;
+
 /// Symmetric cipher used in Tor (128-bit).
 pub type Cipher128 = ctr::Ctr128BE<aes::Aes128>;
 
@@ -29,3 +32,10 @@ pub type CipherKey128 = [u8; 16];
 
 /// 256-bit symmetric cipher key.
 pub type CipherKey256 = [u8; 32];
+
+/// Try to convert montgomery point to edwards point.
+///
+/// Returns [`None`] if point is invalid.
+pub fn montgomery_to_edwards(point: MontgomeryPoint, sign: bool) -> Option<EdwardsPoint> {
+    point.to_edwards(if sign { 1 } else { 0 })
+}

@@ -7,18 +7,15 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::SystemTime;
 
-use base64ct::{Base64, Decoder, Error as B64Error};
 use digest::Digest;
 use rsa::RsaPublicKey;
-use rsa::pkcs1::DecodeRsaPublicKey;
-use rsa::pkcs1::der::pem::BASE64_WRAP_WIDTH;
-use rsa::pkcs1v15::{Signature, VerifyingKey};
+use rsa::pkcs1v15::VerifyingKey;
 use rsa::signature::Verifier;
 use rsa::signature::hazmat::PrehashVerifier;
 use sha1::Sha1;
 use subtle::ConstantTimeEq;
 
-use super::misc::args_date_time;
+use super::misc::{args_date_time, decode_cert, decode_sig};
 use super::netdoc::{Item as NetdocItem, NetdocParser};
 use crate::crypto::relay::RelayId;
 use crate::errors::{AuthCertError, CertFormatError, CertVerifyError};
@@ -190,7 +187,7 @@ impl<'a> Parser<'a> {
                     if item.arguments().next().is_some() || identity.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    let (key, der) = decode_cert(&mut tmp, &item)?;
+                    let (key, der) = decode_cert::<VerifyingKey<Sha1>>(&mut tmp, &item)?;
                     identity = Some((key, RelayId::from(Sha1::digest(der))));
                 }
                 // dir-signing-key has object, without extra args, and is exactly once
@@ -198,7 +195,7 @@ impl<'a> Parser<'a> {
                     if item.arguments().next().is_some() || signing.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    signing = Some(decode_cert(&mut tmp, &item)?.0);
+                    signing = Some(decode_cert::<VerifyingKey<Sha1>>(&mut tmp, &item)?.0);
                 }
                 // dir-key-crosscert has object, without extra args, and is exactly once
                 "dir-key-crosscert" => {
@@ -339,40 +336,6 @@ impl<'a> Item<'a> {
     }
 }
 
-fn map_b64_err(e: B64Error) -> AuthCertError {
-    match e {
-        B64Error::InvalidEncoding => CertFormatError.into(),
-        B64Error::InvalidLength => CertVerifyError.into(),
-    }
-}
-
-fn decode_b64<'a>(tmp: &'a mut [u8], s: &str) -> Result<&'a [u8], AuthCertError> {
-    let mut d =
-        Decoder::<Base64>::new_wrapped(s.as_bytes(), BASE64_WRAP_WIDTH).map_err(map_b64_err)?;
-    let tmp = tmp.get_mut(..d.remaining_len()).ok_or(CertVerifyError)?;
-    d.decode(tmp).map_err(map_b64_err)
-}
-
-fn decode_cert<'a>(
-    tmp: &'a mut [u8],
-    item: &NetdocItem<'_>,
-) -> Result<(VerifyingKey<Sha1>, &'a [u8]), AuthCertError> {
-    let Some(("RSA PUBLIC KEY", s)) = item.object() else {
-        return Err(CertFormatError.into());
-    };
-    let der = decode_b64(tmp, s)?;
-    let Ok(key) = RsaPublicKey::from_pkcs1_der(der) else {
-        return Err(CertVerifyError.into());
-    };
-    Ok((key.into(), der))
-}
-
-fn decode_sig(tmp: &mut [u8], s: &str) -> Result<Signature, AuthCertError> {
-    decode_b64(tmp, s)?
-        .try_into()
-        .map_err(|_| CertVerifyError.into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,7 +344,7 @@ mod tests {
     use std::net::IpAddr;
     use std::time::Duration;
 
-    use base64ct::{Encoder, LineEnding};
+    use base64ct::{Base64, Encoder, LineEnding};
     use chrono::format::Item as FmtItem;
     use chrono::format::strftime::StrftimeItems;
     use chrono::{DateTime, Utc};
@@ -390,7 +353,7 @@ mod tests {
     use proptest::prelude::*;
     use rand::thread_rng;
     use rsa::pkcs1::EncodeRsaPublicKey;
-    use rsa::pkcs1v15::SigningKey;
+    use rsa::pkcs1v15::{Signature, SigningKey};
     use rsa::signature::{RandomizedDigestSigner, Signer};
 
     use crate::util::{print_hex, test_rsa_pk};

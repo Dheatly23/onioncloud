@@ -3,25 +3,22 @@
 //! Parses and validate consensus (at `/tor/status-vote/current/consensus` or `/tor/status-vote/current/consensus-microdesc`).
 
 use std::cmp::{Ord, Ordering, PartialEq, PartialOrd};
-use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::iter::FusedIterator;
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV6};
 use std::num::NonZeroU16;
 use std::ptr::from_mut;
-use std::str::FromStr;
 use std::time::SystemTime;
 
-use base64ct::{Base64, Base64Unpadded, Decoder, Encoding, Error as B64Error};
 use digest::Digest;
 use rsa::RsaPublicKey;
-use rsa::pkcs1::der::pem::BASE64_WRAP_WIDTH;
 use rsa::pkcs1v15::Pkcs1v15Sign;
 use rsa::traits::SignatureScheme;
 use sha1::Sha1;
 use sha2::Sha256;
 
-use super::misc::args_date_time;
+use super::ExitPortPolicy;
+use super::misc::{args_date_time, args_exit_policy, decode_b64, parse_b64, parse_b64u};
 use super::netdoc::{
     Arguments as NetdocArguments, Item as NetdocItem, NetdocParser, get_signature,
 };
@@ -201,12 +198,7 @@ impl<'a> SignatureVerifier<'a> {
         sign_key: &RsaPublicKey,
     ) -> Result<(), ConsensusSignatureError> {
         let mut tmp = [0; 2048];
-        let s = {
-            let mut d = Decoder::<Base64>::new_wrapped(sig.signature.as_bytes(), BASE64_WRAP_WIDTH)
-                .map_err(map_b64_err)?;
-            let tmp = tmp.get_mut(..d.remaining_len()).ok_or(CertVerifyError)?;
-            d.decode(tmp).map_err(map_b64_err)?
-        };
+        let s = decode_b64(&mut tmp, sig.signature)?;
 
         let hash = match sig.algorithm {
             "" | "sha1" => &self
@@ -907,7 +899,7 @@ impl<'a> RelayEntryParserInner<'a> {
                     if exit_ports.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    exit_ports = Some(parse_exit_policy(&item)?);
+                    exit_ports = Some(args_exit_policy(item.arguments())?);
                 }
                 // m is exactly once
                 "m" if flavor == Flavor::Microdesc => {
@@ -1214,138 +1206,6 @@ pub enum BandwidthEstimate {
     Unmeasured,
 }
 
-/// Exit port policy.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub struct ExitPortPolicy {
-    /// `true` if accept.
-    pub accept: bool,
-
-    /// Ports list.
-    pub ports: Vec<ExitPort>,
-}
-
-impl ExitPortPolicy {
-    /// Create new [`ExitPortPolicy`].
-    pub fn new(accept: bool, ports: Vec<ExitPort>) -> Self {
-        Self { accept, ports }
-    }
-
-    /// Sort and validate port range.
-    fn sort_validate(&mut self) -> bool {
-        self.ports.sort_unstable_by(|a, b| {
-            let (
-                ExitPort::Port(a) | ExitPort::PortRange { from: a, .. },
-                ExitPort::Port(b) | ExitPort::PortRange { from: b, .. },
-            ) = (a, b);
-            a.cmp(b)
-        });
-
-        for (i, v) in self.ports.iter().enumerate() {
-            if let ExitPort::PortRange { from, to } = *v
-                && from >= to
-            {
-                return false;
-            } else if i > 0 {
-                let r = match (self.ports[i - 1], *v) {
-                    (ExitPort::Port(a), ExitPort::Port(b)) => a != b,
-                    (ExitPort::PortRange { to, .. }, ExitPort::Port(v)) => v > to,
-                    (ExitPort::Port(v), ExitPort::PortRange { from, .. }) => v < from,
-                    (ExitPort::PortRange { to, .. }, ExitPort::PortRange { from, .. }) => {
-                        to < from && from - to > 1
-                    }
-                };
-                if !r {
-                    return false;
-                }
-            }
-        }
-
-        true
-    }
-}
-
-/// A single exit port (range).
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ExitPort {
-    /// A single port.
-    Port(u16),
-    /// Port range.
-    PortRange {
-        /// From, inclusive.
-        from: u16,
-        /// To, inclusive.
-        to: u16,
-    },
-}
-
-impl Debug for ExitPort {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Self::Port(v) => write!(f, "{v}"),
-            Self::PortRange { from, to } => write!(f, "{from}-{to}"),
-        }
-    }
-}
-
-impl Display for ExitPort {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        Debug::fmt(self, f)
-    }
-}
-
-impl ExitPort {
-    /// Checks if port is contained within.
-    pub fn contains(&self, port: u16) -> bool {
-        match self {
-            Self::Port(v) => *v == port,
-            Self::PortRange { from, to } => *from <= port && port <= *to,
-        }
-    }
-
-    /// Checks if port is contained within exit ports.
-    ///
-    /// **NOTE:** Ports must be ascending, non-overlapping, and all port ranges are valid (`from` <= `to`). Otherwise the return value is meaningless.
-    pub fn in_ports(ports: &[Self], port: u16) -> bool {
-        let Ok(i) = ports.binary_search_by(|p| match p {
-            Self::Port(v) => v.cmp(&port),
-            Self::PortRange { from, to } => {
-                if port < *from {
-                    Ordering::Greater
-                } else if port > *to {
-                    Ordering::Less
-                } else {
-                    Ordering::Equal
-                }
-            }
-        }) else {
-            return false;
-        };
-        ports[i].contains(port)
-    }
-}
-
-fn map_b64_err(e: B64Error) -> ConsensusSignatureError {
-    match e {
-        B64Error::InvalidEncoding => CertFormatError.into(),
-        B64Error::InvalidLength => CertVerifyError.into(),
-    }
-}
-
-fn parse_b64<const N: usize>(s: &str) -> Result<[u8; N], CertFormatError> {
-    let mut ret = [0u8; N];
-    let t = Base64::decode(s, &mut ret).map_err(|_| CertFormatError)?;
-    debug_assert_eq!(t.len(), ret.len());
-    Ok(ret)
-}
-
-fn parse_b64u<const N: usize>(s: &str) -> Result<[u8; N], CertFormatError> {
-    let mut ret = [0u8; N];
-    let t = Base64Unpadded::decode(s, &mut ret).map_err(|_| CertFormatError)?;
-    debug_assert_eq!(t.len(), ret.len());
-    Ok(ret)
-}
-
 fn parse_srv(item: &NetdocItem<'_>) -> Result<Srv, CertFormatError> {
     let mut args = item.arguments();
     Ok(Srv {
@@ -1382,91 +1242,12 @@ fn parse_bandwidth(item: &NetdocItem<'_>) -> Result<Option<BandwidthEstimate>, C
     Ok(ret)
 }
 
-fn parse_exit_policy(item: &NetdocItem<'_>) -> Result<ExitPortPolicy, CertFormatError> {
-    let mut args = item.arguments();
-    let accept = match args.next() {
-        Some("accept") => true,
-        Some("reject") => false,
-        _ => return Err(CertFormatError),
-    };
-    let ports = args
-        .next()
-        .ok_or(CertFormatError)
-        .and_then(parse_exit_ports)?;
-    let mut ret = ExitPortPolicy { accept, ports };
-    if !ret.sort_validate() {
-        return Err(CertFormatError.into());
-    }
-    Ok(ret)
-}
-
-fn parse_exit_ports(s: &str) -> Result<Vec<ExitPort>, CertFormatError> {
-    s.split(',')
-        .map(|s| {
-            Ok(match s.split_once('-') {
-                Some((f, t)) => ExitPort::PortRange {
-                    from: f.parse()?,
-                    to: t.parse()?,
-                },
-                None => ExitPort::Port(s.parse()?),
-            })
-        })
-        .collect::<Result<Vec<_>, <u16 as FromStr>::Err>>()
-        .map_err(|_| CertFormatError)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use std::fmt::Write as _;
     use std::net::Ipv6Addr;
     use std::time::Duration;
-
-    use proptest::prelude::*;
-
-    type ExitPortList = [u8; 65536 / 8];
-
-    fn map_exit_ports(a: ExitPortList) -> Vec<ExitPort> {
-        let mut v = Vec::new();
-        let mut prev = None;
-        for (ix, i) in a.into_iter().enumerate() {
-            let ix = ix as u16 * 8;
-            for j in 0..8u16 {
-                let Some(ix) = ix.checked_add(j) else { break };
-                let t = i & (1 << j) != 0;
-                if t && prev.is_none() {
-                    prev = Some(ix);
-                } else if !t && let Some(prev) = prev.take() {
-                    v.push(if ix - 1 == prev {
-                        ExitPort::Port(prev)
-                    } else {
-                        ExitPort::PortRange {
-                            from: prev,
-                            to: ix - 1,
-                        }
-                    });
-                }
-            }
-        }
-
-        if let Some(prev) = prev {
-            v.push(if 65535 == prev {
-                ExitPort::Port(prev)
-            } else {
-                ExitPort::PortRange {
-                    from: prev,
-                    to: 65535,
-                }
-            });
-        }
-
-        v
-    }
-
-    fn strat_exit_ports() -> impl Strategy<Value = Vec<ExitPort>> {
-        any::<ExitPortList>().prop_map(map_exit_ports)
-    }
 
     #[test]
     fn test_extract_signature_example() {
@@ -2021,54 +1802,5 @@ bandwidth-weights Wbd=1113 Wbe=0 Wbg=4125 Wbm=10000 Wdb=10000 Web=10000 Wed=7774
                 "Wmm=10000",
             ]
         );
-    }
-
-    proptest! {
-        #[test]
-        fn test_exit_ports_valid(v in strat_exit_ports()) {
-            let mut v = ExitPortPolicy { accept: false, ports: v };
-            assert!(v.sort_validate());
-        }
-
-        #[test]
-        fn test_parse_exit_ports(v in strat_exit_ports()) {
-            let mut s = String::new();
-            for v in &v {
-                if !s.is_empty() {
-                    s.push(',');
-                }
-                write!(s, "{v}").unwrap();
-            }
-
-            let r = parse_exit_ports(&s).unwrap();
-            assert_eq!(r, v);
-        }
-
-        #[test]
-        fn test_exit_port_contains(
-            a: u16,
-            b: u16,
-            port: u16,
-        ) {
-            let (p, t) = if a == b {
-                (ExitPort::Port(a), port == a)
-            } else {
-                let from = a.min(b);
-                let to = a.max(b);
-                (ExitPort::PortRange { from, to }, (from..=to).contains(&port))
-            };
-            assert_eq!(p.contains(port), t);
-        }
-
-        #[test]
-        fn test_exit_port_in_ports(
-            a: ExitPortList,
-            port: u16,
-        ) {
-            let ok = a[(port >> 3) as usize] & (1 << (port & 7)) != 0;
-            let p = map_exit_ports(a);
-            assert_eq!(p.iter().any(|p| p.contains(port)), ok);
-            assert_eq!(ExitPort::in_ports(&p, port), ok);
-        }
     }
 }
