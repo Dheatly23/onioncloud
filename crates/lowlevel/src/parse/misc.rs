@@ -31,6 +31,7 @@ impl From<CertVerifyError> for Error {
 }
 
 impl Error {
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) fn to_err<T: From<CertFormatError> + From<CertVerifyError>>(self) -> T {
         match self {
             Self::CertFormatError(v) => v.into(),
@@ -119,7 +120,7 @@ pub(crate) fn args_exit_policy(
         .and_then(parse_exit_ports)?;
     let mut ret = ExitPortPolicy { accept, ports };
     if !ret.sort_validate() {
-        return Err(CertFormatError.into());
+        return Err(CertFormatError);
     }
     Ok(ret)
 }

@@ -1,6 +1,7 @@
 //! (Microdescriptor) consensus parser.
 //!
 //! Parses and validate consensus (at `/tor/status-vote/current/consensus` or `/tor/status-vote/current/consensus-microdesc`).
+#![allow(clippy::wrong_self_convention)] // Yeah we like to_footer and to_relay
 
 use std::cmp::{Ord, Ordering, PartialEq, PartialOrd};
 use std::iter::FusedIterator;
@@ -70,7 +71,7 @@ impl Ord for ConsensusSignature<'_> {
         self.fingerprint
             .cmp(&rhs.fingerprint)
             .then_with(|| self.sig_digest.cmp(&rhs.sig_digest))
-            .then_with(|| self.algorithm.cmp(&rhs.algorithm))
+            .then_with(|| self.algorithm.cmp(rhs.algorithm))
     }
 }
 
@@ -960,6 +961,8 @@ impl<'a> RelayEntryParserInner<'a> {
         for item in self.inner.clone() {
             let item = item?;
 
+            // Currently only one footer item exists.
+            #[allow(clippy::single_match)]
             match item.keyword() {
                 // bandwidth-weights is at most once
                 "bandwidth-weights" => {
