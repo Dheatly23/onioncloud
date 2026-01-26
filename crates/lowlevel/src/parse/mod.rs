@@ -1,7 +1,7 @@
 pub mod auth_cert;
 pub mod consensus;
 pub mod descriptor;
-//pub mod microdesc;
+pub mod microdesc;
 pub(crate) mod misc;
 pub mod netdoc;
 
@@ -186,6 +186,11 @@ mod tests {
                 ExitPort::PortRange { from, to }
             }
         })
+    }
+
+    pub(crate) fn strat_exit_policy() -> impl Strategy<Value = ExitPortPolicy> {
+        (any::<bool>(), strat_exit_ports())
+            .prop_map(|(accept, ports)| ExitPortPolicy { accept, ports })
     }
 
     proptest! {

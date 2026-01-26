@@ -1,9 +1,20 @@
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::io::Error as IoError;
 
 use rustls::Error as RustlsError;
 use thiserror::Error;
 
 use crate::parse::misc::Error as MiscError;
+
+macro_rules! display2debug {
+    ($i:ident) => {
+        impl Debug for $i {
+            fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+                Display::fmt(self, f)
+            }
+        }
+    };
+}
 
 macro_rules! remap {
     (#pat $from:ident $to:ident $v:ident $var:ident) => {
@@ -30,7 +41,7 @@ macro_rules! remap {
 }
 
 /// Cell data error.
-#[derive(Error, Debug)]
+#[derive(Error)]
 #[non_exhaustive]
 pub enum CellDataError {
     #[error(transparent)]
@@ -39,8 +50,10 @@ pub enum CellDataError {
     CellFormatError(#[from] super::CellFormatError),
 }
 
+display2debug! {CellDataError}
+
 /// Cell error.
-#[derive(Error, Debug)]
+#[derive(Error)]
 #[non_exhaustive]
 pub enum CellError {
     #[error("network error: {0}")]
@@ -51,6 +64,8 @@ pub enum CellError {
     CellFormatError(#[from] super::CellFormatError),
 }
 
+display2debug! {CellError}
+
 remap! {
     CellDataError => CellError {
         InvalidCellHeader,
@@ -59,7 +74,7 @@ remap! {
 }
 
 /// User controller error.
-#[derive(Error, Debug)]
+#[derive(Error)]
 #[non_exhaustive]
 pub enum UserControllerError {
     #[error("network error: {0}")]
@@ -88,6 +103,8 @@ pub enum UserControllerError {
     CellLengthOverflowError(#[from] super::CellLengthOverflowError),
 }
 
+display2debug! {UserControllerError}
+
 remap! {
     CellError => UserControllerError {
         Io,
@@ -104,7 +121,7 @@ remap! {
 }
 
 /// Directory controller error.
-#[derive(Error, Debug)]
+#[derive(Error)]
 #[non_exhaustive]
 pub enum DirControllerError {
     #[error(transparent)]
@@ -125,8 +142,10 @@ pub enum DirControllerError {
     CellLengthOverflowError(#[from] super::CellLengthOverflowError),
 }
 
+display2debug! {DirControllerError}
+
 /// Directory authority certificate processing error.
-#[derive(Error, Debug)]
+#[derive(Error)]
 #[non_exhaustive]
 pub enum AuthCertError {
     #[error(transparent)]
@@ -137,6 +156,8 @@ pub enum AuthCertError {
     CertVerifyError(#[from] super::CertVerifyError),
 }
 
+display2debug! {AuthCertError}
+
 impl From<MiscError> for AuthCertError {
     fn from(v: MiscError) -> Self {
         v.to_err()
@@ -144,7 +165,7 @@ impl From<MiscError> for AuthCertError {
 }
 
 /// Combined consensus processing error.
-#[derive(Error, Debug)]
+#[derive(Error)]
 #[non_exhaustive]
 pub enum ConsensusError {
     #[error(transparent)]
@@ -157,8 +178,10 @@ pub enum ConsensusError {
     TooManySignaturesError(#[from] super::TooManySignaturesError),
 }
 
+display2debug! {ConsensusError}
+
 /// Consensus processing error.
-#[derive(Error, Debug)]
+#[derive(Error)]
 #[non_exhaustive]
 pub enum ConsensusParseError {
     #[error(transparent)]
@@ -166,6 +189,8 @@ pub enum ConsensusParseError {
     #[error(transparent)]
     CertFormatError(#[from] super::CertFormatError),
 }
+
+display2debug! {ConsensusParseError}
 
 remap! {
     ConsensusParseError => ConsensusError {
@@ -175,7 +200,7 @@ remap! {
 }
 
 /// Consensus signature processing error.
-#[derive(Error, Debug)]
+#[derive(Error)]
 #[non_exhaustive]
 pub enum ConsensusSignatureError {
     #[error(transparent)]
@@ -185,6 +210,8 @@ pub enum ConsensusSignatureError {
     #[error(transparent)]
     TooManySignaturesError(#[from] super::TooManySignaturesError),
 }
+
+display2debug! {ConsensusSignatureError}
 
 remap! {
     ConsensusSignatureError => ConsensusError {
@@ -201,7 +228,7 @@ impl From<MiscError> for ConsensusSignatureError {
 }
 
 /// Descriptor processing error.
-#[derive(Error, Debug)]
+#[derive(Error)]
 #[non_exhaustive]
 pub enum DescriptorError {
     #[error(transparent)]
@@ -212,7 +239,29 @@ pub enum DescriptorError {
     CertVerifyError(#[from] super::CertVerifyError),
 }
 
+display2debug! {DescriptorError}
+
 impl From<MiscError> for DescriptorError {
+    fn from(v: MiscError) -> Self {
+        v.to_err()
+    }
+}
+
+/// Microdescriptor processing error.
+#[derive(Error)]
+#[non_exhaustive]
+pub enum MicrodescError {
+    #[error(transparent)]
+    NetdocParseError(#[from] super::NetdocParseError),
+    #[error(transparent)]
+    CertFormatError(#[from] super::CertFormatError),
+    #[error(transparent)]
+    CertVerifyError(#[from] super::CertVerifyError),
+}
+
+display2debug! {MicrodescError}
+
+impl From<MiscError> for MicrodescError {
     fn from(v: MiscError) -> Self {
         v.to_err()
     }
