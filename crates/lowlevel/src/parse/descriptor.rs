@@ -333,7 +333,7 @@ impl<'a> DescriptorParser<'a> {
                     if ipv6_policy.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    ipv6_policy = Some(args_exit_policy(item.arguments())?);
+                    ipv6_policy = Some(args_exit_policy(&mut item.arguments())?);
                 }
                 // overload-general is at most once
                 "overload-general" => {

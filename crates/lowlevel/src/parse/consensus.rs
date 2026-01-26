@@ -899,7 +899,7 @@ impl<'a> RelayEntryParserInner<'a> {
                     if exit_ports.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    exit_ports = Some(args_exit_policy(item.arguments())?);
+                    exit_ports = Some(args_exit_policy(&mut item.arguments())?);
                 }
                 // m is exactly once
                 "m" if flavor == Flavor::Microdesc => {

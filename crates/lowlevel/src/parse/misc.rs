@@ -105,8 +105,9 @@ pub(crate) fn decode_sig(tmp: &mut [u8], s: &str) -> Result<Signature, Error> {
         .map_err(|_| CertVerifyError.into())
 }
 
-pub(crate) fn args_exit_policy(args: Arguments<'_>) -> Result<ExitPortPolicy, CertFormatError> {
-    let mut args = args;
+pub(crate) fn args_exit_policy(
+    args: &mut Arguments<'_>,
+) -> Result<ExitPortPolicy, CertFormatError> {
     let accept = match args.next() {
         Some("accept") => true,
         Some("reject") => false,
