@@ -1190,6 +1190,10 @@ BsJ2aWqWNWgd+DsPH4yAv3O8VfA0CVGANDmrKLsEW9Z9WDpcxwPXAgMBAAE=
         assert_eq!(desc.allow_single_hop_exits, false);
         assert_eq!(desc.or_address, None);
         assert_eq!(desc.tunnelled_dir_server, true);
+
+        if let Some(desc) = parser.next() {
+            panic!("expected parser to end, got {desc:?}");
+        }
     }
 
     proptest! {
