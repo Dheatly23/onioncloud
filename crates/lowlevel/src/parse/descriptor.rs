@@ -7,7 +7,6 @@
 //! - [Extra info format](https://spec.torproject.org/dir-spec/extra-info-document-format.html).
 
 use std::iter::FusedIterator;
-use std::mem::size_of;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::SystemTime;
 
@@ -20,6 +19,7 @@ use rsa::pkcs1v15::Pkcs1v15Sign;
 use sha1::Sha1;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
+use zerocopy::{Immutable, IntoBytes};
 
 use super::misc::{
     args_date_time, args_exit_policy, decode_b64, parse_b64, parse_b64u, parse_cert,
@@ -519,10 +519,19 @@ impl<'a> DescriptorParser<'a> {
             (Some(key), Some(cert)) => {
                 let key = parse_cert(&mut tmp, key)?.0;
                 let sig = decode_b64(&mut tmp, cert)?;
-                let mut buf = [0; const { size_of::<RelayId>() + size_of::<EdPublicKey>() }];
-                buf[..size_of::<RelayId>()].copy_from_slice(&fp);
-                buf[size_of::<RelayId>()..].copy_from_slice(ed_id_pk.as_bytes());
-                key.verify(Pkcs1v15Sign::new_unprefixed(), &buf, sig)
+
+                #[derive(IntoBytes, Immutable)]
+                #[repr(C)]
+                struct Data {
+                    fp: RelayId,
+                    ed_id: EdPublicKey,
+                }
+
+                let buf = Data {
+                    fp,
+                    ed_id: ed_id_pk.to_bytes(),
+                };
+                key.verify(Pkcs1v15Sign::new_unprefixed(), buf.as_bytes(), sig)
                     .map_err(|_| CertVerifyError)?;
                 Some(key)
             }
