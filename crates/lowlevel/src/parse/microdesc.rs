@@ -66,7 +66,7 @@ impl<'a> Parser<'a> {
         let mut tmp = [0; 2048];
 
         let onion_key = if item.has_object() {
-            Some(decode_cert::<RsaPublicKey>(&mut tmp, &item)?.0)
+            Some(decode_cert(&mut tmp, &item)?.0)
         } else {
             None
         };

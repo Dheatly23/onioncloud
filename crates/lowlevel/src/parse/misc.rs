@@ -6,7 +6,6 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use rsa::RsaPublicKey;
 use rsa::pkcs1::DecodeRsaPublicKey;
 use rsa::pkcs1::der::pem::BASE64_WRAP_WIDTH;
-use rsa::pkcs1v15::Signature;
 
 use super::netdoc::{Arguments, Item};
 use super::{ExitPort, ExitPortPolicy};
@@ -68,15 +67,15 @@ pub(crate) fn parse_b64u<const N: usize>(s: &str) -> Result<[u8; N], CertFormatE
     Ok(ret)
 }
 
-pub(crate) fn parse_cert<'a, T: From<RsaPublicKey>>(
+pub(crate) fn parse_cert<'a>(
     tmp: &'a mut [u8],
     s: &str,
-) -> Result<(T, &'a [u8]), Error> {
+) -> Result<(RsaPublicKey, &'a [u8]), Error> {
     let der = decode_b64(tmp, s)?;
     let Ok(key) = RsaPublicKey::from_pkcs1_der(der) else {
         return Err(CertVerifyError.into());
     };
-    Ok((key.into(), der))
+    Ok((key, der))
 }
 
 pub(crate) fn decode_b64<'a>(tmp: &'a mut [u8], s: &str) -> Result<&'a [u8], Error> {
@@ -86,24 +85,14 @@ pub(crate) fn decode_b64<'a>(tmp: &'a mut [u8], s: &str) -> Result<&'a [u8], Err
     d.decode(tmp).map_err(map_b64_err)
 }
 
-pub(crate) fn decode_cert<'a, T: From<RsaPublicKey>>(
+pub(crate) fn decode_cert<'a>(
     tmp: &'a mut [u8],
     item: &Item<'_>,
-) -> Result<(T, &'a [u8]), Error> {
+) -> Result<(RsaPublicKey, &'a [u8]), Error> {
     let Some(("RSA PUBLIC KEY", s)) = item.object() else {
         return Err(CertFormatError.into());
     };
-    let der = decode_b64(tmp, s)?;
-    let Ok(key) = RsaPublicKey::from_pkcs1_der(der) else {
-        return Err(CertVerifyError.into());
-    };
-    Ok((key.into(), der))
-}
-
-pub(crate) fn decode_sig(tmp: &mut [u8], s: &str) -> Result<Signature, Error> {
-    decode_b64(tmp, s)?
-        .try_into()
-        .map_err(|_| CertVerifyError.into())
+    parse_cert(tmp, s)
 }
 
 pub(crate) fn args_exit_policy(

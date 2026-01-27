@@ -36,6 +36,8 @@ pub type CipherKey256 = [u8; 32];
 /// Try to convert montgomery point to edwards point.
 ///
 /// Returns [`None`] if point is invalid.
+///
+/// See also: [spec](https://spec.torproject.org/dir-spec/converting-to-ed25519.html).
 pub fn montgomery_to_edwards(point: MontgomeryPoint, sign: bool) -> Option<EdwardsPoint> {
     point.to_edwards(if sign { 1 } else { 0 })
 }

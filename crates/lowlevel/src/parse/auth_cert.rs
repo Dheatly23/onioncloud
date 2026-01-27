@@ -9,13 +9,11 @@ use std::time::SystemTime;
 
 use digest::Digest;
 use rsa::RsaPublicKey;
-use rsa::pkcs1v15::VerifyingKey;
-use rsa::signature::Verifier;
-use rsa::signature::hazmat::PrehashVerifier;
+use rsa::pkcs1v15::Pkcs1v15Sign;
 use sha1::Sha1;
 use subtle::ConstantTimeEq;
 
-use super::misc::{args_date_time, decode_cert, decode_sig};
+use super::misc::{args_date_time, decode_b64, decode_cert};
 use super::netdoc::{Item as NetdocItem, NetdocParser};
 use crate::crypto::relay::RelayId;
 use crate::errors::{AuthCertError, CertFormatError, CertVerifyError};
@@ -187,7 +185,7 @@ impl<'a> Parser<'a> {
                     if item.arguments().next().is_some() || identity.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    let (key, der) = decode_cert::<VerifyingKey<Sha1>>(&mut tmp, &item)?;
+                    let (key, der) = decode_cert(&mut tmp, &item)?;
                     identity = Some((key, RelayId::from(Sha1::digest(der))));
                 }
                 // dir-signing-key has object, without extra args, and is exactly once
@@ -195,7 +193,7 @@ impl<'a> Parser<'a> {
                     if item.arguments().next().is_some() || signing.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    signing = Some(decode_cert::<VerifyingKey<Sha1>>(&mut tmp, &item)?.0);
+                    signing = Some(decode_cert(&mut tmp, &item)?.0);
                 }
                 // dir-key-crosscert has object, without extra args, and is exactly once
                 "dir-key-crosscert" => {
@@ -205,7 +203,7 @@ impl<'a> Parser<'a> {
                     let Some(("ID SIGNATURE" | "SIGNATURE", s)) = item.object() else {
                         return Err(CertFormatError.into());
                     };
-                    crosscert = Some(decode_sig(&mut tmp, s)?);
+                    crosscert = Some(s);
                 }
                 // dir-key-certification has object, without extra args, and is exactly once
                 "dir-key-certification" => {
@@ -215,7 +213,7 @@ impl<'a> Parser<'a> {
                     let Some(("SIGNATURE", s)) = item.object() else {
                         return Err(CertFormatError.into());
                     };
-                    signature = decode_sig(&mut tmp, s)?;
+                    signature = s;
 
                     end_off = item.byte_offset() + item.len() + 1;
                     end_msg = item.byte_offset() + item.line_len() + 1;
@@ -247,26 +245,28 @@ impl<'a> Parser<'a> {
         };
 
         // Verify certificate
-        {
-            let msg = &self.inner.original_string().as_bytes()[start_off..end_msg];
-            identity
-                .verify(msg, &signature)
-                .map_err(|_| CertVerifyError)?;
-            drop(signature);
+        let msg = &self.inner.original_string().as_bytes()[start_off..end_msg];
+        identity
+            .verify(
+                Pkcs1v15Sign::new_unprefixed(),
+                &Sha1::digest(msg),
+                decode_b64(&mut tmp, signature)?,
+            )
+            .map_err(|_| CertVerifyError)?;
+
+        // Verify fingerprint
+        if !bool::from(fingerprint.ct_eq(&hashed)) {
+            return Err(CertVerifyError.into());
         }
 
-        {
-            // Verify fingerprint
-            if !bool::from(fingerprint.ct_eq(&hashed)) {
-                return Err(CertVerifyError.into());
-            }
-
-            // Verify crosscert
-            signing
-                .verify_prehash(&hashed, &crosscert)
-                .map_err(|_| CertVerifyError)?;
-            drop(crosscert);
-        }
+        // Verify crosscert
+        signing
+            .verify(
+                Pkcs1v15Sign::new_unprefixed(),
+                &hashed,
+                decode_b64(&mut tmp, crosscert)?,
+            )
+            .map_err(|_| CertVerifyError)?;
 
         Ok(Item {
             // SAFETY: Indices are valid.
@@ -282,8 +282,8 @@ impl<'a> Parser<'a> {
             expired,
             address,
 
-            id_key: identity.into(),
-            sign_key: signing.into(),
+            id_key: identity,
+            sign_key: signing,
         })
     }
 }
@@ -353,8 +353,6 @@ mod tests {
     use proptest::prelude::*;
     use rand::thread_rng;
     use rsa::pkcs1::EncodeRsaPublicKey;
-    use rsa::pkcs1v15::{Signature, SigningKey};
-    use rsa::signature::{RandomizedDigestSigner, Signer};
 
     use crate::util::{print_hex, test_rsa_pk};
 
@@ -364,10 +362,11 @@ mod tests {
         write!(s, "{}", dt.naive_utc().format_with_items(fmt.iter())).unwrap();
     }
 
-    fn encode_sig(sig: Signature) -> String {
+    fn encode_sig(sig: impl AsRef<[u8]>) -> String {
         let mut buf = [0; 1024];
         let mut enc = Encoder::<Base64>::new_wrapped(&mut buf, 64, LineEnding::LF).unwrap();
-        enc.encode(&Box::<[u8]>::from(sig)).unwrap();
+        enc.encode(sig.as_ref()).unwrap();
+        drop(sig);
         enc.finish().unwrap().into()
     }
 
@@ -432,17 +431,18 @@ kHgepW7IkJFnbeYWVaFDMDr+QwXHSj9SBySlkLlOxix+nopDQZAQQDkeL65ZRLI4
     fn test_auth_cert() {
         let private_key = test_rsa_pk();
         let public_key = private_key.to_public_key();
-        let sign_key = SigningKey::<Sha1>::from(private_key.clone());
-        let (id_key, fingerprint, crosscert) = {
-            let doc = public_key.to_pkcs1_der().unwrap();
-            let pem = doc.to_pem("RSA PUBLIC KEY", LineEnding::LF).unwrap();
-            let hash = Sha1::new_with_prefix(doc.into_vec());
-            (
-                pem,
-                RelayId::from(hash.clone().finalize()),
-                encode_sig(sign_key.sign_digest_with_rng(&mut thread_rng(), hash)),
-            )
-        };
+        let doc = public_key.to_pkcs1_der().unwrap();
+        let id_key = doc.to_pem("RSA PUBLIC KEY", LineEnding::LF).unwrap();
+        let fingerprint = RelayId::from(Sha1::new_with_prefix(doc.into_vec()).finalize());
+        let crosscert = encode_sig(
+            private_key
+                .sign_with_rng(
+                    &mut thread_rng(),
+                    Pkcs1v15Sign::new_unprefixed(),
+                    &fingerprint,
+                )
+                .unwrap(),
+        );
 
         #[derive(Debug, Clone, Copy)]
         enum Items {
@@ -500,7 +500,7 @@ kHgepW7IkJFnbeYWVaFDMDr+QwXHSj9SBySlkLlOxix+nopDQZAQQDkeL65ZRLI4
                 }
 
                 writeln!(s, "dir-key-certification").unwrap();
-                let sig = sign_key.sign(&s.as_bytes()[start..]);
+                let sig = private_key.sign_with_rng(&mut thread_rng(), Pkcs1v15Sign::new_unprefixed(), &Sha1::digest(&s.as_bytes()[start..])).unwrap();
                 writeln!(s, "-----BEGIN SIGNATURE-----\n{}\n-----END SIGNATURE-----", encode_sig(sig)).unwrap();
             }
 

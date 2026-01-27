@@ -14,7 +14,6 @@ use std::time::SystemTime;
 use digest::Digest;
 use rsa::RsaPublicKey;
 use rsa::pkcs1v15::Pkcs1v15Sign;
-use rsa::traits::SignatureScheme;
 use sha1::Sha1;
 use sha2::Sha256;
 
@@ -212,8 +211,8 @@ impl<'a> SignatureVerifier<'a> {
             _ => return Ok(()),
         };
 
-        Pkcs1v15Sign::new_unprefixed()
-            .verify(sign_key, hash, s)
+        sign_key
+            .verify(Pkcs1v15Sign::new_unprefixed(), hash, s)
             .map_err(|_| CertVerifyError.into())
     }
 }

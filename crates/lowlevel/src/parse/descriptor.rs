@@ -7,6 +7,7 @@
 //! - [Extra info format](https://spec.torproject.org/dir-spec/extra-info-document-format.html).
 
 use std::iter::FusedIterator;
+use std::mem::size_of;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::SystemTime;
 
@@ -14,14 +15,14 @@ use curve25519_dalek::montgomery::MontgomeryPoint;
 use digest::Digest;
 use ed25519_dalek::VerifyingKey;
 use memchr::{memchr, memrchr};
-use rsa::pkcs1v15::VerifyingKey as RsaVerifyingKey;
-use rsa::signature::{DigestVerifier, Verifier};
+use rsa::RsaPublicKey;
+use rsa::pkcs1v15::Pkcs1v15Sign;
 use sha1::Sha1;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 use super::misc::{
-    args_date_time, args_exit_policy, decode_b64, decode_sig, parse_b64, parse_b64u, parse_cert,
+    args_date_time, args_exit_policy, decode_b64, parse_b64, parse_b64u, parse_cert,
     parse_exit_port,
 };
 use super::netdoc::{Arguments as NetdocArguments, Item as NetdocItem, NetdocParser};
@@ -506,8 +507,8 @@ impl<'a> DescriptorParser<'a> {
             return Err(CertFormatError.into());
         };
 
-        let (signing_key, der) = parse_cert::<RsaVerifyingKey<Sha1>>(&mut tmp, signing_key)?;
-        let fp = Sha1Output::from(Sha1::digest(der));
+        let (signing_key, der) = parse_cert(&mut tmp, signing_key)?;
+        let fp = RelayId::from(Sha1::digest(der));
         if let Some(fp_) = &fingerprint
             && !bool::from(fp_.ct_eq(&fp))
         {
@@ -516,13 +517,13 @@ impl<'a> DescriptorParser<'a> {
 
         let onion_key = match (onion_key, onion_key_crosscert) {
             (Some(key), Some(cert)) => {
-                let key = parse_cert::<RsaVerifyingKey<Sha1>>(&mut tmp, key)?.0;
-                // TODO: Fix crosscert verification
-                let _sig = decode_sig(&mut tmp, cert)?;
-                let mut hash = Sha1::new();
-                hash.update(fp);
-                hash.update(ed_id_pk.as_bytes());
-                //key.verify_digest(hash, &sig).map_err(|_| CertVerifyError)?;
+                let key = parse_cert(&mut tmp, key)?.0;
+                let sig = decode_b64(&mut tmp, cert)?;
+                let mut buf = [0; const { size_of::<RelayId>() + size_of::<EdPublicKey>() }];
+                buf[..size_of::<RelayId>()].copy_from_slice(&fp);
+                buf[size_of::<RelayId>()..].copy_from_slice(ed_id_pk.as_bytes());
+                key.verify(Pkcs1v15Sign::new_unprefixed(), &buf, sig)
+                    .map_err(|_| CertVerifyError)?;
                 Some(key)
             }
             (None, None) => None,
@@ -533,59 +534,58 @@ impl<'a> DescriptorParser<'a> {
             montgomery_to_edwards(MontgomeryPoint(ntor_onion_key), ntor_onion_key_crosscert.0)
                 .ok_or(CertVerifyError)?,
         );
-        {
-            let mut cert =
-                UnverifiedEdCert::new(decode_b64(&mut tmp, ntor_onion_key_crosscert.1)?)?;
+        let mut cert = UnverifiedEdCert::new(decode_b64(&mut tmp, ntor_onion_key_crosscert.1)?)?;
 
-            if cert.header.cert_ty != 0xa && cert.header.key_ty != 1
-                || !bool::from(cert.header.key.ct_eq(ed_id_pk.as_bytes()))
-            {
+        if cert.header.cert_ty != 0xa && cert.header.key_ty != 1
+            || !bool::from(cert.header.key.ct_eq(ed_id_pk.as_bytes()))
+        {
+            return Err(CertVerifyError.into());
+        }
+
+        while let Some((header, _)) = cert.next_ext().transpose()? {
+            if header.flags & 1 != 0 {
+                // Unknown required extension
                 return Err(CertVerifyError.into());
+            } else {
+                continue;
             }
-
-            while let Some((header, _)) = cert.next_ext().transpose()? {
-                if header.flags & 1 != 0 {
-                    // Unknown required extension
-                    return Err(CertVerifyError.into());
-                } else {
-                    continue;
-                }
-            }
-
-            cert.verify2(&ntor_onion_key_ed)?;
         }
 
-        {
-            // End of message is space after keyword.
-            // In other word, start of arguments.
-            let b = &self.original_string().as_bytes()
-                [start_off..item.byte_offset() + item.line_len() - item.arguments_raw().len()];
-            let sig: EdSignature = item
-                .arguments()
-                .next()
-                .ok_or(CertFormatError)
-                .and_then(parse_b64u)?;
-            let mut hash = Sha256::new_with_prefix(b"Tor router descriptor signature v1");
-            hash.update(b);
-            ed_sign_pk
-                .verify_strict(&Sha256Output::from(hash.finalize()), &sig.into())
-                .map_err(|_| CertVerifyError)?;
-        }
+        cert.verify2(&ntor_onion_key_ed)?;
+
+        // End of message is space after keyword.
+        // In other word, start of arguments.
+        let b = &self.original_string().as_bytes()
+            [start_off..item.byte_offset() + item.line_len() - item.arguments_raw().len()];
+        let sig: EdSignature = item
+            .arguments()
+            .next()
+            .ok_or(CertFormatError)
+            .and_then(parse_b64u)?;
+        let mut hash = Sha256::new_with_prefix(b"Tor router descriptor signature v1");
+        hash.update(b);
+        ed_sign_pk
+            .verify_strict(&hash.finalize(), &sig.into())
+            .map_err(|_| CertVerifyError)?;
 
         let item = self.inner.next().ok_or(CertFormatError)??;
         if item.keyword() != "router-signature" || item.arguments().next().is_some() {
             return Err(CertFormatError.into());
         }
 
-        {
-            let b = &self.original_string().as_bytes()
-                [start_off..item.byte_offset() + item.line_len() + 1];
-            let Some(("SIGNATURE", s)) = item.object() else {
-                return Err(CertFormatError.into());
-            };
-            let s = decode_sig(&mut tmp, s)?;
-            signing_key.verify(b, &s).map_err(|_| CertVerifyError)?;
-        }
+        let Some(("SIGNATURE", s)) = item.object() else {
+            return Err(CertFormatError.into());
+        };
+        signing_key
+            .verify(
+                Pkcs1v15Sign::new_unprefixed(),
+                &Sha1::digest(
+                    &self.original_string().as_bytes()
+                        [start_off..item.byte_offset() + item.line_len() + 1],
+                ),
+                decode_b64(&mut tmp, s)?,
+            )
+            .map_err(|_| CertVerifyError)?;
 
         Ok(Descriptor {
             // SAFETY: Indices are valid.
@@ -680,7 +680,7 @@ pub struct Descriptor<'a> {
     /// Relay uptime in seconds.
     pub uptime: Option<u64>,
     /// Legacy RSA onion key.
-    pub onion_key: Option<RsaVerifyingKey<Sha1>>,
+    pub onion_key: Option<RsaPublicKey>,
     /// Ntor onion key.
     pub ntor_onion_key: EdPublicKey,
     /// Ntor onion key converted to ed25519 point.
@@ -688,7 +688,7 @@ pub struct Descriptor<'a> {
     /// Used for some signing operations.
     pub ntor_onion_key_ed: VerifyingKey,
     /// RSA identity key.
-    pub signing_key: RsaVerifyingKey<Sha1>,
+    pub signing_key: RsaPublicKey,
     /// Exit policy.
     pub exit_policy: Vec<ExitPolicy>,
     /// Ipv6 exit policy summary.
@@ -978,7 +978,6 @@ mod tests {
     use proptest::option::of;
     use proptest::prelude::*;
     use proptest::strategy::LazyJust;
-    use rsa::RsaPublicKey;
     use rsa::pkcs1::DecodeRsaPublicKey;
 
     use crate::parse::strat_exit_port;
@@ -1139,10 +1138,7 @@ BsJ2aWqWNWgd+DsPH4yAv3O8VfA0CVGANDmrKLsEW9Z9WDpcxwPXAgMBAAE=
         );
         assert_eq!(desc.hibernating, false);
         assert_eq!(desc.uptime, Some(2307611));
-        assert_eq!(
-            desc.onion_key.as_ref().map(AsRef::<RsaPublicKey>::as_ref),
-            Some(&onion_key)
-        );
+        assert_eq!(desc.onion_key.as_ref(), Some(&onion_key));
         assert_eq!(
             desc.ntor_onion_key,
             [
@@ -1151,10 +1147,7 @@ BsJ2aWqWNWgd+DsPH4yAv3O8VfA0CVGANDmrKLsEW9Z9WDpcxwPXAgMBAAE=
                 0xca, 0xc9, 0xe4, 0x03,
             ]
         );
-        assert_eq!(
-            AsRef::<RsaPublicKey>::as_ref(&desc.signing_key),
-            &signing_key
-        );
+        assert_eq!(desc.signing_key, signing_key);
         assert_eq!(
             desc.exit_policy,
             [ExitPolicy {
