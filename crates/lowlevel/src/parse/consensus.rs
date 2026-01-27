@@ -8,7 +8,6 @@ use std::iter::FusedIterator;
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV6};
 use std::num::NonZeroU16;
-use std::ptr::from_mut;
 use std::time::SystemTime;
 
 use digest::Digest;
@@ -149,7 +148,7 @@ pub fn parse_consensus_signature<'a, 'b>(
     // In other word, start of arguments.
     let b = &doc.as_bytes()[..i.byte_offset() + i.line_len() - i.arguments_raw().len()];
     // SAFETY: Everything up to ix is filled.
-    let sigs = unsafe { &mut *(from_mut(&mut sigs[..ix]) as *mut [ConsensusSignature<'_>]) };
+    let sigs = unsafe { sigs[..ix].assume_init_mut() };
 
     Ok(ConsensusSignatureResult {
         document: s,
