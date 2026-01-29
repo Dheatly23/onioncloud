@@ -24,6 +24,7 @@ use crate::cell::relay::drop::RelayDrop;
 use crate::cell::relay::end::{EndReason, RelayEnd};
 use crate::cell::relay::sendme::RelaySendme;
 use crate::cell::relay::v0::{RELAY_DATA_LENGTH, RelayExt};
+use crate::cell::relay::xon::RelayXon;
 use crate::cell::relay::{IntoRelay, Relay, RelayVersion, cast};
 use crate::circuit::NewStream;
 use crate::errors::CircuitClosedError;
@@ -54,7 +55,7 @@ pub struct DirStream<Cache, Send, Recv> {
     send_buf: [u8; RELAY_DATA_LENGTH],
     send_buf_len: usize,
 
-    sendme_ctrl: Option<SendmeCtrl>,
+    flow_ctrl: FlowCtrl,
 
     state: State,
     end_reason: Option<EndReason>,
@@ -81,6 +82,12 @@ enum State {
     ShutdownRequest,
     /// Shutdown sequence. All data must be flushed, and any remaining ones will be discarded.
     Shutdown,
+}
+
+enum FlowCtrl {
+    None,
+    Sendme(SendmeCtrl),
+    XonDummy(XonDummyCtrl),
 }
 
 /// Return type of [`from_new_stream`].
@@ -149,7 +156,7 @@ impl<
             send_buf: [0; RELAY_DATA_LENGTH],
             send_buf_len: 0,
 
-            sendme_ctrl: None,
+            flow_ctrl: FlowCtrl::None,
 
             state: State::Init(state),
             end_reason: None,
@@ -196,7 +203,7 @@ impl<
             send_buf,
             send_buf_len,
 
-            sendme_ctrl,
+            flow_ctrl,
 
             state,
             end_reason,
@@ -216,7 +223,7 @@ impl<
             send_buf,
             send_buf_len,
 
-            sendme_ctrl,
+            flow_ctrl,
 
             state,
             end_reason,
@@ -237,9 +244,27 @@ impl<
             "method is called after creating datatype"
         );
 
-        if self.sendme_ctrl.is_none() {
-            self.sendme_ctrl = Some(SendmeCtrl::new());
-        }
+        self.flow_ctrl = FlowCtrl::Sendme(SendmeCtrl::new());
+    }
+
+    /// Enable dummy XON/XOFF based flow control.
+    ///
+    /// It basically waits until some data is received, then send unlimited RELAY_XON cell.
+    /// It **does not** do any bandwidth estimation at all.
+    ///
+    /// This method is idempotent. Calling it twice does the same as calling it once.
+    ///
+    /// **NOTE: Call this immediately after creating [`DirStream`].**
+    ///
+    /// As a general precaution, it only accepts unpinned self.
+    /// Since [`DirStream`] is not [`Unpin`], there is no way of calling it safely after pinning.
+    pub fn enable_xon_dummy(&mut self) {
+        debug_assert!(
+            matches!(self.state, State::Init(InitState::BeginDirStart)),
+            "method is called after creating datatype"
+        );
+
+        self.flow_ctrl = FlowCtrl::XonDummy(XonDummyCtrl::new());
     }
 
     /// Close with reason.
@@ -281,7 +306,7 @@ impl<
         )
     }
 
-    fn poll_init(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
+    fn poll_init(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
         let DirStreamProj {
             inner,
             state,
@@ -289,9 +314,9 @@ impl<
             send_buf_len,
             recv_buf_len,
             ..
-        } = self.project();
+        } = self.as_mut().project();
         let State::Init(init) = state else {
-            return Ready(Ok(()));
+            return self.poll_flow_ctrl(cx);
         };
 
         debug_assert_eq!(*send_buf_len, 0);
@@ -306,24 +331,21 @@ impl<
         } else {
             State::Normal
         };
-        Ready(Ok(()))
+        self.poll_flow_ctrl(cx)
     }
 
-    /// Try to receive/send SENDME cells.
-    ///
-    /// This function **doesn't** return [`Poll`] because it should be non-blocking.
-    /// It _might_ shuts down the stream, either due to errors or circuit disconnection.
-    fn poll_sendme(self: Pin<&mut Self>, cx: &mut Context<'_>) -> IoResult<()> {
+    /// Handle flow control data.
+    fn poll_flow_ctrl(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
         let DirStreamProj {
             inner,
             recv_buf,
             recv_buf_len,
-            sendme_ctrl: Some(ctrl),
+            flow_ctrl: ctrl,
             state: state @ State::Normal,
             ..
         } = self.project()
         else {
-            return Ok(());
+            return Ready(Ok(()));
         };
         let DirStreamInnerProj {
             circ_id: &mut circ_id,
@@ -336,105 +358,143 @@ impl<
 
         let mut span = None;
 
-        while ctrl.is_backward_threshold() {
-            let _guard = span
-                .get_or_insert_with(|| info_span!("poll_sendme_send"))
-                .enter();
+        match ctrl {
+            FlowCtrl::None => Ready(Ok(())),
+            FlowCtrl::Sendme(ctrl) => {
+                let mut has_pending = false;
 
-            let Ready(ret) = send.as_mut().poll_ready(cx) else {
-                break;
-            };
-            if !handle_write_err(ret) {
-                let cell = <_>::try_into_relay_cached(
-                    cache.cache(RelaySendme::new_stream_unauth(
-                        cache.get_cached(),
-                        stream_id.inner,
-                    )),
-                    circ_id,
-                    RelayVersion::V0,
-                )
-                .unwrap();
-                if !handle_write_err(send.as_mut().start_send(gen_cached(cell, stream_id))) {
-                    trace!("written SENDME cell");
-                    ctrl.inc_backward();
-                    continue;
-                }
-            }
+                while ctrl.is_backward_threshold() {
+                    let _guard = span
+                        .get_or_insert_with(|| info_span!("poll_sendme_send"))
+                        .enter();
 
-            // Sending failed, circuit must be disconnected.
-            *state = State::Shutdown;
-            return Ok(());
-        }
-
-        span = None;
-
-        // Receive buffer must be empty, otherwise there's nowhere to put potential RELAY_DATA cell.
-        while ctrl.is_forward_threshold() && *recv_buf_len == 0 {
-            let _guard = span
-                .get_or_insert_with(|| info_span!("poll_sendme_recv"))
-                .enter();
-
-            loop {
-                let cell = match recv.as_mut().poll_next(cx) {
-                    Pending => break,
-                    Ready(Some(v)) => v,
-                    Ready(None) => {
-                        // Stream disconnected.
-                        trace!("stream disconnected");
-                        *state = State::Shutdown;
-                        return Ok(());
-                    }
-                };
-
-                debug_assert_eq!(cell.generation, stream_id.generation);
-                debug_assert_eq!(cell.inner.circuit, circ_id);
-                debug_assert_eq!(cell.inner.stream(), stream_id.inner.into());
-                let mut cell = Cached::map(cell, |c| Some(c.into_inner()));
-
-                if let Some(cell) =
-                    cast::<RelayData>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
-                {
-                    // RELAY_DATA cell
-                    ctrl.dec_backward();
-
-                    let cell = cache.cache_b(cell);
-                    let data = cell.data();
-                    if !data.is_empty() {
-                        continue;
+                    let Ready(ret) = send.as_mut().poll_ready(cx) else {
+                        has_pending = true;
+                        break;
+                    };
+                    if !handle_write_err(ret) {
+                        let cell = <_>::try_into_relay_cached(
+                            cache.cache(RelaySendme::new_stream_unauth(
+                                cache.get_cached(),
+                                stream_id.inner,
+                            )),
+                            circ_id,
+                            RelayVersion::V0,
+                        )
+                        .unwrap();
+                        if !handle_write_err(send.as_mut().start_send(gen_cached(cell, stream_id)))
+                        {
+                            trace!("written SENDME cell");
+                            ctrl.inc_backward();
+                            continue;
+                        }
                     }
 
-                    *recv_buf_len = data.len();
-                    recv_buf[RELAY_DATA_LENGTH - data.len()..].copy_from_slice(data);
-                    break;
-                } else if let Some(cell) =
-                    cast::<RelayEnd>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
-                {
-                    // RELAY_END cell
-                    let reason = cache.cache_b(cell).reason();
-                    info!(%reason, "stream closed");
-
-                    *state = State::ShutdownRequest;
-                    return Ok(());
-                } else if let Some(cell) =
-                    cast::<RelayDrop>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
-                {
-                    // RELAY_DROP cell
-                    cache.discard(cell);
-                } else if let Some(cell) =
-                    cast::<RelaySendme>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
-                {
-                    // RELAY_SENDME cell
-                    ctrl.inc_forward();
-                    cache.discard(cell);
-                    break;
-                } else if let Some(cell) = Cached::transpose(cell) {
-                    // NOTE: Potential protocol violation
-                    debug!("unhandled cell with command {} received", cell.command());
+                    // Sending failed, circuit must be disconnected.
+                    *state = State::Shutdown;
+                    return Ready(Ok(()));
                 }
+
+                span = None;
+
+                // Receive buffer must be empty, otherwise there's nowhere to put potential RELAY_DATA cell.
+                'outer: while ctrl.is_forward_threshold() && *recv_buf_len == 0 {
+                    let _guard = span
+                        .get_or_insert_with(|| info_span!("poll_sendme_recv"))
+                        .enter();
+
+                    loop {
+                        let cell = match recv.as_mut().poll_next(cx) {
+                            Pending => {
+                                has_pending = true;
+                                break 'outer;
+                            }
+                            Ready(Some(v)) => v,
+                            Ready(None) => {
+                                // Stream disconnected.
+                                trace!("stream disconnected");
+                                *state = State::Shutdown;
+                                return Ready(Ok(()));
+                            }
+                        };
+
+                        debug_assert_eq!(cell.generation, stream_id.generation);
+                        debug_assert_eq!(cell.inner.circuit, circ_id);
+                        debug_assert_eq!(cell.inner.stream(), stream_id.inner.into());
+                        let mut cell = Cached::map(cell, |c| Some(c.into_inner()));
+
+                        if let Some(cell) =
+                            cast::<RelayData>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
+                        {
+                            // RELAY_DATA cell
+                            ctrl.dec_backward();
+
+                            let cell = cache.cache_b(cell);
+                            let data = cell.data();
+                            if !data.is_empty() {
+                                continue;
+                            }
+
+                            *recv_buf_len = data.len();
+                            recv_buf[RELAY_DATA_LENGTH - data.len()..].copy_from_slice(data);
+                            break;
+                        } else if let Some(cell) =
+                            cast::<RelayEnd>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
+                        {
+                            // RELAY_END cell
+                            let reason = cache.cache_b(cell).reason();
+                            info!(%reason, "stream closed");
+
+                            *state = State::ShutdownRequest;
+                            return Ready(Ok(()));
+                        } else if let Some(cell) =
+                            cast::<RelayDrop>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
+                        {
+                            // RELAY_DROP cell
+                            cache.discard(cell);
+                        } else if let Some(cell) =
+                            cast::<RelaySendme>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
+                        {
+                            // RELAY_SENDME cell
+                            ctrl.inc_forward();
+                            cache.discard(cell);
+                            break;
+                        } else if let Some(cell) = Cached::transpose(cell) {
+                            // NOTE: Potential protocol violation
+                            debug!("unhandled cell with command {} received", cell.command());
+                        }
+                    }
+                }
+
+                if has_pending { Pending } else { Ready(Ok(())) }
+            }
+            FlowCtrl::XonDummy(ctrl) => {
+                if !ctrl.is_xon_needed() {
+                    return Ready(Ok(()));
+                }
+
+                let _guard = info_span!("poll_xon_send").entered();
+
+                if !handle_write_err(ready!(send.as_mut().poll_ready(cx))) {
+                    let cell = <_>::try_into_relay_cached(
+                        // Just send an amount ok
+                        cache.cache(RelayXon::new(cache.get_cached(), stream_id.inner, 500)),
+                        circ_id,
+                        RelayVersion::V0,
+                    )
+                    .unwrap();
+                    if !handle_write_err(send.as_mut().start_send(gen_cached(cell, stream_id))) {
+                        trace!("written XON cell");
+                        ctrl.mark_xon_sent();
+                        return Ready(Ok(()));
+                    }
+                }
+
+                // Sending failed, circuit must be disconnected.
+                *state = State::Shutdown;
+                Ready(Ok(()))
             }
         }
-
-        Ok(())
     }
 
     #[instrument(skip_all)]
@@ -442,7 +502,6 @@ impl<
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<IoResult<Option<RelayData>>> {
-        self.as_mut().poll_sendme(cx)?;
         if !matches!(self.state, State::Normal) {
             // Stream closing
             ready!(self.close_inner(cx))?;
@@ -451,7 +510,7 @@ impl<
 
         let DirStreamProj {
             inner,
-            sendme_ctrl,
+            flow_ctrl,
             state,
             end_reason,
             ..
@@ -477,8 +536,10 @@ impl<
                 cast::<RelayData>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
             {
                 // RELAY_DATA cell
-                if let Some(ctrl) = sendme_ctrl {
-                    ctrl.dec_backward();
+                match flow_ctrl {
+                    FlowCtrl::Sendme(ctrl) => ctrl.dec_backward(),
+                    FlowCtrl::XonDummy(ctrl) => ctrl.on_recv(),
+                    _ => (),
                 }
                 if !cell.data().is_empty() {
                     return Ready(Ok(Some(cell)));
@@ -504,7 +565,7 @@ impl<
                 cast::<RelaySendme>(&mut cell, RelayVersion::V0).map_err(map_io_err)?
             {
                 // RELAY_SENDME cell
-                if let Some(ctrl) = sendme_ctrl {
+                if let FlowCtrl::Sendme(ctrl) = flow_ctrl {
                     ctrl.inc_forward();
                 }
                 cache.discard(cell);
@@ -525,7 +586,7 @@ impl<
     fn poll_flush_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
         let DirStreamProj {
             inner,
-            sendme_ctrl,
+            flow_ctrl,
             state,
             send_buf,
             send_buf_len,
@@ -556,7 +617,7 @@ impl<
             )
             .unwrap();
             if !handle_write_err(send.as_mut().start_send(gen_cached(cell, stream_id))) {
-                if let Some(ctrl) = sendme_ctrl {
+                if let FlowCtrl::Sendme(ctrl) = flow_ctrl {
                     ctrl.dec_forward();
                 }
 
@@ -831,7 +892,6 @@ impl<
         buf: &[u8],
     ) -> Poll<IoResult<usize>> {
         ready!(self.as_mut().poll_init(cx))?;
-        self.as_mut().poll_sendme(cx)?;
 
         let n = if !matches!(self.state, State::Normal) {
             // Stream closing
@@ -841,7 +901,7 @@ impl<
             // Avoids copying to buffer
             let DirStreamProj {
                 inner,
-                sendme_ctrl,
+                flow_ctrl,
                 state,
                 send_buf,
                 send_buf_len,
@@ -875,7 +935,7 @@ impl<
                 .unwrap();
                 ok = !handle_write_err(send.as_mut().start_send(gen_cached(cell, stream_id)));
 
-                if ok && let Some(ctrl) = sendme_ctrl {
+                if ok && let FlowCtrl::Sendme(ctrl) = flow_ctrl {
                     ctrl.dec_forward();
                 }
             }
@@ -914,7 +974,6 @@ impl<
         mut bufs: &[IoSlice<'_>],
     ) -> Poll<IoResult<usize>> {
         ready!(self.as_mut().poll_init(cx))?;
-        self.as_mut().poll_sendme(cx)?;
 
         let n = if !matches!(self.state, State::Normal) {
             // Stream closing
@@ -1018,7 +1077,6 @@ impl<
     #[instrument(level = "trace", skip_all, fields(circ_id = self.inner.circ_id, stream_id = self.inner.stream_id.inner))]
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
         ready!(self.as_mut().poll_init(cx))?;
-        self.as_mut().poll_sendme(cx)?;
 
         if !matches!(self.state, State::Normal) {
             // Stream closing
@@ -1202,6 +1260,32 @@ impl SendmeCtrl {
         if Self::inc_val(&mut self.backward_cnt) {
             warn!("backward window is full");
         }
+    }
+}
+
+struct XonDummyCtrl {
+    n_recv_left: usize,
+    xon_sent: bool,
+}
+
+impl XonDummyCtrl {
+    fn new() -> Self {
+        Self {
+            n_recv_left: 50,
+            xon_sent: false,
+        }
+    }
+
+    fn on_recv(&mut self) {
+        self.n_recv_left = self.n_recv_left.saturating_sub(1);
+    }
+
+    fn is_xon_needed(&self) -> bool {
+        !self.xon_sent && self.n_recv_left == 0
+    }
+
+    fn mark_xon_sent(&mut self) {
+        self.xon_sent = true;
     }
 }
 

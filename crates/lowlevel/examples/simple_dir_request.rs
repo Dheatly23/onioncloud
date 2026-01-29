@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use futures_io::{AsyncRead, AsyncWrite};
 use futures_util::{FutureExt, select_biased};
 use http_body_util::{BodyExt, Empty};
@@ -134,9 +134,24 @@ struct Args {
     #[arg(long, default_value = "256")]
     channel_agg_cap: NonZeroUsize,
 
+    /// Stream-level flow control algorithm.
+    #[arg(long)]
+    stream_flow_control: Option<FlowCtrl>,
+
     /// URL to be fetched.
     #[arg(default_value = "/tor/keys/all")]
     url: Uri,
+}
+
+/// Flow control mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
+enum FlowCtrl {
+    /// Stream SENDME.
+    #[value(name = "sendme")]
+    Sendme,
+    /// Dummy XON.
+    #[value(name = "xondummy")]
+    XonDummy,
 }
 
 #[tokio::main]
@@ -147,6 +162,7 @@ async fn main() {
         relay_addrs: addrs,
         channel_cap,
         channel_agg_cap,
+        stream_flow_control,
         url,
     } = Args::parse();
     let channel_cap = usize::from(channel_cap);
@@ -198,7 +214,7 @@ async fn main() {
                 res.unwrap();
                 panic!("channel unexpectedly closed");
             },
-            s = handle_circ(&cache, circuit, url).fuse() => s,
+            s = handle_circ(&cache, circuit, stream_flow_control, url).fuse() => s,
         }
     };
 
@@ -216,6 +232,7 @@ async fn main() {
 async fn handle_circ(
     cache: &Arc<StandardCellCache>,
     circuit: CircuitManager<DirController<TokioRuntime, ConfigDir>>,
+    stream_flow_control: Option<FlowCtrl>,
     url: Uri,
 ) -> String {
     let mut circuit = pin!(circuit);
@@ -227,7 +244,13 @@ async fn handle_circ(
         circuit.as_mut().as_ref().send_control(msg).await.unwrap();
         recv.await.expect("new stream result should exist").unwrap()
     };
-    let stream = from_new_stream(cache.clone(), new_stream);
+    let mut stream = from_new_stream(cache.clone(), new_stream);
+
+    match stream_flow_control {
+        Some(FlowCtrl::XonDummy) => stream.enable_xon_dummy(),
+        Some(FlowCtrl::Sendme) => stream.enable_sendme(),
+        None => (),
+    }
 
     let s = {
         let mut r = circuit.as_mut().as_ref();
@@ -250,11 +273,9 @@ async fn handle_circ(
 }
 
 async fn handle_stream(
-    mut stream: DirStreamTy<TokioRuntime, Arc<StandardCellCache>>,
+    stream: DirStreamTy<TokioRuntime, Arc<StandardCellCache>>,
     url: Uri,
 ) -> String {
-    stream.enable_sendme();
-
     info!("sleeping for 5 seconds");
     sleep(Duration::from_secs(5)).await;
 
