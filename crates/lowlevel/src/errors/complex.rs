@@ -92,6 +92,8 @@ pub(crate) enum NetdocParseErrorType {
     Null,
     #[error("document is empty")]
     Empty,
+    #[error("input string have trailing characters")]
+    HasTrailing,
 }
 
 display2debug!(NetdocParseErrorType);

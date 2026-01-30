@@ -431,6 +431,190 @@ impl DoubleEndedIterator for NetdocParser<'_> {
 impl FusedIterator for NetdocParser<'_> {}
 
 impl<'a> Item<'a> {
+    /// Parses a line item **without trailing newline** into [`Item`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::parse::netdoc::Item;
+    ///
+    /// // Parse line item
+    /// let item = Item::try_parse_str("keyword arg1 arg2", 0).unwrap();
+    /// assert_eq!(item.keyword(), "keyword");
+    /// assert_eq!(item.arguments().collect::<Vec<_>>(), ["arg1", "arg2"]);
+    ///
+    /// // With byte offset
+    /// let item = Item::try_parse_str("keyword", 123).unwrap();
+    /// assert_eq!(item.byte_offset(), 123);
+    ///
+    /// // Object is also supported
+    /// let s = r"with-object
+    /// -----BEGIN KEYWORD-----
+    /// abcdef
+    /// -----END KEYWORD-----";
+    /// let item = Item::try_parse_str(s, 0).unwrap();
+    /// assert_eq!(item.keyword(), "with-object");
+    /// assert_eq!(item.object(), Some(("KEYWORD", "abcdef\n")));
+    ///
+    /// // Trailing newline is not allowed
+    /// Item::try_parse_str("trailing\n", 0).unwrap_err();
+    ///
+    /// // Empty string is not allowed
+    /// Item::try_parse_str("", 0).unwrap_err();
+    ///
+    /// // Leading newline is not allowed
+    /// Item::try_parse_str("\nleading", 0).unwrap_err();
+    /// ```
+    pub fn try_parse_str(s: &'a str, byte_offset: usize) -> Result<Self, NetdocParseError> {
+        if s.ends_with("\n") {
+            return Err(NetdocParseError::with_unknown_pos(ErrType::HasTrailing));
+        }
+        let ori_s = s;
+
+        // Setup iterator.
+        // Iterator should iterates through all lines,
+        // including last line without trailing newline.
+        let last = Cell::new(0usize);
+        let mut it = memchr_iter(b'\n', s.as_bytes());
+        let mut f = || {
+            let t = last.get();
+            let i = if let Some(i) = it.next() {
+                last.set(i + 1);
+                i
+            } else if t < s.len() {
+                last.set(s.len());
+                s.len()
+            } else {
+                return None;
+            };
+            debug_assert!(t <= i);
+            // SAFETY: Indices is within string
+            unsafe { Some((s.get_unchecked(t..i), byte_offset + t)) }
+        };
+
+        // Parse first line
+        let Some((s, off)) = f() else {
+            debug_assert_eq!(s, "");
+            return Err(NetdocParseError::with_byte_off(byte_offset, ErrType::Empty));
+        };
+
+        let line_len = s.len();
+        // Parse opt
+        let is_opt = s.starts_with("opt ") | s.starts_with("opt\t");
+        let s = if is_opt {
+            // SAFETY: String is prefixed with opt
+            unsafe { s.get_unchecked(4..) }
+        } else {
+            s
+        };
+
+        // Parse keyword
+        let kw_len = match check::check_line(s) {
+            Ok(i) => i,
+            Err(i) => {
+                return Err(NetdocParseError::with_byte_off(
+                    off + if is_opt { 4 } else { 0 } + i,
+                    ErrType::InvalidKeywordChar,
+                ));
+            }
+        };
+
+        // Parse arguments
+        if kw_len != s.len() {
+            // SAFETY: Index points to space or tab character after keyword or end of string
+            let a = unsafe { s.get_unchecked(kw_len + 1..) };
+            if let Some(i) = check::check_argument(a) {
+                return Err(NetdocParseError::with_byte_off(
+                    off + if is_opt { 4 } else { 0 } + kw_len + 1 + i,
+                    if let Some(0) = a.as_bytes().get(i) {
+                        ErrType::Null
+                    } else {
+                        ErrType::InvalidArgumentChar
+                    },
+                ));
+            }
+        }
+
+        let Some((s, off)) = f() else {
+            debug_assert_eq!(line_len, ori_s.len());
+            debug_assert_eq!(off, byte_offset);
+            return Ok(Self {
+                s: ori_s,
+                byte_off: byte_offset,
+                is_opt,
+                kw_len,
+                line_len,
+                object_len: 0,
+            });
+        };
+
+        // Parse object
+        if !s.starts_with(BEGIN) || !s.ends_with(ENDL) {
+            return Err(NetdocParseError::with_byte_off(
+                off,
+                ErrType::InvalidObjectFormat,
+            ));
+        }
+        // SAFETY: String is prefixed with BEGIN and suffixed with ENDL
+        let obj_s = unsafe { s.get_unchecked(BEGIN.len()..s.len() - ENDL.len()) };
+        if let Some(i) = check::check_object_keyword(obj_s) {
+            return Err(NetdocParseError::with_byte_off(
+                off + i,
+                ErrType::InvalidKeywordChar,
+            ));
+        }
+
+        let (s, off) = loop {
+            let Some((s, off)) = f() else {
+                return Err(NetdocParseError::with_byte_off(
+                    off,
+                    ErrType::InvalidObjectFormat,
+                ));
+            };
+
+            if s.starts_with(END) {
+                break (s, off);
+            }
+
+            if let Some(i) = check::check_object_content(s) {
+                return Err(NetdocParseError::with_byte_off(
+                    off + i,
+                    ErrType::InvalidObjectContent,
+                ));
+            }
+        };
+
+        if !s.ends_with(ENDL) {
+            return Err(NetdocParseError::with_byte_off(
+                off,
+                ErrType::InvalidObjectFormat,
+            ));
+        }
+
+        // SAFETY: String is prefixed with END and suffixed with ENDL
+        let obj2_s = unsafe { s.get_unchecked(END.len()..s.len() - ENDL.len()) };
+        if obj_s != obj2_s {
+            // End keyword did not match begin keyword
+            return Err(NetdocParseError::with_byte_off(
+                off + END.len(),
+                ErrType::InvalidObjectFormat,
+            ));
+        }
+
+        if let Some((_, off)) = f() {
+            return Err(NetdocParseError::with_byte_off(off, ErrType::HasTrailing));
+        }
+
+        Ok(Item {
+            s: ori_s,
+            byte_off: byte_offset,
+            is_opt,
+            kw_len,
+            line_len,
+            object_len: obj_s.len(),
+        })
+    }
+
     /// Gets raw item string.
     ///
     /// It excludes trailing newline.
@@ -521,10 +705,74 @@ impl<'a> Item<'a> {
     }
 }
 
+/// Parses a line item **without trailing newline**.
+///
+/// Byte offset will be set to 0.
+///
+/// It does not implemeent [`FromStr`] because it takes the lifetime of the string.
+///
+/// See: [`Self::try_parse_str`].
+impl<'a> TryFrom<&'a str> for Item<'a> {
+    type Error = NetdocParseError;
+
+    fn try_from(s: &'a str) -> Result<Self, Self::Error> {
+        Self::try_parse_str(s, 0)
+    }
+}
+
 /// Iterator of netdoc item arguments.
 #[derive(Debug, Clone)]
 pub struct Arguments<'a> {
     s: &'a str,
+}
+
+/// Parses an argument string.
+///
+/// Valid argument string is in the form of `([^ \t]+([ \t][^ \t]+)*)?`.
+/// Also it **should not** contain NUL character.
+///
+/// It does not implemeent [`FromStr`] because it takes the lifetime of the string.
+///
+/// # Example
+///
+/// ```
+/// use onioncloud_lowlevel::parse::netdoc::Arguments;
+///
+/// // Parsing argument string
+/// assert_eq!(Arguments::try_from("ab cd\tef").unwrap().collect::<Vec<_>>(), ["ab", "cd", "ef"]);
+///
+/// // Empty string is valid
+/// assert_eq!(Arguments::try_from("").unwrap().collect::<Vec<_>>().len(), 0);
+///
+/// // Consequentive whitespace
+/// let _ = Arguments::try_from("ab cd \tef").unwrap_err();
+///
+/// // Trailing whitespace
+/// let _ = Arguments::try_from("ab cd ").unwrap_err();
+///
+/// // Leading whitespace
+/// let _ = Arguments::try_from(" ab\tcd").unwrap_err();
+/// ```
+impl<'a> TryFrom<&'a str> for Arguments<'a> {
+    type Error = NetdocParseError;
+
+    fn try_from(s: &'a str) -> Result<Self, Self::Error> {
+        if s.is_empty() {
+            return Ok(Self { s });
+        }
+
+        match check::check_argument(s) {
+            Some(i) => Err(NetdocParseError::with_byte_off(
+                i,
+                if let Some(0) = s.as_bytes().get(i) {
+                    ErrType::Null
+                } else {
+                    ErrType::InvalidArgumentChar
+                },
+            )),
+            None => Ok(Self { s }),
+        }
+    }
 }
 
 impl<'a> Iterator for Arguments<'a> {
@@ -800,6 +1048,53 @@ mod tests {
         }
     }
 
+    fn doc_to_str(
+        doc: &Vec<(
+            &'static str,
+            String,
+            Vec<(char, String)>,
+            Option<(String, String)>,
+        )>,
+    ) -> String {
+        doc_to_str_it(doc.iter().map(|(a, b, c, d)| (*a, b, c, d.as_ref())))
+    }
+
+    fn doc_to_str_it<'a>(
+        doc: impl IntoIterator<
+            Item = (
+                &'a str,
+                &'a String,
+                &'a Vec<(char, String)>,
+                Option<&'a (String, String)>,
+            ),
+        >,
+    ) -> String {
+        let mut s = String::new();
+        for (opt, k, a, o) in doc {
+            s += opt;
+            s += k;
+
+            for (c, v) in a {
+                s.push(*c);
+                s += v;
+            }
+
+            s += "\n";
+            if let Some((k, a)) = o {
+                s += BEGIN;
+                s += k;
+                s += ENDL;
+                s += "\n";
+                s += a;
+                s += END;
+                s += k;
+                s += ENDL;
+                s += "\n";
+            }
+        }
+        s
+    }
+
     #[test]
     fn test_netdoc_empty() {
         assert!(NetdocParser::new("").next().is_none());
@@ -918,29 +1213,7 @@ DEF
     proptest! {
         #[test]
         fn test_netdoc_forward_proptest(doc in doc_strat()) {
-            let mut s = String::new();
-            for (opt, k, a, o) in &doc {
-                s += opt;
-                s += k;
-
-                for (c, v) in a {
-                    s.push(*c);
-                    s += v;
-                }
-
-                s += "\n";
-                if let Some((k, a)) = o {
-                    s += BEGIN;
-                    s += k;
-                    s += ENDL;
-                    s += "\n";
-                    s += a;
-                    s += END;
-                    s += k;
-                    s += ENDL;
-                    s += "\n";
-                }
-            }
+            let s = doc_to_str(&doc);
 
             let mut it = doc.into_iter();
             for i in NetdocParser::new(&s) {
@@ -963,29 +1236,7 @@ DEF
 
         #[test]
         fn test_netdoc_reverse_proptest(doc in doc_strat()) {
-            let mut s = String::new();
-            for (opt, k, a, o) in &doc {
-                s += opt;
-                s += k;
-
-                for (c, v) in a {
-                    s.push(*c);
-                    s += v;
-                }
-
-                s += "\n";
-                if let Some((k, a)) = o {
-                    s += BEGIN;
-                    s += k;
-                    s += ENDL;
-                    s += "\n";
-                    s += a;
-                    s += END;
-                    s += k;
-                    s += ENDL;
-                    s += "\n";
-                }
-            }
+            let s = doc_to_str(&doc);
 
             let mut it = doc.into_iter().rev();
             for i in NetdocParser::new(&s).rev() {
@@ -1002,30 +1253,29 @@ DEF
         }
 
         #[test]
-        fn test_netdoc_get_signature_proptest(doc in doc_strat(), (opt, k, a) in item_strat(), sig in sig_strat()) {
-            let mut s = String::new();
-            for (opt, k, a, o) in doc.iter().map(|(a, b, c, d)| (a, b, c, d.as_ref())).chain([(&opt, &k, &a, Some(&sig))]) {
-                s += opt;
-                s += k;
+        fn test_netdoc_item_reparse(doc in doc_strat()) {
+            let s = doc_to_str(&doc);
+            drop(doc);
 
-                for (c, v) in a {
-                    s.push(*c);
-                    s += v;
-                }
+            for i in NetdocParser::new(&s) {
+                let i = i.unwrap();
+                let j = Item::try_parse_str(i.s, i.byte_off).unwrap();
+                assert_eq!(j.s, i.s);
+                assert_eq!(j.byte_off, i.byte_off);
+                assert_eq!(j.is_opt, i.is_opt);
+                assert_eq!(j.kw_len, i.kw_len);
+                assert_eq!(j.line_len, i.line_len);
+                assert_eq!(j.object_len, i.object_len);
 
-                s += "\n";
-                if let Some((k, a)) = o {
-                    s += BEGIN;
-                    s += k;
-                    s += ENDL;
-                    s += "\n";
-                    s += a;
-                    s += END;
-                    s += k;
-                    s += ENDL;
-                    s += "\n";
-                }
+                let i = i.arguments();
+                let j = Arguments::try_from(i.s).unwrap();
+                assert_eq!(j.s, i.s);
             }
+        }
+
+        #[test]
+        fn test_netdoc_get_signature_proptest(doc in doc_strat(), (opt, k, a) in item_strat(), sig in sig_strat()) {
+            let s = doc_to_str_it(doc.iter().map(|(a, b, c, d)| (*a, b, c, d.as_ref())).chain([(opt, &k, &a, Some(&sig))]));
 
             let SignatureResult{document: rest, item} = get_signature(&s).unwrap();
             assert_eq!(item.keyword(), k);
