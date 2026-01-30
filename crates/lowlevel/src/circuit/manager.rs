@@ -212,6 +212,60 @@ impl<C: CircuitController> CircuitRef<'_, C> {
     pub async fn completion(&mut self) -> Result<(), errors::HandleError> {
         self.inner.as_mut().completion().await
     }
+
+    /// Poll for control message to be ready to send.
+    ///
+    /// See: [`Self::start_send_control`].
+    pub fn poll_ready_control(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), SendError<C::ControlMsg>>> {
+        self.inner.as_mut().project().send_ctrl.poll_flush(cx)
+    }
+
+    /// Queue control message for sending.
+    ///
+    /// Both this and [`Self::poll_ready_control`] can be used to manually implement [`Self::send_control`].
+    ///
+    /// **NOTE: Ensure [`Self::poll_ready_control`] return `Ready(Ok(()))` before calling this method.
+    /// Failure to do so might cause panic or infinite loop.**
+    ///
+    /// After calling this, call [`Self::poll_ready_control`] to drive queue to completion and ensure message is sent.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use std::future::poll_fn;
+    /// # use onioncloud_lowlevel::circuit::manager::CircuitRef;
+    /// # use onioncloud_lowlevel::circuit::controller::CircuitController;
+    /// # use onioncloud_lowlevel::runtime::SendError;
+    ///
+    /// async fn manual_send<C: CircuitController>(mut circuit: CircuitRef<'_, C>, msg: C::ControlMsg) -> Result<(), SendError<C::ControlMsg>> {
+    ///     poll_fn(|cx| circuit.poll_ready_control(cx)).await?;
+    ///     circuit.start_send_control(msg)?;
+    ///     poll_fn(|cx| circuit.poll_ready_control(cx)).await
+    /// }
+    /// ```
+    pub fn start_send_control(
+        &mut self,
+        item: C::ControlMsg,
+    ) -> Result<(), SendError<C::ControlMsg>> {
+        self.inner.as_mut().project().send_ctrl.start_send(item)
+    }
+
+    /// Poll for controller completion.
+    ///
+    /// Basically the manual version of [`Self::completion`].
+    pub fn poll_completion(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), errors::HandleError>> {
+        match self.inner.as_mut().project().handle.poll(cx) {
+            Pending => Pending,
+            Ready(true) => Ready(Ok(())),
+            Ready(false) => Ready(Err(errors::HandleError)),
+        }
+    }
 }
 
 #[instrument(skip_all)]
