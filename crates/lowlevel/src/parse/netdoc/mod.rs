@@ -559,7 +559,7 @@ impl<'a> Item<'a> {
         let obj_s = unsafe { s.get_unchecked(BEGIN.len()..s.len() - ENDL.len()) };
         if let Some(i) = check::check_object_keyword(obj_s) {
             return Err(NetdocParseError::with_byte_off(
-                off + i,
+                off + BEGIN.len() + i,
                 ErrType::InvalidKeywordChar,
             ));
         }
