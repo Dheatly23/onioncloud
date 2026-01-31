@@ -174,7 +174,7 @@ pub(crate) fn check_argument(s: &str) -> Option<usize> {
     #[inline(always)]
     fn f(c: u8, i: usize, sp: &mut bool) -> Option<usize> {
         *sp = match (c, *sp) {
-            (b'\0', _) => return Some(i),
+            (b'\0' | b'\n', _) => return Some(i),
             (b' ' | b'\t', false) => true,
             (b' ' | b'\t', true) => return Some(i),
             _ => false,
@@ -213,8 +213,9 @@ pub(crate) fn check_argument(s: &str) -> Option<usize> {
         while i + 7 < c.len() {
             let v = u64::from_le(*get_unchecked(c, i).cast::<u64>());
 
-            // Null test
-            let z = test_eq_c::<0>(v) & 0x8080_8080_8080_8080;
+            // Null and newline test
+            let z =
+                (test_eq_c::<0>(v) | test_eq_c::<0x0a0a_0a0a_0a0a_0a0a>(v)) & 0x8080_8080_8080_8080;
             //dbg!(t);
 
             // Space and tab

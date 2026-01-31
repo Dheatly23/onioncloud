@@ -95,9 +95,11 @@ pub(crate) fn check_argument(s: &str) -> Option<usize> {
         while i + 15 < c.len() {
             let v = arch::_mm_loadu_si128(get_unchecked(c, i).cast());
 
-            // Null test
-            let z =
-                arch::_mm_movemask_epi8(arch::_mm_cmpeq_epi8(v, arch::_mm_setzero_si128())) as u16;
+            // Null and newline test
+            let z = arch::_mm_movemask_epi8(arch::_mm_or_si128(
+                arch::_mm_cmpeq_epi8(v, arch::_mm_setzero_si128()),
+                arch::_mm_cmpeq_epi8(v, arch::_mm_set1_epi8(b'\n' as _)),
+            )) as u16;
 
             // Space and tab
             let t = arch::_mm_or_si128(
@@ -122,7 +124,7 @@ pub(crate) fn check_argument(s: &str) -> Option<usize> {
         // Tail
         for i in i..c.len() {
             sp = match (*get_unchecked(c, i), sp) {
-                (b'\0', _) => return Some(i),
+                (b'\0' | b'\n', _) => return Some(i),
                 (b' ' | b'\t', false) => true,
                 (b' ' | b'\t', true) => return Some(i),
                 _ => false,

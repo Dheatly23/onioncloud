@@ -98,8 +98,11 @@ pub(crate) fn check_argument(s: &str) -> Option<usize> {
         while i + 15 < c.len() {
             let v = arch::v128_load(get_unchecked(c, i).cast());
 
-            // Null test
-            let z = arch::u8x16_bitmask(arch::u8x16_eq(v, arch::u8x16_splat(0)));
+            // Null and newline test
+            let z = arch::u8x16_bitmask(arch::v128_or(
+                arch::u8x16_eq(v, arch::u8x16_splat(0)),
+                arch::u8x16_eq(v, arch::u8x16_splat(b'\n')),
+            ));
 
             // Space and tab
             let t = arch::v128_or(
@@ -124,7 +127,7 @@ pub(crate) fn check_argument(s: &str) -> Option<usize> {
         // Tail
         for i in i..c.len() {
             sp = match (*get_unchecked(c, i), sp) {
-                (b'\0', _) => return Some(i),
+                (b'\0' | b'\n', _) => return Some(i),
                 (b' ' | b'\t', false) => true,
                 (b' ' | b'\t', true) => return Some(i),
                 _ => false,

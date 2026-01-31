@@ -25,7 +25,7 @@ pub(crate) fn check_argument(s: &str) -> Option<usize> {
     let mut t = State::Space;
     for (i, c) in s.as_bytes().iter().enumerate() {
         t = match (t, c) {
-            (_, b'\0') => return Some(i),
+            (_, b'\0' | b'\n') => return Some(i),
             (State::NonSpace, b' ' | b'\t') => State::Space,
             (State::NonSpace, _) => State::NonSpace,
             (State::Space, b' ' | b'\t') => return Some(i),

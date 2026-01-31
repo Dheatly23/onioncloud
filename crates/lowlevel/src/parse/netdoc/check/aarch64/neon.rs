@@ -130,8 +130,11 @@ pub(crate) fn check_argument(s: &str) -> Option<usize> {
         while i + 15 < c.len() {
             let v = arch::vld1q_u8(get_unchecked(c, i));
 
-            // Null test
-            let z = movemask(arch::vceqq_u8(v, arch::vdupq_n_u8(0)));
+            // Null and newline test
+            let z = movemask(arch::vorrq_u8(
+                arch::vceqq_u8(v, arch::vdupq_n_u8(0)),
+                arch::vceqq_u8(v, arch::vdupq_n_u8(b'\n')),
+            ));
 
             // Space and tab
             let t = arch::vorrq_u8(
@@ -156,7 +159,7 @@ pub(crate) fn check_argument(s: &str) -> Option<usize> {
         // Tail
         for i in i..c.len() {
             sp = match (*get_unchecked(c, i), sp) {
-                (b'\0', _) => return Some(i),
+                (b'\0' | b'\n', _) => return Some(i),
                 (b' ' | b'\t', false) => true,
                 (b' ' | b'\t', true) => return Some(i),
                 _ => false,
