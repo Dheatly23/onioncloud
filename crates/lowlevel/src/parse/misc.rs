@@ -7,7 +7,7 @@ use rsa::RsaPublicKey;
 use rsa::pkcs1::DecodeRsaPublicKey;
 use rsa::pkcs1::der::pem::BASE64_WRAP_WIDTH;
 
-use super::netdoc::{Arguments, Item};
+use super::netdoc::{ArgumentsIter, Item};
 use super::{ExitPort, ExitPortPolicy};
 use crate::errors::{CertFormatError, CertVerifyError};
 use crate::util::parse::{parse_date, parse_time};
@@ -46,7 +46,7 @@ fn map_b64_err(e: B64Error) -> Error {
     }
 }
 
-pub(crate) fn args_date_time(args: &mut Arguments<'_>) -> Option<DateTime<Utc>> {
+pub(crate) fn args_date_time(args: &mut ArgumentsIter<'_>) -> Option<DateTime<Utc>> {
     let date = args.next()?;
     let time = args.next()?;
 
@@ -96,7 +96,7 @@ pub(crate) fn decode_cert<'a>(
 }
 
 pub(crate) fn args_exit_policy(
-    args: &mut Arguments<'_>,
+    args: &mut ArgumentsIter<'_>,
 ) -> Result<ExitPortPolicy, CertFormatError> {
     let accept = match args.next() {
         Some("accept") => true,

@@ -3,9 +3,9 @@ mod check;
 use std::cell::Cell;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::iter::{FusedIterator, from_fn};
-use std::mem::{replace, take};
+use std::mem::replace;
 
-use memchr::{memchr_iter, memchr2, memrchr2};
+use memchr::{Memchr2, memchr_iter};
 
 use crate::errors::{NetdocParseError, NetdocParseErrorType as ErrType};
 
@@ -441,7 +441,7 @@ impl<'a> Item<'a> {
     /// // Parse line item
     /// let item = Item::try_parse_str("keyword arg1 arg2", 0).unwrap();
     /// assert_eq!(item.keyword(), "keyword");
-    /// assert_eq!(item.arguments().collect::<Vec<_>>(), ["arg1", "arg2"]);
+    /// assert_eq!(item.arguments().iter().collect::<Vec<_>>(), ["arg1", "arg2"]);
     ///
     /// // With byte offset
     /// let item = Item::try_parse_str("keyword", 123).unwrap();
@@ -456,18 +456,21 @@ impl<'a> Item<'a> {
     /// assert_eq!(item.keyword(), "with-object");
     /// assert_eq!(item.object(), Some(("KEYWORD", "abcdef\n")));
     ///
-    /// // Trailing newline is not allowed
+    /// // Trailing newline
     /// Item::try_parse_str("trailing\n", 0).unwrap_err();
     ///
-    /// // Empty string is not allowed
+    /// // Empty string
     /// Item::try_parse_str("", 0).unwrap_err();
     ///
-    /// // Leading newline is not allowed
+    /// // Leading newline
     /// Item::try_parse_str("\nleading", 0).unwrap_err();
     /// ```
     pub fn try_parse_str(s: &'a str, byte_offset: usize) -> Result<Self, NetdocParseError> {
         if s.ends_with("\n") {
-            return Err(NetdocParseError::with_unknown_pos(ErrType::HasTrailing));
+            return Err(NetdocParseError::with_byte_off(
+                byte_offset + (s.len() - 1),
+                ErrType::HasTrailing,
+            ));
         }
         let ori_s = s;
 
@@ -510,6 +513,12 @@ impl<'a> Item<'a> {
 
         // Parse keyword
         let kw_len = match check::check_line(s) {
+            Ok(0) => {
+                return Err(NetdocParseError::with_byte_off(
+                    off + if is_opt { 4 } else { 0 },
+                    ErrType::InvalidKeywordChar,
+                ));
+            }
             Ok(i) => i,
             Err(i) => {
                 return Err(NetdocParseError::with_byte_off(
@@ -630,24 +639,18 @@ impl<'a> Item<'a> {
         unsafe { self.s.get_unchecked(o..o + self.kw_len) }
     }
 
-    /// Raw arguments.
-    ///
-    /// It is recommended to use [`Self::arguments()`] instead.
-    pub fn arguments_raw(&self) -> &'a str {
-        let o = if self.is_opt { 4 } else { 0 };
-        if self.kw_len + o == self.line_len {
-            return "";
-        }
-        // SAFETY: kw_len and line_len is within string
-        unsafe { self.s.get_unchecked(o + self.kw_len + 1..self.line_len) }
-    }
-
     /// Iterates over arguments.
     ///
     /// Unless specified otherwise, user must accept excess argument.
     pub fn arguments(&self) -> Arguments<'a> {
+        let o = if self.is_opt { 4 } else { 0 };
         Arguments {
-            s: self.arguments_raw(),
+            s: if self.kw_len + o == self.line_len {
+                ""
+            } else {
+                // SAFETY: kw_len and line_len is within string
+                unsafe { self.s.get_unchecked(o + self.kw_len + 1..self.line_len) }
+            },
         }
     }
 
@@ -720,7 +723,7 @@ impl<'a> TryFrom<&'a str> for Item<'a> {
     }
 }
 
-/// Iterator of netdoc item arguments.
+/// Netdoc item arguments.
 #[derive(Debug, Clone)]
 pub struct Arguments<'a> {
     s: &'a str,
@@ -739,10 +742,10 @@ pub struct Arguments<'a> {
 /// use onioncloud_lowlevel::parse::netdoc::Arguments;
 ///
 /// // Parsing argument string
-/// assert_eq!(Arguments::try_from("ab cd\tef").unwrap().collect::<Vec<_>>(), ["ab", "cd", "ef"]);
+/// assert_eq!(Arguments::try_from("ab cd\tef").unwrap().iter().collect::<Vec<_>>(), ["ab", "cd", "ef"]);
 ///
 /// // Empty string is valid
-/// assert_eq!(Arguments::try_from("").unwrap().collect::<Vec<_>>().len(), 0);
+/// assert_eq!(Arguments::try_from("").unwrap().iter().collect::<Vec<_>>().len(), 0);
 ///
 /// // Consequentive whitespace
 /// let _ = Arguments::try_from("ab cd \tef").unwrap_err();
@@ -775,16 +778,125 @@ impl<'a> TryFrom<&'a str> for Arguments<'a> {
     }
 }
 
-impl<'a> Iterator for Arguments<'a> {
+impl<'a> IntoIterator for Arguments<'a> {
+    type Item = <ArgumentsIter<'a> as Iterator>::Item;
+    type IntoIter = ArgumentsIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &Arguments<'a> {
+    type Item = <ArgumentsIter<'a> as Iterator>::Item;
+    type IntoIter = ArgumentsIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> Arguments<'a> {
+    /// Directly converts argument string into [`Arguments`].
+    ///
+    /// # Safety
+    ///
+    /// String must be a valid argument string. See it's [`TryFrom`] impl.
+    /// String returned from [`Self::raw_string`] are always safe.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::parse::netdoc::Arguments;
+    ///
+    /// let args = Arguments::try_from("a b c").unwrap();
+    /// // SAFETY: String is a valid argument string.
+    /// let args = unsafe { Arguments::from_string_unchecked(args.raw_string()) };
+    /// ```
+    #[inline(always)]
+    pub const unsafe fn from_string_unchecked(s: &'a str) -> Self {
+        Self { s }
+    }
+
+    /// Gets raw string.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::parse::netdoc::Arguments;
+    ///
+    /// let args = Arguments::try_from("a b c").unwrap();
+    /// assert_eq!(args.raw_string(), "a b c");
+    /// ```
+    #[inline(always)]
+    pub const fn raw_string(&self) -> &'a str {
+        self.s
+    }
+
+    /// Iterates through arguments.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::parse::netdoc::Arguments;
+    ///
+    /// let args = Arguments::try_from("a b c").unwrap();
+    /// for i in args.iter() {
+    ///     // Argument items
+    ///     println!("{i}");
+    /// }
+    /// ```
+    pub fn iter(&self) -> ArgumentsIter<'a> {
+        ArgumentsIter {
+            s: self.s,
+            off: 0,
+            it: Memchr2::new(b' ', b'\t', self.s.as_bytes()),
+        }
+    }
+
+    /// Checks if argument is empty.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::parse::netdoc::Arguments;
+    ///
+    /// assert!(Arguments::try_from("").unwrap().is_empty());
+    /// assert!(!Arguments::try_from("a").unwrap().is_empty());
+    /// ```
+    pub const fn is_empty(&self) -> bool {
+        self.s.is_empty()
+    }
+}
+
+/// Iterator of netdoc item arguments.
+#[derive(Debug, Clone)]
+pub struct ArgumentsIter<'a> {
+    s: &'a str,
+    off: usize,
+    it: Memchr2<'a>,
+}
+
+impl<'a> Iterator for ArgumentsIter<'a> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.s.is_empty() {
             return None;
         }
-        let Some(i) = memchr2(b' ', b'\t', self.s.as_bytes()) else {
-            return Some(take(&mut self.s));
+        let Some(mut i) = self.it.next() else {
+            return Some(replace(&mut self.s, ""));
         };
+        i -= self.off;
+        self.off += i + 1;
+
+        if cfg!(debug_assertions) {
+            let s = &self.s[i..=i];
+            debug_assert!(
+                s == " " || s == "\t",
+                "spacer string {s:#?} is not space or tab"
+            );
+        }
 
         // SAFETY: Index is space or tab within string
         let (a, b) = unsafe { (self.s.get_unchecked(..i), self.s.get_unchecked(i + 1..)) };
@@ -793,21 +905,32 @@ impl<'a> Iterator for Arguments<'a> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        match self.s {
-            "" => (0, Some(0)),
-            _ => (1, None),
+        if self.s.is_empty() {
+            return (0, Some(0));
         }
+        let (a, b) = self.it.size_hint();
+        // Add 1 because we return one more item when iteration stops
+        (a + 1, b.map(|v| v + 1))
     }
 }
 
-impl DoubleEndedIterator for Arguments<'_> {
+impl DoubleEndedIterator for ArgumentsIter<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.s.is_empty() {
             return None;
         }
-        let Some(i) = memrchr2(b' ', b'\t', self.s.as_bytes()) else {
-            return Some(take(&mut self.s));
+        let Some(mut i) = self.it.next_back() else {
+            return Some(replace(&mut self.s, ""));
         };
+        i -= self.off;
+
+        if cfg!(debug_assertions) {
+            let s = &self.s[i..=i];
+            debug_assert!(
+                s == " " || s == "\t",
+                "spacer string {s:#?} is not space or tab"
+            );
+        }
 
         // SAFETY: Index is space or tab within string
         let (a, b) = unsafe { (self.s.get_unchecked(..i), self.s.get_unchecked(i + 1..)) };
@@ -816,7 +939,7 @@ impl DoubleEndedIterator for Arguments<'_> {
     }
 }
 
-impl FusedIterator for Arguments<'_> {}
+impl FusedIterator for ArgumentsIter<'_> {}
 
 /// Return value of [`get_signature`].
 #[non_exhaustive]
@@ -946,6 +1069,13 @@ fn check_item_line(s: &str, line: isize) -> Result<(bool, usize), NetdocParseErr
     };
 
     let ki = match check::check_line(s) {
+        Ok(0) => {
+            return Err(NetdocParseError::with_line_pos(
+                line,
+                if is_opt { 4 } else { 0 },
+                ErrType::InvalidKeywordChar,
+            ));
+        }
         Ok(i) => i,
         Err(i) => {
             return Err(NetdocParseError::with_line_pos(
@@ -1210,6 +1340,97 @@ DEF
         rev_ignore_parse("abc 123\n-----BEGIN ABCDEF-----\nab?123\n-----END ABCDEF-----\n");
     }
 
+    #[test]
+    fn test_netdoc_item_parse_keyword() {
+        let item = Item::try_from("abcdef").unwrap();
+        assert_eq!(item.keyword(), "abcdef");
+        assert_eq!(item.arguments().raw_string(), "");
+        assert_eq!(item.object(), None);
+    }
+
+    #[test]
+    fn test_netdoc_item_parse_argument() {
+        let item = Item::try_from("abcdef 1 2 3").unwrap();
+        assert_eq!(item.keyword(), "abcdef");
+        assert_eq!(item.arguments().iter().collect::<Vec<_>>(), ["1", "2", "3"]);
+        assert_eq!(item.object(), None);
+    }
+
+    #[test]
+    fn test_netdoc_item_parse_object() {
+        let item =
+            Item::try_from("abcdef\n-----BEGIN ABCDEF-----\nabc123\n-----END ABCDEF-----").unwrap();
+        assert_eq!(item.keyword(), "abcdef");
+        assert_eq!(item.arguments().raw_string(), "");
+        assert_eq!(item.object(), Some(("ABCDEF", "abc123\n")));
+    }
+
+    #[test]
+    #[should_panic(expected = "error parsing netdoc at byte offset 0: document is empty")]
+    fn test_netdoc_item_parse_empty() {
+        Item::try_from("").unwrap();
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "error parsing netdoc at byte offset 3: input string have trailing characters"
+    )]
+    fn test_netdoc_item_parse_trailing_nl() {
+        Item::try_from("abc\n").unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "error parsing netdoc at byte offset 0: invalid keyword character")]
+    fn test_netdoc_item_parse_leading_nl() {
+        Item::try_from("\nabc").unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "error parsing netdoc at byte offset 4: invalid object format")]
+    fn test_netdoc_item_parse_multi() {
+        Item::try_from("abc\ndef").unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "error parsing netdoc at byte offset 0: invalid keyword character")]
+    fn test_netdoc_item_parse_leading_nl2() {
+        Item::try_from("\n-----BEGIN ABC DEF-----\n-----END ABC DEF-----").unwrap();
+    }
+
+    #[test]
+    fn test_netdoc_argument_parse_simple() {
+        assert_eq!(
+            Arguments::try_from("a b c\td\te\tf")
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            ["a", "b", "c", "d", "e", "f"]
+        );
+    }
+
+    #[test]
+    fn test_netdoc_argument_parse_empty() {
+        assert_eq!(Arguments::try_from("").unwrap().iter().count(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "error parsing netdoc at byte offset 6: invalid argument character")]
+    fn test_netdoc_argument_parse_trailing() {
+        Arguments::try_from("a b c ").unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "error parsing netdoc at byte offset 0: invalid argument character")]
+    fn test_netdoc_argument_parse_leading() {
+        Arguments::try_from("\ta b c").unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "error parsing netdoc at byte offset 2: invalid argument character")]
+    fn test_netdoc_argument_parse_spacing() {
+        Arguments::try_from("a  b c").unwrap();
+    }
+
     proptest! {
         #[test]
         fn test_netdoc_forward_proptest(doc in doc_strat()) {
@@ -1221,12 +1442,12 @@ DEF
                 let (_, k, a, o) = it.next().unwrap();
                 assert_eq!(i.keyword(), k);
 
-                assert_eq!(i.arguments_raw(), to_argument_raw(&a));
+                assert_eq!(i.arguments().raw_string(), to_argument_raw(&a));
                 {
                     let mut a = a.into_iter().map(|(_, i)| i).collect::<Vec<_>>();
-                    assert_eq!(i.arguments().take(a.len() + 1).collect::<Vec<_>>(), a);
+                    assert_eq!(i.arguments().iter().take(a.len() + 1).collect::<Vec<_>>(), a);
                     a.reverse();
-                    assert_eq!(i.arguments().rev().take(a.len() + 1).collect::<Vec<_>>(), a);
+                    assert_eq!(i.arguments().iter().rev().take(a.len() + 1).collect::<Vec<_>>(), a);
                 }
 
                 assert_eq!(i.object(), o.as_ref().map(|(a, b)| (&**a, &**b)));
@@ -1244,8 +1465,8 @@ DEF
                 let (_, k, a, o) = it.next().unwrap();
                 assert_eq!(i.keyword(), k);
 
-                assert_eq!(i.arguments_raw(), to_argument_raw(&a));
-                assert_eq!(i.arguments().take(a.len() + 1).collect::<Vec<_>>(), a.into_iter().map(|(_, i)| i).collect::<Vec<_>>());
+                assert_eq!(i.arguments().raw_string(), to_argument_raw(&a));
+                assert_eq!(i.arguments().iter().take(a.len() + 1).collect::<Vec<_>>(), a.into_iter().map(|(_, i)| i).collect::<Vec<_>>());
 
                 assert_eq!(i.object(), o.as_ref().map(|(a, b)| (&**a, &**b)));
             }
@@ -1279,7 +1500,7 @@ DEF
 
             let SignatureResult{document: rest, item} = get_signature(&s).unwrap();
             assert_eq!(item.keyword(), k);
-            assert_eq!(item.arguments_raw(), to_argument_raw(&a));
+            assert_eq!(item.arguments().raw_string(), to_argument_raw(&a));
             assert_eq!(item.object(), Some((&*sig.0, &*sig.1)));
 
             let mut it = doc.into_iter();
@@ -1288,8 +1509,8 @@ DEF
                 let (_, k, a, o) = it.next().unwrap();
                 assert_eq!(i.keyword(), k);
 
-                assert_eq!(i.arguments_raw(), to_argument_raw(&a));
-                assert_eq!(i.arguments().take(a.len() + 1).collect::<Vec<_>>(), a.into_iter().map(|(_, i)| i).collect::<Vec<_>>());
+                assert_eq!(i.arguments().raw_string(), to_argument_raw(&a));
+                assert_eq!(i.arguments().iter().take(a.len() + 1).collect::<Vec<_>>(), a.into_iter().map(|(_, i)| i).collect::<Vec<_>>());
 
                 assert_eq!(i.object(), o.as_ref().map(|(a, b)| (&**a, &**b)));
             }

@@ -75,7 +75,7 @@ impl<'a> DescriptorParser<'a> {
         let dirport;
 
         {
-            let mut args = item.arguments();
+            let mut args = item.arguments().iter();
             nickname = args.next().ok_or(CertFormatError)?;
             address = args
                 .next()
@@ -95,7 +95,7 @@ impl<'a> DescriptorParser<'a> {
         }
 
         let item = self.inner.next().ok_or(CertFormatError)??;
-        if item.keyword() != "identity-ed25519" || item.arguments().next().is_some() {
+        if item.keyword() != "identity-ed25519" || !item.arguments().is_empty() {
             return Err(CertFormatError.into());
         }
 
@@ -174,6 +174,7 @@ impl<'a> DescriptorParser<'a> {
                     }
                     let k = item
                         .arguments()
+                        .iter()
                         .next()
                         .and_then(|v| relay_ed_from_str(v).ok())
                         .ok_or(CertFormatError)?;
@@ -188,7 +189,7 @@ impl<'a> DescriptorParser<'a> {
                         return Err(CertFormatError.into());
                     }
 
-                    let mut args = item.arguments();
+                    let mut args = item.arguments().iter();
                     let average = args
                         .next()
                         .and_then(|v| v.parse::<u64>().ok())
@@ -212,7 +213,7 @@ impl<'a> DescriptorParser<'a> {
                     if platform.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    platform = Some(item.arguments_raw());
+                    platform = Some(item.arguments().raw_string());
                 }
                 // published is exactly once
                 "published" => {
@@ -220,7 +221,7 @@ impl<'a> DescriptorParser<'a> {
                         return Err(CertFormatError.into());
                     }
                     published = Some(SystemTime::from(
-                        args_date_time(&mut item.arguments()).ok_or(CertFormatError)?,
+                        args_date_time(&mut item.arguments().iter()).ok_or(CertFormatError)?,
                     ));
                 }
                 // fingerprint is at most once
@@ -228,7 +229,7 @@ impl<'a> DescriptorParser<'a> {
                     if fingerprint.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    let mut args = item.arguments();
+                    let mut args = item.arguments().iter();
                     let mut fp: RelayId = [0; _];
                     for v in fp.chunks_exact_mut(2) {
                         *<&mut [u8; 2]>::try_from(v).expect("size must be 2") =
@@ -241,7 +242,8 @@ impl<'a> DescriptorParser<'a> {
                     if hibernating.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    hibernating = Some(item.arguments().next().ok_or(CertFormatError)? == "1");
+                    hibernating =
+                        Some(item.arguments().iter().next().ok_or(CertFormatError)? == "1");
                 }
                 // uptime is at most once
                 "uptime" => {
@@ -250,6 +252,7 @@ impl<'a> DescriptorParser<'a> {
                     }
                     uptime = Some(
                         item.arguments()
+                            .iter()
                             .next()
                             .and_then(|v| v.parse::<u64>().ok())
                             .ok_or(CertFormatError)?,
@@ -257,7 +260,7 @@ impl<'a> DescriptorParser<'a> {
                 }
                 // onion-key is at most once and without extra args
                 "onion-key" => {
-                    if onion_key.is_some() || item.arguments().next().is_some() {
+                    if onion_key.is_some() || !item.arguments().is_empty() {
                         return Err(CertFormatError.into());
                     }
                     let Some(("RSA PUBLIC KEY", s)) = item.object() else {
@@ -267,7 +270,7 @@ impl<'a> DescriptorParser<'a> {
                 }
                 // onion-key-crosscert is at most once and without extra args
                 "onion-key-crosscert" => {
-                    if onion_key_crosscert.is_some() || item.arguments().next().is_some() {
+                    if onion_key_crosscert.is_some() || !item.arguments().is_empty() {
                         return Err(CertFormatError.into());
                     }
                     let Some(("CROSSCERT", s)) = item.object() else {
@@ -282,6 +285,7 @@ impl<'a> DescriptorParser<'a> {
                     }
                     ntor_onion_key = Some(
                         item.arguments()
+                            .iter()
                             .next()
                             .and_then(|v| parse_b64u(v).or_else(|_| parse_b64(v)).ok())
                             .ok_or(CertFormatError)?,
@@ -292,7 +296,7 @@ impl<'a> DescriptorParser<'a> {
                     if ntor_onion_key_crosscert.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    let mut args = item.arguments();
+                    let mut args = item.arguments().iter();
                     let bit = match args.next() {
                         Some("0") => false,
                         Some("1") => true,
@@ -308,7 +312,7 @@ impl<'a> DescriptorParser<'a> {
                 }
                 // signing-key is exactly once and without extra args
                 "signing-key" => {
-                    if signing_key.is_some() || item.arguments().next().is_some() {
+                    if signing_key.is_some() || !item.arguments().is_empty() {
                         return Err(CertFormatError.into());
                     }
                     let Some(("RSA PUBLIC KEY", s)) = item.object() else {
@@ -320,7 +324,7 @@ impl<'a> DescriptorParser<'a> {
                 kw @ ("accept" | "reject") => {
                     let policy = ExitPolicy::parse(
                         kw == "accept",
-                        item.arguments().next().ok_or(CertFormatError)?,
+                        item.arguments().iter().next().ok_or(CertFormatError)?,
                     )
                     .ok_or(CertFormatError)?;
                     if exit_policy.len() >= 128 {
@@ -334,14 +338,14 @@ impl<'a> DescriptorParser<'a> {
                     if ipv6_policy.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    ipv6_policy = Some(args_exit_policy(&mut item.arguments())?);
+                    ipv6_policy = Some(args_exit_policy(&mut item.arguments().iter())?);
                 }
                 // overload-general is at most once
                 "overload-general" => {
                     if overload_general.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    let mut args = item.arguments();
+                    let mut args = item.arguments().iter();
                     if !matches!(args.next(), Some("1")) {
                         return Err(CertFormatError.into());
                     }
@@ -354,7 +358,7 @@ impl<'a> DescriptorParser<'a> {
                     if contact.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    contact = Some(item.arguments_raw());
+                    contact = Some(item.arguments().raw_string());
                 }
                 // bridge-distribution-request is at most once
                 "bridge-distribution-request" => {
@@ -362,7 +366,7 @@ impl<'a> DescriptorParser<'a> {
                         return Err(CertFormatError.into());
                     }
                     bridge_distribution_request =
-                        Some(item.arguments().next().ok_or(CertFormatError)?);
+                        Some(item.arguments().iter().next().ok_or(CertFormatError)?);
                 }
                 // family is at most once
                 "family" => {
@@ -414,11 +418,11 @@ impl<'a> DescriptorParser<'a> {
                     if eventdns.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    eventdns = Some(item.arguments().next().ok_or(CertFormatError)? == "1");
+                    eventdns = Some(item.arguments().iter().next().ok_or(CertFormatError)? == "1");
                 }
                 // caches-extra-info is at most once and without extra args
                 "caches-extra-info" => {
-                    if caches_extra_info || item.arguments().next().is_some() {
+                    if caches_extra_info || !item.arguments().is_empty() {
                         return Err(CertFormatError.into());
                     }
                     caches_extra_info = true;
@@ -428,7 +432,7 @@ impl<'a> DescriptorParser<'a> {
                     if extra_info_digest.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    let mut args = item.arguments();
+                    let mut args = item.arguments().iter();
                     let sha1: Sha1Output =
                         args.next().and_then(parse_hex).ok_or(CertFormatError)?;
                     let sha256: Option<Sha256Output> = args.next().map(parse_b64u).transpose()?;
@@ -443,7 +447,7 @@ impl<'a> DescriptorParser<'a> {
                 }
                 // allow-single-hop-exits is at most once and without extra args
                 "allow-single-hop-exits" => {
-                    if allow_single_hop_exits || item.arguments().next().is_some() {
+                    if allow_single_hop_exits || !item.arguments().is_empty() {
                         return Err(CertFormatError.into());
                     }
                     allow_single_hop_exits = true;
@@ -452,6 +456,7 @@ impl<'a> DescriptorParser<'a> {
                 "or-address" => {
                     let addr = item
                         .arguments()
+                        .iter()
                         .next()
                         .and_then(|v| v.parse::<SocketAddr>().ok())
                         .ok_or(CertFormatError)?;
@@ -467,7 +472,7 @@ impl<'a> DescriptorParser<'a> {
                 }
                 // tunnelled-dir-server is at most once
                 "tunnelled-dir-server" => {
-                    if tunnelled_dir_server || item.arguments().next().is_some() {
+                    if tunnelled_dir_server || !item.arguments().is_empty() {
                         return Err(CertFormatError.into());
                     }
                     tunnelled_dir_server = true;
@@ -565,9 +570,10 @@ impl<'a> DescriptorParser<'a> {
         // End of message is space after keyword.
         // In other word, start of arguments.
         let b = &self.original_string().as_bytes()
-            [start_off..item.byte_offset() + item.line_len() - item.arguments_raw().len()];
+            [start_off..item.byte_offset() + item.line_len() - item.arguments().raw_string().len()];
         let sig: EdSignature = item
             .arguments()
+            .iter()
             .next()
             .ok_or(CertFormatError)
             .and_then(parse_b64u)?;
@@ -578,7 +584,7 @@ impl<'a> DescriptorParser<'a> {
             .map_err(|_| CertVerifyError)?;
 
         let item = self.inner.next().ok_or(CertFormatError)??;
-        if item.keyword() != "router-signature" || item.arguments().next().is_some() {
+        if item.keyword() != "router-signature" || !item.arguments().is_empty() {
             return Err(CertFormatError.into());
         }
 
@@ -938,10 +944,10 @@ impl Addr {
     /// // Ipv6 address matching with prefix match
     /// assert!(
     ///     Addr::Ipv6 {
-    ///         ip: [0xfc00, 0x0002, 0xdb78, 0, 0, 0, 0, 0u16].into(),
+    ///         ip: [0xfc00, 0x0002, 0xdb78, 0x0009, 0x5b3a, 0x0007, 0x1ad4, 0u16].into(),
     ///         bits: 7,
     ///     }
-    ///     .contains(&([0xfc00, 0x0008, 0xd536, 0, 0, 0, 0, 0u16].into()))
+    ///     .contains(&([0xfc00, 0x0008, 0xd536, 0x0005, 0xb1f1, 0x0009, 0x7174, 0u16].into()))
     /// );
     ///
     /// // Mixing ipv4 and ipv6 address

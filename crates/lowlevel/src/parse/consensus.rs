@@ -111,7 +111,7 @@ pub fn parse_consensus_signature<'a, 'b>(
             break;
         }
 
-        let mut args = v.item.arguments();
+        let mut args = v.item.arguments().iter();
         let a1 = args.next().ok_or(CertFormatError)?;
         let a2 = args.next().ok_or(CertFormatError)?;
         let (algorithm, fingerprint, sig_digest);
@@ -146,7 +146,7 @@ pub fn parse_consensus_signature<'a, 'b>(
     let i = last_item.ok_or(CertFormatError)?;
     // End of message is space after keyword.
     // In other word, start of arguments.
-    let b = &doc.as_bytes()[..i.byte_offset() + i.line_len() - i.arguments_raw().len()];
+    let b = &doc.as_bytes()[..i.byte_offset() + i.line_len() - i.arguments().raw_string().len()];
     // SAFETY: Everything up to ix is filled.
     let sigs = unsafe { sigs[..ix].assume_init_mut() };
 
@@ -236,7 +236,7 @@ pub fn parse_consensus(
         if item.keyword() != "network-status-version" {
             return Err(CertFormatError.into());
         }
-        let mut args = item.arguments();
+        let mut args = item.arguments().iter();
         if args.next() != Some("3") {
             return Err(CertFormatError.into());
         }
@@ -273,14 +273,14 @@ pub fn parse_consensus(
                 if status.is_some() {
                     return Err(CertFormatError.into());
                 }
-                status = Some(item.arguments().next().ok_or(CertFormatError)?);
+                status = Some(item.arguments().iter().next().ok_or(CertFormatError)?);
             }
             // consensus-method is at most once
             "consensus-method" => {
                 if method.is_some() {
                     return Err(CertFormatError.into());
                 }
-                let mut args = item.arguments();
+                let mut args = item.arguments().iter();
                 method = Some(
                     args.next()
                         .ok_or(CertFormatError)?
@@ -297,7 +297,7 @@ pub fn parse_consensus(
                     return Err(CertFormatError.into());
                 }
                 valid_after = Some(SystemTime::from(
-                    args_date_time(&mut item.arguments()).ok_or(CertFormatError)?,
+                    args_date_time(&mut item.arguments().iter()).ok_or(CertFormatError)?,
                 ));
             }
             // fresh-until is exactly once
@@ -306,7 +306,7 @@ pub fn parse_consensus(
                     return Err(CertFormatError.into());
                 }
                 fresh_until = Some(SystemTime::from(
-                    args_date_time(&mut item.arguments()).ok_or(CertFormatError)?,
+                    args_date_time(&mut item.arguments().iter()).ok_or(CertFormatError)?,
                 ));
             }
             // valid-until is exactly once
@@ -315,7 +315,7 @@ pub fn parse_consensus(
                     return Err(CertFormatError.into());
                 }
                 valid_until = Some(SystemTime::from(
-                    args_date_time(&mut item.arguments()).ok_or(CertFormatError)?,
+                    args_date_time(&mut item.arguments().iter()).ok_or(CertFormatError)?,
                 ));
             }
             // voting-delay is exactly once
@@ -323,7 +323,7 @@ pub fn parse_consensus(
                 if voting_delay.is_some() {
                     return Err(CertFormatError.into());
                 }
-                let mut args = item.arguments();
+                let mut args = item.arguments().iter();
                 let vote = args
                     .next()
                     .ok_or(CertFormatError)?
@@ -613,7 +613,7 @@ impl<'a> AuthorityEntryParserInner<'a> {
         let orport;
 
         {
-            let mut args = item.arguments();
+            let mut args = item.arguments().iter();
             nickname = args.next().ok_or(CertFormatError)?;
             identity = args.next().and_then(parse_hex).ok_or(CertFormatError)?;
             address = args.next().ok_or(CertFormatError)?;
@@ -643,7 +643,7 @@ impl<'a> AuthorityEntryParserInner<'a> {
                     if contact.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    contact = Some(item.arguments_raw());
+                    contact = Some(item.arguments().raw_string());
                 }
                 // vote-digest is exactly once
                 "vote-digest" => {
@@ -652,6 +652,7 @@ impl<'a> AuthorityEntryParserInner<'a> {
                     }
                     vote_digest = Some(
                         item.arguments()
+                            .iter()
                             .next()
                             .and_then(parse_hex)
                             .ok_or(CertFormatError)?,
@@ -818,7 +819,7 @@ impl<'a> RelayEntryParserInner<'a> {
         let orport;
 
         {
-            let mut args = item.arguments();
+            let mut args = item.arguments().iter();
             nickname = args.next().ok_or(CertFormatError)?;
             identity = args.next().ok_or(CertFormatError).and_then(parse_b64u)?;
             if flavor == Flavor::Consensus {
@@ -856,6 +857,7 @@ impl<'a> RelayEntryParserInner<'a> {
                 "a" => {
                     let a = item
                         .arguments()
+                        .iter()
                         .next()
                         .and_then(|v| v.parse::<SocketAddr>().ok())
                         .ok_or(CertFormatError)?;
@@ -877,7 +879,7 @@ impl<'a> RelayEntryParserInner<'a> {
                     if version.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    version = Some(item.arguments_raw());
+                    version = Some(item.arguments().raw_string());
                 }
                 // pr is exactly once
                 "pr" => {
@@ -898,7 +900,7 @@ impl<'a> RelayEntryParserInner<'a> {
                     if exit_ports.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    exit_ports = Some(args_exit_policy(&mut item.arguments())?);
+                    exit_ports = Some(args_exit_policy(&mut item.arguments().iter())?);
                 }
                 // m is exactly once
                 "m" if flavor == Flavor::Microdesc => {
@@ -907,6 +909,7 @@ impl<'a> RelayEntryParserInner<'a> {
                     }
                     microdesc = Some(
                         item.arguments()
+                            .iter()
                             .next()
                             .ok_or(CertFormatError)
                             .and_then(parse_b64u)?,
@@ -1208,7 +1211,7 @@ pub enum BandwidthEstimate {
 }
 
 fn parse_srv(item: &NetdocItem<'_>) -> Result<Srv, CertFormatError> {
-    let mut args = item.arguments();
+    let mut args = item.arguments().iter();
     Ok(Srv {
         n_commits: args
             .next()
@@ -1487,15 +1490,27 @@ bandwidth-weights Wbd=1113 Wbe=0 Wbg=4125 Wbm=10000 Wdb=10000 Web=10000 Wed=7774
         assert_eq!(preamble.voting_delay.vote, 300);
         assert_eq!(preamble.voting_delay.dist, 300);
         assert_eq!(
-            preamble.client_versions.clone().unwrap().next().unwrap(),
+            preamble
+                .client_versions
+                .as_ref()
+                .unwrap()
+                .iter()
+                .next()
+                .unwrap(),
             "0.4.8.19,0.4.8.20,0.4.8.21,0.4.9.3-alpha"
         );
         assert_eq!(
-            preamble.server_versions.clone().unwrap().next().unwrap(),
+            preamble
+                .server_versions
+                .as_ref()
+                .unwrap()
+                .iter()
+                .next()
+                .unwrap(),
             "0.4.8.21,0.4.9.3-alpha"
         );
         assert_eq!(
-            preamble.known_flags.clone().collect::<Vec<_>>(),
+            preamble.known_flags.iter().collect::<Vec<_>>(),
             [
                 "Authority",
                 "BadExit",
@@ -1516,8 +1531,9 @@ bandwidth-weights Wbd=1113 Wbe=0 Wbg=4125 Wbm=10000 Wdb=10000 Web=10000 Wed=7774
         assert_eq!(
             preamble
                 .rec_client_proto
-                .clone()
+                .as_ref()
                 .unwrap()
+                .iter()
                 .collect::<Vec<_>>(),
             [
                 "Cons=2",
@@ -1535,8 +1551,9 @@ bandwidth-weights Wbd=1113 Wbe=0 Wbg=4125 Wbm=10000 Wdb=10000 Web=10000 Wed=7774
         assert_eq!(
             preamble
                 .rec_relay_proto
-                .clone()
+                .as_ref()
                 .unwrap()
+                .iter()
                 .collect::<Vec<_>>(),
             [
                 "Cons=2",
@@ -1555,8 +1572,9 @@ bandwidth-weights Wbd=1113 Wbe=0 Wbg=4125 Wbm=10000 Wdb=10000 Web=10000 Wed=7774
         assert_eq!(
             preamble
                 .req_client_proto
-                .clone()
+                .as_ref()
                 .unwrap()
+                .iter()
                 .collect::<Vec<_>>(),
             [
                 "Cons=2",
@@ -1570,8 +1588,9 @@ bandwidth-weights Wbd=1113 Wbe=0 Wbg=4125 Wbm=10000 Wdb=10000 Web=10000 Wed=7774
         assert_eq!(
             preamble
                 .req_relay_proto
-                .clone()
+                .as_ref()
                 .unwrap()
+                .iter()
                 .collect::<Vec<_>>(),
             [
                 "Cons=2",
@@ -1768,7 +1787,7 @@ bandwidth-weights Wbd=1113 Wbe=0 Wbg=4125 Wbm=10000 Wdb=10000 Web=10000 Wed=7774
             assert_eq!(v.orport, r.4, "failed at index {i}");
             assert_eq!(v.addr, r.6, "failed at index {i}");
             assert_eq!(
-                v.status.clone().collect::<Vec<_>>(),
+                v.status.iter().collect::<Vec<_>>(),
                 r.7.split(' ').collect::<Vec<_>>(),
                 "failed at index {i}"
             );
@@ -1778,8 +1797,9 @@ bandwidth-weights Wbd=1113 Wbe=0 Wbg=4125 Wbm=10000 Wdb=10000 Web=10000 Wed=7774
         assert_eq!(
             footer
                 .bandwidth_weights
-                .clone()
+                .as_ref()
                 .unwrap()
+                .iter()
                 .collect::<Vec<_>>(),
             [
                 "Wbd=1113",

@@ -58,7 +58,7 @@ impl<'a> Parser<'a> {
                 None => return Ok(None),
             },
         };
-        if item.keyword() != "onion-key" || item.arguments().next().is_some() {
+        if item.keyword() != "onion-key" || !item.arguments().is_empty() {
             return Err(CertFormatError.into());
         }
         let start_off = item.byte_offset();
@@ -87,7 +87,7 @@ impl<'a> Parser<'a> {
                     if ntor_onion_key.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    let v = item.arguments().next().ok_or(CertFormatError)?;
+                    let v = item.arguments().iter().next().ok_or(CertFormatError)?;
                     ntor_onion_key = Some(parse_b64u(v).or_else(|_| parse_b64(v))?);
                 }
                 // a can be any number
@@ -97,6 +97,7 @@ impl<'a> Parser<'a> {
                     // Is not generated since consensus method 27.
                     let _ = item
                         .arguments()
+                        .iter()
                         .next()
                         .and_then(|v| v.parse::<SocketAddr>().ok())
                         .ok_or(CertFormatError)?;
@@ -120,18 +121,18 @@ impl<'a> Parser<'a> {
                     if exit_policy.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    exit_policy = Some(args_exit_policy(&mut item.arguments())?);
+                    exit_policy = Some(args_exit_policy(&mut item.arguments().iter())?);
                 }
                 // p6 is at most once
                 "p6" => {
                     if ipv6_policy.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    ipv6_policy = Some(args_exit_policy(&mut item.arguments())?);
+                    ipv6_policy = Some(args_exit_policy(&mut item.arguments().iter())?);
                 }
                 // id is at most once for each version
                 "id" => {
-                    let mut args = item.arguments();
+                    let mut args = item.arguments().iter();
                     match args.next().ok_or(CertFormatError)? {
                         "rsa1024" => {
                             if fingerprint.is_some() {
@@ -452,7 +453,7 @@ HGVOFPyWODM4fP3eiA7tazFUXXr9Es1lU3ZquLygHlvBKuEWjnEYWfvlESfS0FeY
                     if family.is_empty() {
                         assert!(desc.family.is_none(), "family should not exist");
                     } else {
-                        let mut it = desc.family.clone().unwrap();
+                        let mut it = desc.family.as_ref().unwrap().iter();
                         for v in family {
                             let o = it.next().unwrap();
                             assert_eq!(o, format!("${}", print_hex(&v)));

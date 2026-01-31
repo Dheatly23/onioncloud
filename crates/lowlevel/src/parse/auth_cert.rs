@@ -110,7 +110,7 @@ impl<'a> Parser<'a> {
     fn parse(&mut self, item: NetdocItem<'_>) -> Result<Item<'a>, AuthCertError> {
         // Starting item
         if item.keyword() != "dir-key-certificate-version"
-            || item.arguments().next() != Some("3")
+            || item.arguments().iter().next() != Some("3")
             || item.has_object()
         {
             return Err(CertFormatError.into());
@@ -142,6 +142,7 @@ impl<'a> Parser<'a> {
                     }
                     address = Some(
                         item.arguments()
+                            .iter()
                             .next()
                             .map(SocketAddr::from_str)
                             .transpose()
@@ -157,6 +158,7 @@ impl<'a> Parser<'a> {
                     }
                     fingerprint = Some(
                         item.arguments()
+                            .iter()
                             .next()
                             .and_then(parse_hex)
                             .ok_or(CertFormatError)?,
@@ -168,7 +170,7 @@ impl<'a> Parser<'a> {
                         return Err(CertFormatError.into());
                     }
                     published = Some(SystemTime::from(
-                        args_date_time(&mut item.arguments()).ok_or(CertFormatError)?,
+                        args_date_time(&mut item.arguments().iter()).ok_or(CertFormatError)?,
                     ));
                 }
                 // dir-key-expires is exactly once
@@ -177,12 +179,12 @@ impl<'a> Parser<'a> {
                         return Err(CertFormatError.into());
                     }
                     expired = Some(SystemTime::from(
-                        args_date_time(&mut item.arguments()).ok_or(CertFormatError)?,
+                        args_date_time(&mut item.arguments().iter()).ok_or(CertFormatError)?,
                     ));
                 }
                 // dir-identity-key has object, without extra args, and is exactly once
                 "dir-identity-key" => {
-                    if item.arguments().next().is_some() || identity.is_some() {
+                    if !item.arguments().is_empty() || identity.is_some() {
                         return Err(CertFormatError.into());
                     }
                     let (key, der) = decode_cert(&mut tmp, &item)?;
@@ -190,14 +192,14 @@ impl<'a> Parser<'a> {
                 }
                 // dir-signing-key has object, without extra args, and is exactly once
                 "dir-signing-key" => {
-                    if item.arguments().next().is_some() || signing.is_some() {
+                    if !item.arguments().is_empty() || signing.is_some() {
                         return Err(CertFormatError.into());
                     }
                     signing = Some(decode_cert(&mut tmp, &item)?.0);
                 }
                 // dir-key-crosscert has object, without extra args, and is exactly once
                 "dir-key-crosscert" => {
-                    if item.arguments().next().is_some() || crosscert.is_some() {
+                    if !item.arguments().is_empty() || crosscert.is_some() {
                         return Err(CertFormatError.into());
                     }
                     let Some(("ID SIGNATURE" | "SIGNATURE", s)) = item.object() else {
@@ -207,7 +209,7 @@ impl<'a> Parser<'a> {
                 }
                 // dir-key-certification has object, without extra args, and is exactly once
                 "dir-key-certification" => {
-                    if item.arguments().next().is_some() {
+                    if !item.arguments().is_empty() {
                         return Err(CertFormatError.into());
                     }
                     let Some(("SIGNATURE", s)) = item.object() else {
