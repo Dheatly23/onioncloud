@@ -341,14 +341,14 @@ pub fn parse_consensus(
                 if client_versions.is_some() {
                     return Err(CertFormatError.into());
                 }
-                client_versions = Some(item.arguments());
+                client_versions = Some(item.arguments().iter().next().ok_or(CertFormatError)?);
             }
             // server-versions is at most once
             "server-versions" => {
                 if server_versions.is_some() {
                     return Err(CertFormatError.into());
                 }
-                server_versions = Some(item.arguments());
+                server_versions = Some(item.arguments().iter().next().ok_or(CertFormatError)?);
             }
             // known-flags is exactly once
             "known-flags" => {
@@ -487,9 +487,13 @@ pub struct PreambleData<'a> {
     /// Voting delay.
     pub voting_delay: VotingDelay,
     /// Client versions.
-    pub client_versions: Option<NetdocArguments<'a>>,
+    ///
+    /// Versions are comma-separated string.
+    pub client_versions: Option<&'a str>,
     /// Server versions.
-    pub server_versions: Option<NetdocArguments<'a>>,
+    ///
+    /// Versions are comma-separated string.
+    pub server_versions: Option<&'a str>,
     /// Known flags.
     pub known_flags: NetdocArguments<'a>,
     /// Required client protocol versions.
@@ -1490,25 +1494,10 @@ bandwidth-weights Wbd=1113 Wbe=0 Wbg=4125 Wbm=10000 Wdb=10000 Web=10000 Wed=7774
         assert_eq!(preamble.voting_delay.vote, 300);
         assert_eq!(preamble.voting_delay.dist, 300);
         assert_eq!(
-            preamble
-                .client_versions
-                .as_ref()
-                .unwrap()
-                .iter()
-                .next()
-                .unwrap(),
-            "0.4.8.19,0.4.8.20,0.4.8.21,0.4.9.3-alpha"
+            preamble.client_versions,
+            Some("0.4.8.19,0.4.8.20,0.4.8.21,0.4.9.3-alpha")
         );
-        assert_eq!(
-            preamble
-                .server_versions
-                .as_ref()
-                .unwrap()
-                .iter()
-                .next()
-                .unwrap(),
-            "0.4.8.21,0.4.9.3-alpha"
-        );
+        assert_eq!(preamble.server_versions, Some("0.4.8.21,0.4.9.3-alpha"));
         assert_eq!(
             preamble.known_flags.iter().collect::<Vec<_>>(),
             [
