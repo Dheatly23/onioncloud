@@ -5,7 +5,7 @@ use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::iter::{FusedIterator, from_fn};
 use std::mem::replace;
 
-use memchr::{Memchr2, memchr_iter};
+use memchr::memchr_iter;
 
 use crate::errors::{NetdocParseError, NetdocParseErrorType as ErrType};
 
@@ -42,8 +42,9 @@ unsafe impl Sync for NetdocParser<'_> {}
 pub struct Item<'a> {
     s: &'a str,
     byte_off: usize,
-    is_opt: bool,
+    opt_off: usize,
     kw_len: usize,
+    arg_ws_off: usize,
     line_len: usize,
     object_len: usize,
 }
@@ -144,7 +145,7 @@ impl<'a> Iterator for NetdocParser<'a> {
         };
 
         let line_len = s.len();
-        let (is_opt, kw_len) = match check_item_line(s, self.line.get()) {
+        let (opt_off, kw_len, arg_ws_off) = match check_item_line(s, self.line.get()) {
             Ok(v) => v,
             Err(e) => {
                 self.end.set(0);
@@ -166,8 +167,9 @@ impl<'a> Iterator for NetdocParser<'a> {
             return Some(Ok(Item {
                 s,
                 byte_off: start,
-                is_opt,
+                opt_off,
                 kw_len,
+                arg_ws_off,
                 line_len,
                 object_len: 0,
             }));
@@ -248,8 +250,9 @@ impl<'a> Iterator for NetdocParser<'a> {
         Some(Ok(Item {
             s,
             byte_off: start,
-            is_opt,
+            opt_off,
             kw_len,
+            arg_ws_off,
             line_len,
             object_len: obj_s.len(),
         }))
@@ -403,7 +406,7 @@ impl DoubleEndedIterator for NetdocParser<'_> {
         }
 
         let line_len = line_s.len();
-        let (is_opt, kw_len) = match check_item_line(line_s, self.endl.get()) {
+        let (opt_off, kw_len, arg_ws_off) = match check_item_line(line_s, self.endl.get()) {
             Ok(v) => v,
             Err(e) => {
                 self.end.set(0);
@@ -420,8 +423,9 @@ impl DoubleEndedIterator for NetdocParser<'_> {
         Some(Ok(Item {
             s,
             byte_off: start,
-            is_opt,
+            opt_off,
             kw_len,
+            arg_ws_off,
             line_len,
             object_len,
         }))
@@ -504,45 +508,56 @@ impl<'a> Item<'a> {
         let line_len = s.len();
         // Parse opt
         let is_opt = s.starts_with("opt ") | s.starts_with("opt\t");
-        let s = if is_opt {
+        let (s, opt_off) = if is_opt {
             // SAFETY: String is prefixed with opt
-            unsafe { s.get_unchecked(4..) }
+            let s = unsafe { s.get_unchecked(4..) };
+            let i = check::next_non_ws(s);
+            // SAFETY: Index is <= string length
+            unsafe { (s.get_unchecked(i..), i + 4) }
         } else {
-            s
+            (s, 0)
         };
 
         // Parse keyword
         let kw_len = match check::check_line(s) {
-            Ok(0) => {
+            Ok(i @ 0) | Err(i) => {
                 return Err(NetdocParseError::with_byte_off(
-                    off + if is_opt { 4 } else { 0 },
+                    off + opt_off + i,
                     ErrType::InvalidKeywordChar,
                 ));
             }
             Ok(i) => i,
-            Err(i) => {
-                return Err(NetdocParseError::with_byte_off(
-                    off + if is_opt { 4 } else { 0 } + i,
-                    ErrType::InvalidKeywordChar,
-                ));
-            }
         };
 
         // Parse arguments
-        if kw_len != s.len() {
+        let arg_ws_off = if kw_len != s.len() {
             // SAFETY: Index points to space or tab character after keyword or end of string
-            let a = unsafe { s.get_unchecked(kw_len + 1..) };
-            if let Some(i) = check::check_argument(a) {
+            let s = unsafe { s.get_unchecked(kw_len + 1..) };
+            let i = check::next_non_ws(s);
+            // SAFETY: Index is <= string length
+            let s = unsafe { s.get_unchecked(i..) };
+            if s.is_empty() {
                 return Err(NetdocParseError::with_byte_off(
-                    off + if is_opt { 4 } else { 0 } + kw_len + 1 + i,
-                    if let Some(0) = a.as_bytes().get(i) {
+                    off + opt_off + kw_len + 1 + i,
+                    ErrType::InvalidArgumentChar,
+                ));
+            }
+
+            if let Some(j) = check::check_argument(s) {
+                return Err(NetdocParseError::with_byte_off(
+                    off + opt_off + kw_len + 1 + i + j,
+                    if let Some(0) = s.as_bytes().get(j) {
                         ErrType::Null
                     } else {
                         ErrType::InvalidArgumentChar
                     },
                 ));
             }
-        }
+
+            i + 1
+        } else {
+            0
+        };
 
         let Some((s, off)) = f() else {
             debug_assert_eq!(line_len, ori_s.len());
@@ -550,8 +565,9 @@ impl<'a> Item<'a> {
             return Ok(Self {
                 s: ori_s,
                 byte_off: byte_offset,
-                is_opt,
+                opt_off,
                 kw_len,
+                arg_ws_off,
                 line_len,
                 object_len: 0,
             });
@@ -617,8 +633,9 @@ impl<'a> Item<'a> {
         Ok(Item {
             s: ori_s,
             byte_off: byte_offset,
-            is_opt,
+            opt_off,
             kw_len,
+            arg_ws_off,
             line_len,
             object_len: obj_s.len(),
         })
@@ -634,23 +651,21 @@ impl<'a> Item<'a> {
 
     /// Keyword of item.
     pub fn keyword(&self) -> &'a str {
-        let o = if self.is_opt { 4 } else { 0 };
         // SAFETY: kw_len is within string
-        unsafe { self.s.get_unchecked(o..o + self.kw_len) }
+        unsafe {
+            self.s
+                .get_unchecked(self.opt_off..self.opt_off + self.kw_len)
+        }
     }
 
     /// Iterates over arguments.
     ///
     /// Unless specified otherwise, user must accept excess argument.
     pub fn arguments(&self) -> Arguments<'a> {
-        let o = if self.is_opt { 4 } else { 0 };
+        let i = self.opt_off + self.kw_len + self.arg_ws_off;
         Arguments {
-            s: if self.kw_len + o == self.line_len {
-                ""
-            } else {
-                // SAFETY: kw_len and line_len is within string
-                unsafe { self.s.get_unchecked(o + self.kw_len + 1..self.line_len) }
-            },
+            // SAFETY: Indices is within string
+            s: unsafe { self.s.get_unchecked(i..self.line_len) },
         }
     }
 
@@ -731,7 +746,7 @@ pub struct Arguments<'a> {
 
 /// Parses an argument string.
 ///
-/// Valid argument string is in the form of `([^ \t]+([ \t][^ \t]+)*)?`.
+/// Valid argument string is in the form of `([^ \t]+([ \t]+[^ \t]+)*)?`.
 /// Also it **should not** contain NUL character.
 ///
 /// It does not implemeent [`FromStr`] because it takes the lifetime of the string.
@@ -748,7 +763,7 @@ pub struct Arguments<'a> {
 /// assert_eq!(Arguments::try_from("").unwrap().iter().collect::<Vec<_>>().len(), 0);
 ///
 /// // Consequentive whitespace
-/// let _ = Arguments::try_from("ab cd \tef").unwrap_err();
+/// assert_eq!(Arguments::try_from("ab cd \tef").unwrap().iter().collect::<Vec<_>>(), ["ab", "cd", "ef"]);
 ///
 /// // Trailing whitespace
 /// let _ = Arguments::try_from("ab cd ").unwrap_err();
@@ -847,11 +862,7 @@ impl<'a> Arguments<'a> {
     /// }
     /// ```
     pub fn iter(&self) -> ArgumentsIter<'a> {
-        ArgumentsIter {
-            s: self.s,
-            off: 0,
-            it: Memchr2::new(b' ', b'\t', self.s.as_bytes()),
-        }
+        ArgumentsIter(self.s.into())
     }
 
     /// Checks if argument is empty.
@@ -871,71 +882,23 @@ impl<'a> Arguments<'a> {
 
 /// Iterator of netdoc item arguments.
 #[derive(Debug, Clone)]
-pub struct ArgumentsIter<'a> {
-    s: &'a str,
-    off: usize,
-    it: Memchr2<'a>,
-}
+pub struct ArgumentsIter<'a>(check::ArgIterInner<'a>);
 
 impl<'a> Iterator for ArgumentsIter<'a> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.s.is_empty() {
-            return None;
-        }
-        let Some(mut i) = self.it.next() else {
-            return Some(replace(&mut self.s, ""));
-        };
-        i -= self.off;
-        self.off += i + 1;
-
-        if cfg!(debug_assertions) {
-            let s = &self.s[i..=i];
-            debug_assert!(
-                s == " " || s == "\t",
-                "spacer string {s:#?} is not space or tab"
-            );
-        }
-
-        // SAFETY: Index is space or tab within string
-        let (a, b) = unsafe { (self.s.get_unchecked(..i), self.s.get_unchecked(i + 1..)) };
-        self.s = b;
-        Some(a)
+        self.0.next()
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        if self.s.is_empty() {
-            return (0, Some(0));
-        }
-        let (a, b) = self.it.size_hint();
-        // Add 1 because we return one more item when iteration stops
-        (a + 1, b.map(|v| v + 1))
+        self.0.size_hint()
     }
 }
 
 impl DoubleEndedIterator for ArgumentsIter<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        if self.s.is_empty() {
-            return None;
-        }
-        let Some(mut i) = self.it.next_back() else {
-            return Some(replace(&mut self.s, ""));
-        };
-        i -= self.off;
-
-        if cfg!(debug_assertions) {
-            let s = &self.s[i..=i];
-            debug_assert!(
-                s == " " || s == "\t",
-                "spacer string {s:#?} is not space or tab"
-            );
-        }
-
-        // SAFETY: Index is space or tab within string
-        let (a, b) = unsafe { (self.s.get_unchecked(..i), self.s.get_unchecked(i + 1..)) };
-        self.s = a;
-        Some(b)
+        self.0.next_back()
     }
 }
 
@@ -1036,7 +999,7 @@ pub fn get_signature(document: &str) -> Result<SignatureResult<'_>, NetdocParseE
     };
 
     let line_len = s.len();
-    let (is_opt, kw_len) = check_item_line(s, l.get())?;
+    let (opt_off, kw_len, arg_ws_off) = check_item_line(s, l.get())?;
 
     let i = n.get();
     // SAFETY: Index points to character right after newline within string
@@ -1051,58 +1014,70 @@ pub fn get_signature(document: &str) -> Result<SignatureResult<'_>, NetdocParseE
         item: Item {
             s,
             byte_off: i,
-            is_opt,
+            opt_off,
             kw_len,
+            arg_ws_off,
             line_len,
             object_len: obj_s.len(),
         },
     })
 }
 
-fn check_item_line(s: &str, line: isize) -> Result<(bool, usize), NetdocParseError> {
+fn check_item_line(s: &str, line: isize) -> Result<(usize, usize, usize), NetdocParseError> {
     let is_opt = s.starts_with("opt ") | s.starts_with("opt\t");
-    let s = if is_opt {
+    let (s, opt_off) = if is_opt {
         // SAFETY: String is prefixed with opt
-        unsafe { s.get_unchecked(4..) }
+        let s = unsafe { s.get_unchecked(4..) };
+        let i = check::next_non_ws(s);
+        // SAFETY: Index is <= string length
+        unsafe { (s.get_unchecked(i..), i + 4) }
     } else {
-        s
+        (s, 0)
     };
 
     let ki = match check::check_line(s) {
-        Ok(0) => {
+        Ok(i @ 0) | Err(i) => {
             return Err(NetdocParseError::with_line_pos(
                 line,
-                if is_opt { 4 } else { 0 },
+                opt_off + i,
                 ErrType::InvalidKeywordChar,
             ));
         }
         Ok(i) => i,
-        Err(i) => {
-            return Err(NetdocParseError::with_line_pos(
-                line,
-                if is_opt { 4 } else { 0 } + i,
-                ErrType::InvalidKeywordChar,
-            ));
-        }
     };
 
-    if ki != s.len() {
+    let arg_off = if ki != s.len() {
         // SAFETY: Index points to space or tab character after keyword or end of string
-        let a = unsafe { s.get_unchecked(ki + 1..) };
-        if let Some(i) = check::check_argument(a) {
+        let s = unsafe { s.get_unchecked(ki + 1..) };
+        let i = check::next_non_ws(s);
+        // SAFETY: Index is <= string length
+        let s = unsafe { s.get_unchecked(i..) };
+        if s.is_empty() {
             return Err(NetdocParseError::with_line_pos(
                 line,
-                if is_opt { 4 } else { 0 } + ki + 1 + i,
-                if let Some(0) = a.as_bytes().get(i) {
+                opt_off + ki + 1 + i,
+                ErrType::InvalidArgumentChar,
+            ));
+        }
+
+        if let Some(j) = check::check_argument(s) {
+            return Err(NetdocParseError::with_line_pos(
+                line,
+                opt_off + ki + 1 + i + j,
+                if let Some(0) = s.as_bytes().get(j) {
                     ErrType::Null
                 } else {
                     ErrType::InvalidArgumentChar
                 },
             ));
         }
-    }
 
-    Ok((is_opt, ki))
+        i + 1
+    } else {
+        0
+    };
+
+    Ok((opt_off, ki, arg_off))
 }
 
 fn check_object_keyword(s: &str, line: isize, off: usize) -> Option<NetdocParseError> {
@@ -1123,14 +1098,11 @@ mod tests {
     use proptest::option::of;
     use proptest::prelude::*;
 
-    fn item_strat() -> impl Strategy<Value = (&'static str, String, Vec<(char, String)>)> {
+    fn item_strat() -> impl Strategy<Value = (String, String, Vec<(String, String)>)> {
         (
-            prop_oneof![Just(""), Just("opt "), Just("opt\t")],
+            "(opt[ \t]{1,8})?",
             "[a-zA-Z0-9][a-zA-Z0-9-]{0,16}".prop_filter("keyword is opt", |s| s != "opt"),
-            vec(
-                (prop_oneof![Just(' '), Just('\t')], "[^ \t\n\0]{1,8}"),
-                0..8,
-            ),
+            vec(("[ \t]{1,8}", "[^ \t\n\0]{1,8}"), 0..8),
         )
     }
 
@@ -1143,9 +1115,9 @@ mod tests {
 
     fn doc_strat() -> impl Strategy<
         Value = Vec<(
-            &'static str,
             String,
-            Vec<(char, String)>,
+            String,
+            Vec<(String, String)>,
             Option<(String, String)>,
         )>,
     > {
@@ -1155,11 +1127,11 @@ mod tests {
         )
     }
 
-    fn to_argument_raw(a: &[(char, String)]) -> String {
+    fn to_argument_raw(a: &[(String, String)]) -> String {
         let mut a_ = String::new();
         for (i, (c, v)) in a.iter().enumerate() {
             if i != 0 {
-                a_.push(*c);
+                a_ += c;
             }
             a_ += v;
         }
@@ -1180,21 +1152,21 @@ mod tests {
 
     fn doc_to_str(
         doc: &Vec<(
-            &'static str,
             String,
-            Vec<(char, String)>,
+            String,
+            Vec<(String, String)>,
             Option<(String, String)>,
         )>,
     ) -> String {
-        doc_to_str_it(doc.iter().map(|(a, b, c, d)| (*a, b, c, d.as_ref())))
+        doc_to_str_it(doc.iter().map(|(a, b, c, d)| (a, b, c, d.as_ref())))
     }
 
     fn doc_to_str_it<'a>(
         doc: impl IntoIterator<
             Item = (
-                &'a str,
                 &'a String,
-                &'a Vec<(char, String)>,
+                &'a String,
+                &'a Vec<(String, String)>,
                 Option<&'a (String, String)>,
             ),
         >,
@@ -1205,7 +1177,7 @@ mod tests {
             s += k;
 
             for (c, v) in a {
-                s.push(*c);
+                s += c;
                 s += v;
             }
 
@@ -1281,15 +1253,15 @@ DEF
     }
 
     #[test]
-    #[should_panic(expected = "error parsing netdoc at line 1 byte 8: invalid argument character")]
+    #[should_panic(expected = "error parsing netdoc at line 1 byte 9: invalid argument character")]
     fn test_netdoc_invalid_argument() {
-        ignore_parse("ab3 1\t2  3\n");
+        ignore_parse("ab3 1\t2 3 \n");
     }
 
     #[test]
-    #[should_panic(expected = "error parsing netdoc at line -1 byte 8: invalid argument character")]
+    #[should_panic(expected = "error parsing netdoc at line -1 byte 9: invalid argument character")]
     fn test_netdoc_rev_invalid_argument() {
-        rev_ignore_parse("ab3 1\t2  3\n");
+        rev_ignore_parse("ab3 1\t2 3 \n");
     }
 
     #[test]
@@ -1414,7 +1386,7 @@ DEF
     }
 
     #[test]
-    #[should_panic(expected = "error parsing netdoc at byte offset 6: invalid argument character")]
+    #[should_panic(expected = "error parsing netdoc at byte offset 5: invalid argument character")]
     fn test_netdoc_argument_parse_trailing() {
         Arguments::try_from("a b c ").unwrap();
     }
@@ -1426,9 +1398,9 @@ DEF
     }
 
     #[test]
-    #[should_panic(expected = "error parsing netdoc at byte offset 2: invalid argument character")]
     fn test_netdoc_argument_parse_spacing() {
-        Arguments::try_from("a  b c").unwrap();
+        let args = Arguments::try_from("a  b \tc").unwrap();
+        assert_eq!(args.iter().collect::<Vec<_>>(), ["a", "b", "c"]);
     }
 
     proptest! {
@@ -1483,8 +1455,9 @@ DEF
                 let j = Item::try_parse_str(i.s, i.byte_off).unwrap();
                 assert_eq!(j.s, i.s);
                 assert_eq!(j.byte_off, i.byte_off);
-                assert_eq!(j.is_opt, i.is_opt);
+                assert_eq!(j.opt_off, i.opt_off);
                 assert_eq!(j.kw_len, i.kw_len);
+                assert_eq!(j.arg_ws_off, i.arg_ws_off);
                 assert_eq!(j.line_len, i.line_len);
                 assert_eq!(j.object_len, i.object_len);
 
@@ -1496,7 +1469,7 @@ DEF
 
         #[test]
         fn test_netdoc_get_signature_proptest(doc in doc_strat(), (opt, k, a) in item_strat(), sig in sig_strat()) {
-            let s = doc_to_str_it(doc.iter().map(|(a, b, c, d)| (*a, b, c, d.as_ref())).chain([(opt, &k, &a, Some(&sig))]));
+            let s = doc_to_str_it(doc.iter().map(|(a, b, c, d)| (a, b, c, d.as_ref())).chain([(&opt, &k, &a, Some(&sig))]));
 
             let SignatureResult{document: rest, item} = get_signature(&s).unwrap();
             assert_eq!(item.keyword(), k);
