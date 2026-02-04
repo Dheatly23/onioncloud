@@ -449,7 +449,7 @@ impl ArgIterInner {
 pub(crate) fn new(s: &str) -> IterUnion {
     IterUnion {
         avx: ArgIterInner {
-            s: unsafe { transmute(s) },
+            s: unsafe { transmute::<&str, &'static str>(s) },
             i: 0,
             e: s.len(),
             bs: 0,

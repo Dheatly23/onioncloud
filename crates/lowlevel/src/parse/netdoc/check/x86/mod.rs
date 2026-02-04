@@ -70,11 +70,11 @@ fn get_fptr() -> NonNull<FPtrs> {
             check_argument: universal::check_argument,
             check_object_keyword: universal::check_object_keyword,
             check_object_content: universal::check_object_content,
-            new: new,
-            fmt: fmt,
-            next: next,
-            size_hint: size_hint,
-            next_back: next_back,
+            new,
+            fmt,
+            next,
+            size_hint,
+            next_back,
         };
         &FP
     });

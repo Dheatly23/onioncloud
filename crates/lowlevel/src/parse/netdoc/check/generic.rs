@@ -3,7 +3,7 @@
 //! Implements non-SIMD variant. Defines reference for all other implementations.
 #![allow(dead_code)]
 
-use std::mem::replace;
+use std::mem::take;
 
 pub(crate) fn check_line(s: &str) -> Result<usize, usize> {
     for (i, c) in s.as_bytes().iter().enumerate() {
@@ -97,7 +97,7 @@ impl<'a> Iterator for ArgIterInner<'a> {
             return if self.0.is_empty() {
                 None
             } else {
-                Some(replace(&mut self.0, ""))
+                Some(take(&mut self.0))
             };
         };
 
@@ -123,7 +123,7 @@ impl<'a> DoubleEndedIterator for ArgIterInner<'a> {
             return if self.0.is_empty() {
                 None
             } else {
-                Some(replace(&mut self.0, ""))
+                Some(take(&mut self.0))
             };
         };
 
