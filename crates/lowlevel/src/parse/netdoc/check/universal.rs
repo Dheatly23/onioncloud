@@ -759,7 +759,7 @@ impl<'a> Iterator for ArgIterInner<'a> {
     }
 }
 
-impl<'a> DoubleEndedIterator for ArgIterInner<'a> {
+impl DoubleEndedIterator for ArgIterInner<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
         let s = self.start_ix();
         let e = self.end_ix();
