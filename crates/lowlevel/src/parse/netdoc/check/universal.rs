@@ -1,8 +1,8 @@
 //! 64-bit universal SIMD variant.
 #![allow(dead_code)]
 
-use std::marker::PhantomData;
-use std::ptr::{NonNull, from_ref, slice_from_raw_parts};
+use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::ptr::from_ref;
 
 use super::get_unchecked;
 
@@ -578,11 +578,9 @@ pub(crate) fn check_object_content(s: &str) -> Option<usize> {
     None
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub(crate) struct ArgIterInner<'a> {
-    p: NonNull<u8>,
-    #[cfg(debug_assertions)]
-    l: usize,
+    s: &'a str,
     i: usize,
     e: usize,
     bs: u8,
@@ -590,25 +588,35 @@ pub(crate) struct ArgIterInner<'a> {
     os: u8,
     oe: u8,
     t: u8,
-    _p: PhantomData<&'a str>,
 }
 
 impl<'a> From<&'a str> for ArgIterInner<'a> {
     fn from(s: &'a str) -> Self {
-        let p = NonNull::from(s.as_bytes()).cast();
         Self {
-            p,
-            #[cfg(debug_assertions)]
-            l: s.len(),
+            s,
             i: 0,
             e: s.len(),
             bs: 0,
             be: 0,
             os: 8,
             oe: 8,
-            t: (p.as_ptr().addr().wrapping_neg() & 7) as u8,
-            _p: PhantomData,
+            t: (s.as_ptr().addr().wrapping_neg() & 7) as u8,
         }
+    }
+}
+
+impl Debug for ArgIterInner<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("ArgIterInner")
+            .field("i", &self.i)
+            .field("e", &self.e)
+            .field("bs", &self.bs)
+            .field("be", &self.be)
+            .field("os", &self.os)
+            .field("oe", &self.oe)
+            .field("t", &self.t)
+            .field("sp", &self.s.get(self.start_ix()..self.end_ix()))
+            .finish_non_exhaustive()
     }
 }
 
@@ -625,18 +633,19 @@ impl ArgIterInner<'_> {
     }
 
     fn forward(&mut self, ws: bool) {
+        let c = from_ref(self.s.as_bytes());
         let e = self.end_ix();
         while self.i < e {
             // SAFETY: It's more ergonomic to wrap the entire function in unsafe :D
             unsafe {
                 if self.i & 7 == self.t as usize {
                     // Main
-                    while self.i + 8 <= e {
+                    while self.i < e && self.i + 8 <= self.s.len() {
                         if self.os == 8 {
                             // Load batch
-                            debug_assert_eq!(self.p.as_ptr().add(self.i).addr() & 7, 0);
-                            let v = u64::from_le(*self.p.as_ptr().add(self.i).cast::<u64>());
-                            self.bs = Self::process_batch(v);
+                            let p = get_unchecked(c, self.i);
+                            debug_assert_eq!(p.addr() & 7, 0);
+                            self.bs = Self::process_batch(u64::from_le(*p.cast::<u64>()));
                             self.os = 0;
                         }
 
@@ -652,7 +661,7 @@ impl ArgIterInner<'_> {
                 debug_assert_eq!(self.os, 8);
                 // Head and tail
                 while self.i < e {
-                    if matches!(*self.p.as_ptr().add(self.i), b' ' | b'\t') ^ !ws {
+                    if matches!(*get_unchecked(c, self.i), b' ' | b'\t') ^ !ws {
                         return;
                     }
                     self.i += 1;
@@ -666,20 +675,19 @@ impl ArgIterInner<'_> {
     }
 
     fn backward(&mut self, ws: bool) {
+        let c = from_ref(self.s.as_bytes());
         let i = self.start_ix();
         while i < self.e {
             // SAFETY: It's more ergonomic to wrap the entire function in unsafe :D
             unsafe {
                 if self.e & 7 == self.t as usize {
                     // Main
-                    while let Some(e) = self.e.checked_sub(8)
-                        && i <= e
-                    {
+                    while i < self.e && self.e > 7 {
                         if self.oe == 8 {
                             // Load batch
-                            debug_assert_eq!(self.p.as_ptr().add(self.e - 8).addr() & 7, 0);
-                            let v = u64::from_be(*self.p.as_ptr().add(self.e - 8).cast::<u64>());
-                            self.be = Self::process_batch(v);
+                            let p = get_unchecked(c, self.e - 8);
+                            debug_assert_eq!(p.addr() & 7, 0);
+                            self.be = Self::process_batch(u64::from_be(*p.cast::<u64>()));
                             self.oe = 0;
                         }
 
@@ -695,7 +703,7 @@ impl ArgIterInner<'_> {
                 debug_assert_eq!(self.oe, 8);
                 // Head and tail
                 while i < self.e {
-                    if matches!(*self.p.as_ptr().add(self.e - 1), b' ' | b'\t') ^ !ws {
+                    if matches!(*get_unchecked(c, self.e - 1), b' ' | b'\t') ^ !ws {
                         return;
                     }
                     self.e -= 1;
@@ -738,20 +746,8 @@ impl<'a> Iterator for ArgIterInner<'a> {
             self.forward(false);
         }
 
-        #[cfg(debug_assertions)]
-        {
-            debug_assert!(s <= self.l, "{s} > {}", self.l);
-            debug_assert!(m <= self.l, "{m} > {}", self.l);
-        }
-
         // SAFETY: Indices are valid
-        unsafe {
-            let s = &*slice_from_raw_parts(self.p.as_ptr().add(s), m - s);
-            if cfg!(debug_assertions) {
-                str::from_utf8(s).unwrap();
-            }
-            Some(str::from_utf8_unchecked(s))
-        }
+        unsafe { Some(self.s.get_unchecked(s..m)) }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -782,20 +778,8 @@ impl<'a> DoubleEndedIterator for ArgIterInner<'a> {
             self.backward(false);
         }
 
-        #[cfg(debug_assertions)]
-        {
-            debug_assert!(s <= self.l, "{s} > {}", self.l);
-            debug_assert!(m <= self.l, "{m} > {}", self.l);
-        }
-
         // SAFETY: Indices are valid
-        unsafe {
-            let s = &*slice_from_raw_parts(self.p.as_ptr().add(m), e - m);
-            if cfg!(debug_assertions) {
-                str::from_utf8(s).unwrap();
-            }
-            Some(str::from_utf8_unchecked(s))
-        }
+        unsafe { Some(self.s.get_unchecked(m..e)) }
     }
 }
 
