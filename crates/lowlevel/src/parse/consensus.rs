@@ -856,7 +856,7 @@ impl<'a> RelayEntryParserInner<'a> {
         self.item = Some(loop {
             let item = self.inner.next().ok_or(CertFormatError)??;
 
-            match dbg!(item.keyword()) {
+            match item.keyword() {
                 // a can be any number
                 "a" => {
                     let a = item
