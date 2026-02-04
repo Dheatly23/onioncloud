@@ -65,16 +65,16 @@ fn get_fptr() -> NonNull<FPtrs> {
     } else {
         static FP: FPtrs = FPtrs {
             check_line: universal::check_line,
-            proto_keyword: |v| universal::proto_keyword(v),
-            next_non_ws: |v| universal::next_non_ws(v),
+            proto_keyword: universal::proto_keyword,
+            next_non_ws: universal::next_non_ws,
             check_argument: universal::check_argument,
             check_object_keyword: universal::check_object_keyword,
             check_object_content: universal::check_object_content,
-            new: |v| new(v),
-            fmt: |v, f| fmt(v, f),
-            next: |v| next(v),
-            size_hint: |v| size_hint(v),
-            next_back: |v| next_back(v),
+            new: new,
+            fmt: fmt,
+            next: next,
+            size_hint: size_hint,
+            next_back: next_back,
         };
         &FP
     });
