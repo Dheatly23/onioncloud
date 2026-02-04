@@ -1,4 +1,4 @@
-mod check;
+pub(super) mod check;
 
 use std::cell::Cell;
 use std::fmt::{Debug, Formatter, Result as FmtResult};

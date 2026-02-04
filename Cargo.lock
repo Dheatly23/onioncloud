@@ -884,6 +884,7 @@ dependencies = [
  "hyper",
  "loom",
  "memchr",
+ "num-traits",
  "once_cell",
  "parking_lot",
  "pin-project",

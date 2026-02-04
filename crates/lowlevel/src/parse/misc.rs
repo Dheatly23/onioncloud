@@ -10,7 +10,7 @@ use rsa::pkcs1::der::pem::BASE64_WRAP_WIDTH;
 use super::netdoc::{ArgumentsIter, Item};
 use super::{ExitPort, ExitPortPolicy};
 use crate::errors::{CertFormatError, CertVerifyError};
-use crate::util::parse::{parse_date, parse_time};
+use crate::util::parse::{MaybeRange, parse_date, parse_maybe_range, parse_time};
 
 pub(crate) enum Error {
     CertFormatError(CertFormatError),
@@ -115,36 +115,10 @@ pub(crate) fn args_exit_policy(
 }
 
 pub(crate) fn parse_exit_port(s: &str) -> Result<ExitPort, CertFormatError> {
-    let mut s = s.as_bytes();
-    let mut a = 0u16;
-    let mut i = 0;
-    loop {
-        a = match s.get(i) {
-            None if i != 0 => return Ok(ExitPort::Port(a)),
-            Some(b'-') => {
-                (s, i) = (&s[i + 1..], 0);
-                break;
-            }
-            Some(c @ b'0'..=b'9') if !(i != 0 && a == 0) => a
-                .checked_mul(10)
-                .and_then(|v| v.checked_add((c - b'0') as u16))
-                .ok_or(CertFormatError)?,
-            _ => return Err(CertFormatError),
-        };
-        i += 1;
-    }
-
-    let mut b = 0u16;
-    loop {
-        b = match s.get(i) {
-            None if i != 0 => return Ok(ExitPort::PortRange { from: a, to: b }),
-            Some(c @ b'0'..=b'9') if !(i != 0 && b == 0) => b
-                .checked_mul(10)
-                .and_then(|v| v.checked_add((c - b'0') as u16))
-                .ok_or(CertFormatError)?,
-            _ => return Err(CertFormatError),
-        };
-        i += 1;
+    match parse_maybe_range(s) {
+        None => Err(CertFormatError),
+        Some(MaybeRange::Num(v)) => Ok(ExitPort::Port(v)),
+        Some(MaybeRange::Range { from, to }) => Ok(ExitPort::PortRange { from, to }),
     }
 }
 

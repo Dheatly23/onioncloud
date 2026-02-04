@@ -150,3 +150,49 @@ impl NetdocParseError {
         }
     }
 }
+
+#[derive(Error)]
+pub(crate) enum ProtoParseErrorInner {
+    #[error("no equals found")]
+    NoEquals,
+    #[error("invalid keyword character")]
+    InvalidKeywordChar,
+    #[error("error parsing version range")]
+    VersionRange,
+    #[error("version range overlaps with previous version")]
+    VersionOverlap,
+}
+
+display2debug! {ProtoParseErrorInner}
+
+pub struct ProtoParseError {
+    pos: Option<usize>,
+    reason: ProtoParseErrorInner,
+}
+
+impl Error for ProtoParseError {}
+
+impl Display for ProtoParseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "error parsing subprotocol")?;
+        if let Some(pos) = &self.pos {
+            write!(f, " at {pos}")?;
+        }
+        write!(f, ": {}", &self.reason)
+    }
+}
+
+display2debug! {ProtoParseError}
+
+impl ProtoParseError {
+    pub(crate) fn with_pos(pos: usize, reason: ProtoParseErrorInner) -> Self {
+        Self {
+            pos: Some(pos),
+            reason,
+        }
+    }
+
+    pub(crate) fn new(reason: ProtoParseErrorInner) -> Self {
+        Self { pos: None, reason }
+    }
+}

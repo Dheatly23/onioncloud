@@ -1,3 +1,4 @@
+pub mod args;
 pub mod auth_cert;
 pub mod consensus;
 pub mod descriptor;
@@ -16,6 +17,8 @@ pub struct ExitPortPolicy {
     pub accept: bool,
 
     /// Ports list.
+    ///
+    /// Ports are sorted and ascending and non-overlapping, perfectly suited for [`ExitPort::in_ports`].
     pub ports: Vec<ExitPort>,
 }
 
@@ -41,15 +44,11 @@ impl ExitPortPolicy {
             {
                 return false;
             } else if i > 0 {
-                let r = match (self.ports[i - 1], *v) {
-                    (ExitPort::Port(a), ExitPort::Port(b)) => a != b,
-                    (ExitPort::PortRange { to, .. }, ExitPort::Port(v)) => v > to,
-                    (ExitPort::Port(v), ExitPort::PortRange { from, .. }) => v < from,
-                    (ExitPort::PortRange { to, .. }, ExitPort::PortRange { from, .. }) => {
-                        to < from && from - to > 1
-                    }
-                };
-                if !r {
+                let (
+                    ExitPort::Port(a) | ExitPort::PortRange { to: a, .. },
+                    ExitPort::Port(b) | ExitPort::PortRange { from: b, .. },
+                ) = (self.ports[i - 1], *v);
+                if b.saturating_sub(a) <= 1 {
                     return false;
                 }
             }

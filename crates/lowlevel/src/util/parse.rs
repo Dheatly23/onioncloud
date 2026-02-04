@@ -1,6 +1,9 @@
 //! String parsing utilities.
 
+use std::fmt::{Display, Formatter, Result as FmtResult};
+
 use chrono::{NaiveDate, NaiveTime};
+use num_traits::{CheckedAdd, CheckedMul, Zero};
 
 /// Parse fingerprint in form of 40-digit hexadecimal string.
 pub(crate) fn parse_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
@@ -79,6 +82,67 @@ pub(crate) fn parse_time(s: &str) -> Option<NaiveTime> {
     NaiveTime::from_hms_opt(hour.into(), minute.into(), second.into())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MaybeRange<T> {
+    Num(T),
+    Range { from: T, to: T },
+}
+
+impl<T> From<T> for MaybeRange<T> {
+    fn from(v: T) -> Self {
+        Self::Num(v)
+    }
+}
+
+impl<T: Display> Display for MaybeRange<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Num(v) => v.fmt(f),
+            Self::Range { from, to } => {
+                from.fmt(f)?;
+                write!(f, "-")?;
+                to.fmt(f)
+            }
+        }
+    }
+}
+
+pub(crate) fn parse_maybe_range<T>(s: &str) -> Option<MaybeRange<T>>
+where
+    T: From<u8> + Zero + CheckedAdd + CheckedMul,
+{
+    let m = T::from(10u8);
+    let mut s = s.as_bytes();
+    let mut a = T::zero();
+    let mut i = 0;
+    loop {
+        a = match s.get(i) {
+            None if i != 0 => return Some(MaybeRange::Num(a)),
+            Some(b'-') => {
+                (s, i) = (&s[i + 1..], 0);
+                break;
+            }
+            Some(c @ b'0'..=b'9') if !(i != 0 && a.is_zero()) => {
+                a.checked_mul(&m)?.checked_add(&(c - b'0').into())?
+            }
+            _ => return None,
+        };
+        i += 1;
+    }
+
+    let mut b = T::zero();
+    loop {
+        b = match s.get(i) {
+            None if i != 0 => return Some(MaybeRange::Range { from: a, to: b }),
+            Some(c @ b'0'..=b'9') if !(i != 0 && b.is_zero()) => {
+                b.checked_mul(&m)?.checked_add(&(c - b'0').into())?
+            }
+            _ => return None,
+        };
+        i += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +163,13 @@ mod tests {
     #[test]
     fn test_parse_time_empty_string_fail() {
         if let Some(v) = parse_time("") {
+            panic!("parser expected to fail, got {v}");
+        }
+    }
+
+    #[test]
+    fn test_parse_maybe_range_empty_string_fail() {
+        if let Some(v) = parse_maybe_range::<u64>("") {
             panic!("parser expected to fail, got {v}");
         }
     }
@@ -171,6 +242,16 @@ mod tests {
             if let Some(v) = v {
                 panic!("parser expected to fail, got {}", print_hex(&v));
             }
+        }
+
+        #[test]
+        fn test_parse_maybe_range(range in prop_oneof![
+            any::<u64>().prop_map(MaybeRange::Num),
+            any::<(u64, u64)>().prop_map(|(from, to)| MaybeRange::Range { from, to }),
+        ]) {
+            let s = format!("{range}");
+            let res = parse_maybe_range::<u64>(&s).unwrap();
+            assert_eq!(res, range);
         }
     }
 }
