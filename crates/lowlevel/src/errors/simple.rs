@@ -355,3 +355,15 @@ display2debug! {CellLengthOverflowError}
 pub struct TooManySignaturesError;
 
 display2debug! {TooManySignaturesError}
+
+/// Network parameter parsing error.
+#[derive(Error)]
+#[non_exhaustive]
+pub enum NetparamParseError {
+    #[error("no equals character found")]
+    NoEquals,
+    #[error("keyword is empty")]
+    NoKeyword,
+}
+
+display2debug! {NetparamParseError}

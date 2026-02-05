@@ -4,11 +4,11 @@ use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::iter::FusedIterator;
 
-use memchr::memchr_iter;
+use memchr::{memchr, memchr_iter};
 
 use super::netdoc::check::proto_keyword;
 use super::netdoc::{Arguments, ArgumentsIter};
-use crate::errors::{ProtoParseError, ProtoParseErrorInner};
+use crate::errors::{NetparamParseError, ProtoParseError, ProtoParseErrorInner};
 use crate::util::parse::{MaybeRange, parse_maybe_range};
 
 /// Subprotocol versions parser.
@@ -263,6 +263,144 @@ impl DoubleEndedIterator for ProtoParserIter<'_> {
 
 impl FusedIterator for ProtoParserIter<'_> {}
 
+/// Network/consensus parameter parser.
+///
+/// See also: [spec](https://spec.torproject.org/param-spec.html).
+#[derive(Debug, Clone)]
+pub struct NetparamParser<'a>(Arguments<'a>);
+
+/// Iterator of [`NetparamParser`].
+#[derive(Debug, Clone)]
+pub struct NetparamParserIter<'a>(Option<ArgumentsIter<'a>>);
+
+/// A single consensus parameter
+///
+/// The argument value is not parsed. It is the responsibility of user to parse it.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Netparam<'a> {
+    /// Parameter keyword.
+    pub keyword: &'a str,
+    /// Parameter argument.
+    pub argument: &'a str,
+}
+
+impl<'a> From<Arguments<'a>> for NetparamParser<'a> {
+    fn from(v: Arguments<'a>) -> Self {
+        Self(v)
+    }
+}
+
+impl<'a> From<NetparamParser<'a>> for Arguments<'a> {
+    fn from(v: NetparamParser<'a>) -> Self {
+        v.0
+    }
+}
+
+impl<'a> IntoIterator for NetparamParser<'a> {
+    type Item = <NetparamParserIter<'a> as Iterator>::Item;
+    type IntoIter = NetparamParserIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &NetparamParser<'a> {
+    type Item = <NetparamParserIter<'a> as Iterator>::Item;
+    type IntoIter = NetparamParserIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> NetparamParser<'a> {
+    /// Creates new [`NetparamParser`].
+    pub fn new(args: Arguments<'a>) -> Self {
+        Self(args)
+    }
+
+    /// Gets raw string.
+    #[inline(always)]
+    pub const fn raw_string(&self) -> &'a str {
+        self.0.raw_string()
+    }
+
+    /// Gets inner [`Arguments`].
+    #[inline(always)]
+    pub const fn into_inner(self) -> Arguments<'a> {
+        self.0
+    }
+
+    /// Iterates over consensus parameters.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use onioncloud_lowlevel::parse::args::{NetparamParser, VersionRange};
+    /// use onioncloud_lowlevel::parse::netdoc::Arguments;
+    ///
+    /// let args = Arguments::try_from("Param=123").unwrap();
+    /// let mut parser = NetparamParser::from(args).into_iter();
+    /// let param = parser.next().unwrap().unwrap();
+    /// assert_eq!(param.keyword, "Param");
+    /// assert_eq!(param.argument, "123");
+    /// ```
+    pub fn iter(&self) -> NetparamParserIter<'a> {
+        NetparamParserIter(Some(self.0.iter()))
+    }
+}
+
+impl NetparamParserIter<'_> {
+    fn parse(s: &str) -> Result<Netparam<'_>, NetparamParseError> {
+        let i = memchr(b'=', s.as_bytes()).ok_or_else(|| NetparamParseError::NoEquals)?;
+
+        if i == 0 {
+            return Err(NetparamParseError::NoKeyword);
+        }
+
+        // SAFETY: Index points to = character in string
+        unsafe {
+            Ok(Netparam {
+                keyword: s.get_unchecked(..i),
+                argument: s.get_unchecked(i + 1..),
+            })
+        }
+    }
+}
+
+impl<'a> Iterator for NetparamParserIter<'a> {
+    type Item = Result<Netparam<'a>, NetparamParseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let r = Self::parse(self.0.as_mut()?.next()?);
+        if r.is_err() {
+            self.0 = None;
+        }
+        Some(r)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match &self.0 {
+            None => (0, Some(0)),
+            Some(it) => it.size_hint(),
+        }
+    }
+}
+
+impl DoubleEndedIterator for NetparamParserIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let r = Self::parse(self.0.as_mut()?.next_back()?);
+        if r.is_err() {
+            self.0 = None;
+        }
+        Some(r)
+    }
+}
+
+impl FusedIterator for NetparamParserIter<'_> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,6 +465,35 @@ mod tests {
                 for ix in 0..256 {
                     assert_eq!(VersionRange::in_versions(&p.versions, ix as u32), a[ix / 8] & (1 << (ix % 8)) != 0, "error at item index {i} and index {ix}");
                 }
+            }
+
+            if let Some(i) = it.next() {
+                panic!("iteration should finish, got {i:?}");
+            }
+        }
+
+        #[test]
+        fn test_netparam_parse(v in vec(("[ \t]+", "[^ \t\0\n=]+", "[^ \t\0\n=]+"), 0..=32)) {
+            let mut s = String::new();
+            for (i, (sp, k, v)) in v.iter().enumerate() {
+                if i != 0 {
+                    s += sp;
+                }
+                s += k;
+                s += "=";
+                s += v;
+            }
+
+            let mut it = NetparamParser::new(Arguments::try_from(&*s).unwrap()).into_iter();
+            for (i, (_, k, v)) in v.into_iter().enumerate() {
+                let p = match it.next() {
+                    None => panic!("iteration should produce at least {i} items"),
+                    Some(Err(e)) => panic!("error at index {i}: {e:?}"),
+                    Some(Ok(v)) => v,
+                };
+
+                assert_eq!(p.keyword, k, "mismatch at index {i}");
+                assert_eq!(p.argument, v, "mismatch at index {i}");
             }
 
             if let Some(i) = it.next() {

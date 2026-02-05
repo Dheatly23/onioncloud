@@ -17,6 +17,7 @@ use sha1::Sha1;
 use sha2::Sha256;
 
 use super::ExitPortPolicy;
+use super::args::{NetparamParser, ProtoParser};
 use super::misc::{args_date_time, args_exit_policy, decode_b64, parse_b64, parse_b64u};
 use super::netdoc::{
     Arguments as NetdocArguments, Item as NetdocItem, NetdocParser, get_signature,
@@ -362,35 +363,35 @@ pub fn parse_consensus(
                 if rec_client_proto.is_some() {
                     return Err(CertFormatError.into());
                 }
-                rec_client_proto = Some(item.arguments());
+                rec_client_proto = Some(ProtoParser::from(item.arguments()));
             }
             // required-client-protocols is at most once
             "required-client-protocols" => {
                 if req_client_proto.is_some() {
                     return Err(CertFormatError.into());
                 }
-                req_client_proto = Some(item.arguments());
+                req_client_proto = Some(ProtoParser::from(item.arguments()));
             }
             // recommended-relay-protocols is at most once
             "recommended-relay-protocols" => {
                 if rec_relay_proto.is_some() {
                     return Err(CertFormatError.into());
                 }
-                rec_relay_proto = Some(item.arguments());
+                rec_relay_proto = Some(ProtoParser::from(item.arguments()));
             }
             // required-relay-protocols is at most once
             "required-relay-protocols" => {
                 if req_relay_proto.is_some() {
                     return Err(CertFormatError.into());
                 }
-                req_relay_proto = Some(item.arguments());
+                req_relay_proto = Some(ProtoParser::from(item.arguments()));
             }
             // params is at most once
             "params" => {
                 if params.is_some() {
                     return Err(CertFormatError.into());
                 }
-                params = Some(item.arguments());
+                params = Some(NetparamParser::from(item.arguments()));
             }
             // shared-rand-previous-value is at most once
             "shared-rand-previous-value" => {
@@ -497,15 +498,15 @@ pub struct PreambleData<'a> {
     /// Known flags.
     pub known_flags: NetdocArguments<'a>,
     /// Required client protocol versions.
-    pub req_client_proto: Option<NetdocArguments<'a>>,
+    pub req_client_proto: Option<ProtoParser<'a>>,
     /// Recommended client protocol versions.
-    pub rec_client_proto: Option<NetdocArguments<'a>>,
+    pub rec_client_proto: Option<ProtoParser<'a>>,
     /// Required relay protocol versions.
-    pub req_relay_proto: Option<NetdocArguments<'a>>,
+    pub req_relay_proto: Option<ProtoParser<'a>>,
     /// Recommended relay protocol versions.
-    pub rec_relay_proto: Option<NetdocArguments<'a>>,
+    pub rec_relay_proto: Option<ProtoParser<'a>>,
     /// Consensus parameters.
-    pub params: Option<NetdocArguments<'a>>,
+    pub params: Option<NetparamParser<'a>>,
     /// Current shared random value.
     pub srv_cur: Option<Srv>,
     /// Previous shared random value.
@@ -795,7 +796,7 @@ struct RelayEntryInner<'a> {
     pub addr: Option<SocketAddrV6>,
     pub status: Option<NetdocArguments<'a>>,
     pub version: Option<&'a str>,
-    pub protocols: Option<NetdocArguments<'a>>,
+    pub protocols: Option<ProtoParser<'a>>,
     pub bandwidth: Option<BandwidthEstimate>,
     pub exit_ports: Option<ExitPortPolicy>,
     pub microdesc: Option<Sha256Output>,
@@ -890,7 +891,7 @@ impl<'a> RelayEntryParserInner<'a> {
                     if protocols.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    protocols = Some(item.arguments());
+                    protocols = Some(ProtoParser::from(item.arguments()));
                 }
                 // w is at most once
                 "w" => {
@@ -1042,7 +1043,7 @@ pub struct ConsensusRelayEntry<'a> {
     pub addr: Option<SocketAddrV6>,
     pub status: NetdocArguments<'a>,
     pub version: Option<&'a str>,
-    pub protocols: NetdocArguments<'a>,
+    pub protocols: ProtoParser<'a>,
     pub bandwidth: Option<BandwidthEstimate>,
     pub exit_ports: Option<ExitPortPolicy>,
 }
@@ -1131,7 +1132,7 @@ pub struct MicrodescRelayEntry<'a> {
     pub addr: Option<SocketAddrV6>,
     pub status: NetdocArguments<'a>,
     pub version: Option<&'a str>,
-    pub protocols: NetdocArguments<'a>,
+    pub protocols: ProtoParser<'a>,
     pub bandwidth: Option<BandwidthEstimate>,
     pub microdesc: Sha256Output,
 }
@@ -1256,6 +1257,8 @@ mod tests {
 
     use std::net::Ipv6Addr;
     use std::time::Duration;
+
+    use crate::parse::args::VersionRange;
 
     #[test]
     fn test_extract_signature_example() {
@@ -1517,82 +1520,135 @@ bandwidth-weights Wbd=1113 Wbe=0 Wbg=4125 Wbm=10000 Wdb=10000 Web=10000 Wed=7774
                 "Valid",
             ]
         );
-        assert_eq!(
-            preamble
-                .rec_client_proto
-                .as_ref()
-                .unwrap()
+
+        #[track_caller]
+        fn get_proto_parse<'a>(parser: &ProtoParser<'a>) -> Vec<(&'a str, Vec<VersionRange>)> {
+            parser
                 .iter()
-                .collect::<Vec<_>>(),
+                .enumerate()
+                .map(|(i, v)| match v {
+                    Ok(v) => (v.keyword, v.versions),
+                    Err(e) => panic!("error at index {i}: {e:?}"),
+                })
+                .collect()
+        }
+
+        assert_eq!(
+            get_proto_parse(preamble.rec_client_proto.as_ref().unwrap()),
             [
-                "Cons=2",
-                "Desc=2",
-                "DirCache=2",
-                "FlowCtrl=1-2",
-                "HSDir=2",
-                "HSIntro=4",
-                "HSRend=2",
-                "Link=4-5",
-                "Microdesc=2",
-                "Relay=2-4",
+                ("Cons", vec![VersionRange::Version(2)]),
+                ("Desc", vec![VersionRange::Version(2)]),
+                ("DirCache", vec![VersionRange::Version(2)]),
+                ("FlowCtrl", vec![VersionRange::Range { from: 1, to: 2 }]),
+                ("HSDir", vec![VersionRange::Version(2)]),
+                ("HSIntro", vec![VersionRange::Version(4)]),
+                ("HSRend", vec![VersionRange::Version(2)]),
+                ("Link", vec![VersionRange::Range { from: 4, to: 5 }]),
+                ("Microdesc", vec![VersionRange::Version(2)]),
+                ("Relay", vec![VersionRange::Range { from: 2, to: 4 }]),
+            ]
+        );
+        assert_eq!(
+            get_proto_parse(preamble.rec_relay_proto.as_ref().unwrap()),
+            [
+                ("Cons", vec![VersionRange::Version(2)]),
+                ("Desc", vec![VersionRange::Version(2)]),
+                ("DirCache", vec![VersionRange::Version(2)]),
+                ("FlowCtrl", vec![VersionRange::Range { from: 1, to: 2 }]),
+                ("HSDir", vec![VersionRange::Version(2)]),
+                ("HSIntro", vec![VersionRange::Range { from: 4, to: 5 }]),
+                ("HSRend", vec![VersionRange::Version(2)]),
+                ("Link", vec![VersionRange::Range { from: 4, to: 5 }]),
+                ("LinkAuth", vec![VersionRange::Version(3)]),
+                ("Microdesc", vec![VersionRange::Version(2)]),
+                ("Relay", vec![VersionRange::Range { from: 2, to: 4 }]),
+            ]
+        );
+        assert_eq!(
+            get_proto_parse(preamble.req_client_proto.as_ref().unwrap()),
+            [
+                ("Cons", vec![VersionRange::Version(2)]),
+                ("Desc", vec![VersionRange::Version(2)]),
+                ("FlowCtrl", vec![VersionRange::Version(1)]),
+                ("Link", vec![VersionRange::Version(4)]),
+                ("Microdesc", vec![VersionRange::Version(2)]),
+                ("Relay", vec![VersionRange::Version(2)]),
+            ]
+        );
+        assert_eq!(
+            get_proto_parse(preamble.req_relay_proto.as_ref().unwrap()),
+            [
+                ("Cons", vec![VersionRange::Version(2)]),
+                ("Desc", vec![VersionRange::Version(2)]),
+                ("DirCache", vec![VersionRange::Version(2)]),
+                ("FlowCtrl", vec![VersionRange::Range { from: 1, to: 2 }]),
+                ("HSDir", vec![VersionRange::Version(2)]),
+                ("HSIntro", vec![VersionRange::Range { from: 4, to: 5 }]),
+                ("HSRend", vec![VersionRange::Version(2)]),
+                ("Link", vec![VersionRange::Range { from: 4, to: 5 }]),
+                ("LinkAuth", vec![VersionRange::Version(3)]),
+                ("Microdesc", vec![VersionRange::Version(2)]),
+                ("Relay", vec![VersionRange::Range { from: 2, to: 4 }]),
             ]
         );
         assert_eq!(
             preamble
-                .rec_relay_proto
+                .params
                 .as_ref()
                 .unwrap()
                 .iter()
+                .enumerate()
+                .map(|(i, v)| match v {
+                    Ok(v) => (v.keyword, v.argument),
+                    Err(e) => panic!("error at index {i}: {e:?}"),
+                })
                 .collect::<Vec<_>>(),
             [
-                "Cons=2",
-                "Desc=2",
-                "DirCache=2",
-                "FlowCtrl=1-2",
-                "HSDir=2",
-                "HSIntro=4-5",
-                "HSRend=2",
-                "Link=4-5",
-                "LinkAuth=3",
-                "Microdesc=2",
-                "Relay=2-4",
-            ]
-        );
-        assert_eq!(
-            preamble
-                .req_client_proto
-                .as_ref()
-                .unwrap()
-                .iter()
-                .collect::<Vec<_>>(),
-            [
-                "Cons=2",
-                "Desc=2",
-                "FlowCtrl=1",
-                "Link=4",
-                "Microdesc=2",
-                "Relay=2",
-            ]
-        );
-        assert_eq!(
-            preamble
-                .req_relay_proto
-                .as_ref()
-                .unwrap()
-                .iter()
-                .collect::<Vec<_>>(),
-            [
-                "Cons=2",
-                "Desc=2",
-                "DirCache=2",
-                "FlowCtrl=1-2",
-                "HSDir=2",
-                "HSIntro=4-5",
-                "HSRend=2",
-                "Link=4-5",
-                "LinkAuth=3",
-                "Microdesc=2",
-                "Relay=2-4",
+                ("AuthDirMaxServersPerAddr", "8"),
+                ("CircuitPriorityHalflifeMsec", "30000"),
+                ("DoSCircuitCreationBurst", "60"),
+                ("DoSCircuitCreationEnabled", "1"),
+                ("DoSCircuitCreationMinConnections", "2"),
+                ("DoSCircuitCreationRate", "2"),
+                ("DoSConnectionEnabled", "1"),
+                ("DoSConnectionMaxConcurrentCount", "50"),
+                ("DoSRefuseSingleHopClientRendezvous", "1"),
+                ("ExtendByEd25519ID", "1"),
+                ("KISTSchedRunInterval", "3"),
+                ("NumNTorsPerTAP", "100"),
+                ("UseOptimisticData", "1"),
+                ("bwauthpid", "1"),
+                ("bwscanner_cc", "1"),
+                ("cbttestfreq", "10"),
+                ("cc_alg", "2"),
+                ("cc_cwnd_full_gap", "4"),
+                ("cc_cwnd_full_minpct", "25"),
+                ("cc_cwnd_inc", "1"),
+                ("cc_cwnd_inc_rate", "31"),
+                ("cc_cwnd_min", "124"),
+                ("cc_sscap_exit", "600"),
+                ("cc_sscap_onion", "475"),
+                ("cc_sscap_sbws", "600"),
+                ("cc_vegas_alpha_exit", "186"),
+                ("cc_vegas_alpha_sbws", "186"),
+                ("cc_vegas_beta_onion", "372"),
+                ("cc_vegas_beta_sbws", "248"),
+                ("cc_vegas_delta_exit", "310"),
+                ("cc_vegas_delta_onion", "434"),
+                ("cc_vegas_delta_sbws", "310"),
+                ("cc_vegas_gamma_onion", "248"),
+                ("cc_vegas_gamma_sbws", "186"),
+                ("cfx_low_exit_threshold", "5000"),
+                ("circ_max_cell_queue_size", "1250"),
+                ("circ_max_cell_queue_size_out", "1000"),
+                ("dos_num_circ_max_outq", "5"),
+                ("guard-n-primary-dir-guards-to-use", "2"),
+                ("guard-n-primary-guards-to-use", "2"),
+                ("hs_service_max_rdv_failures", "1"),
+                ("hsdir_spread_store", "4"),
+                ("overload_onionskin_ntor_period_secs", "10800"),
+                ("overload_onionskin_ntor_scale_percent", "500"),
+                ("sendme_accept_min_version", "1"),
             ]
         );
         let srv = preamble.srv_prev.as_ref().unwrap();
@@ -1780,6 +1836,10 @@ bandwidth-weights Wbd=1113 Wbe=0 Wbg=4125 Wbm=10000 Wdb=10000 Web=10000 Wed=7774
                 r.7.split(' ').collect::<Vec<_>>(),
                 "failed at index {i}"
             );
+            assert_eq!(v.version, Some(r.8), "failed at index {i}");
+            assert_eq!(v.protocols.raw_string(), r.9, "failed at index {i}");
+            assert_eq!(v.bandwidth, r.10, "failed at index {i}");
+            assert_eq!(v.microdesc, *r.11, "failed at index {i}");
         }
 
         let footer = parser.to_footer().unwrap();
