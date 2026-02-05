@@ -328,6 +328,10 @@ mod tests {
                     assert_eq!(VersionRange::in_versions(&p.versions, ix as u32), a[ix / 8] & (1 << (ix % 8)) != 0, "error at item index {i} and index {ix}");
                 }
             }
+
+            if let Some(i) = it.next() {
+                panic!("iteration should finish, got {i:?}");
+            }
         }
     }
 }
