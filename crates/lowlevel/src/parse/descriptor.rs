@@ -21,6 +21,7 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use zerocopy::{Immutable, IntoBytes};
 
+use super::args::ProtoParser;
 use super::misc::{
     args_date_time, args_exit_policy, decode_b64, parse_b64, parse_b64u, parse_cert,
     parse_exit_port,
@@ -482,7 +483,7 @@ impl<'a> DescriptorParser<'a> {
                     if proto.is_some() {
                         return Err(CertFormatError.into());
                     }
-                    proto = Some(item.arguments());
+                    proto = Some(ProtoParser::from(item.arguments()));
                 }
                 // router-sig-ed25519 is at exactly once at the end
                 "router-sig-ed25519" => break item,
@@ -741,7 +742,7 @@ pub struct Descriptor<'a> {
     /// `true` if relay supports tunnelling directory circuit.
     pub tunnelled_dir_server: bool,
     /// Subprotocol that this relay supports.
-    pub proto: NetdocArguments<'a>,
+    pub proto: ProtoParser<'a>,
 }
 
 impl<'a> Descriptor<'a> {
