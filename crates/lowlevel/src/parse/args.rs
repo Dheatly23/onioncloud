@@ -207,25 +207,15 @@ impl<'a> ProtoParserIter<'a> {
                     ));
                 }
             };
-            versions.push(v);
-        }
-
-        versions.sort_unstable_by(|a, b| {
-            let (
-                VersionRange::Version(a) | VersionRange::Range { from: a, .. },
+            if let (
+                Some(VersionRange::Version(a) | VersionRange::Range { to: a, .. }),
                 VersionRange::Version(b) | VersionRange::Range { from: b, .. },
-            ) = (a, b);
-            a.cmp(b)
-        });
-
-        for a in versions.windows(2) {
-            let (
-                VersionRange::Version(a) | VersionRange::Range { to: a, .. },
-                VersionRange::Version(b) | VersionRange::Range { from: b, .. },
-            ) = (a[0], a[1]);
-            if b.saturating_sub(a) <= 1 {
+            ) = (versions.last(), v)
+                && b.saturating_sub(*a) <= 1
+            {
                 return Err(ProtoParseError::new(ProtoParseErrorInner::VersionOverlap));
             }
+            versions.push(v);
         }
 
         Ok(Proto { keyword, versions })
@@ -354,7 +344,7 @@ impl<'a> NetparamParser<'a> {
 
 impl NetparamParserIter<'_> {
     fn parse(s: &str) -> Result<Netparam<'_>, NetparamParseError> {
-        let i = memchr(b'=', s.as_bytes()).ok_or_else(|| NetparamParseError::NoEquals)?;
+        let i = memchr(b'=', s.as_bytes()).ok_or(NetparamParseError::NoEquals)?;
 
         if i == 0 {
             return Err(NetparamParseError::NoKeyword);

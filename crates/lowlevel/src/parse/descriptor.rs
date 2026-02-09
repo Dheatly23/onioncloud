@@ -989,14 +989,23 @@ mod tests {
 
     use std::cmp::PartialEq;
     use std::fmt::Write as _;
-    use std::time::Duration;
+    use std::mem::size_of;
 
+    use base64ct::{Base64, Base64Unpadded, Encoder, Encoding, LineEnding};
+    use ed25519_dalek::{Signer, SigningKey};
+    use proptest::collection::vec;
     use proptest::option::of;
     use proptest::prelude::*;
     use proptest::strategy::LazyJust;
-    use rsa::pkcs1::DecodeRsaPublicKey;
+    use rsa::pkcs1::EncodeRsaPublicKey;
 
-    use crate::parse::strat_exit_port;
+    use crate::crypto::cert::{EdCertExtHeader, EdCertHeader};
+    use crate::crypto::edwards_to_montgomery;
+    use crate::parse::args::VersionRange;
+    use crate::parse::{map_exit_ports, strat_exit_port};
+    use crate::util::{
+        print_hex, socket_strat, test_ed_pk, test_rsa_pk, time_strat, write_datetime,
+    };
 
     #[derive(Debug)]
     enum IpAddrRef {
@@ -1044,164 +1053,458 @@ mod tests {
         ]
     }
 
+    fn exit_policy_strat() -> impl Strategy<Value = ExitPolicy> {
+        (
+            any::<bool>(),
+            prop_oneof![
+                LazyJust::new(|| Addr::Any),
+                any::<(Ipv4Addr, Ipv4Addr)>().prop_map(|(ip, mask)| Addr::Ipv4 { ip, mask }),
+                (any::<Ipv6Addr>(), 0..=128u8).prop_map(|(ip, bits)| Addr::Ipv6 { ip, bits }),
+            ],
+            of(strat_exit_port()),
+        )
+            .prop_map(|(accept, addr, exit_port)| ExitPolicy {
+                accept,
+                addr,
+                exit_port,
+            })
+    }
+
+    fn encode_b64(name: &str, sig: impl AsRef<[u8]>) -> String {
+        let mut buf = [0; 1024];
+        let mut enc = Encoder::<Base64>::new_wrapped(&mut buf, 64, LineEnding::LF).unwrap();
+        enc.encode(sig.as_ref()).unwrap();
+        drop(sig);
+        let s = enc.finish().unwrap();
+        format!("-----BEGIN {name}-----\n{s}\n-----END {name}-----\n")
+    }
+
     #[test]
-    fn test_descriptor_example() {
-        let s = r"router Tochar 113.20.28.243 9001 0 0
-identity-ed25519
------BEGIN ED25519 CERT-----
-AQQAB4EOAR67ew8uQtD4vc7tF+z+7JLaWMy2PKMobTB05xfJJwlLAQAgBADby+D5
-KoSeaI1r2GZiddlMFyJCNXU5IQrIzqzldgq2nXMeSBRXLBFy0Z+/JEWxCnUIrSX2
-ZO5S3CZdTCxU+CB3zZ1nGLfJxAEqHBDl9hhZmXvB4sdt/E8EPQin+R3tNQg=
------END ED25519 CERT-----
-master-key-ed25519 28vg+SqEnmiNa9hmYnXZTBciQjV1OSEKyM6s5XYKtp0
-platform Tor 0.4.8.21 on Linux
-proto Conflux=1 Cons=1-2 Desc=1-2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=1-2 Link=1-5 LinkAuth=1,3 Microdesc=1-2 Padding=2 Relay=1-4
-published 2026-01-24 14:35:17
-fingerprint 0F3D 8493 DD75 CB13 E535 9A46 2805 6248 4580 BA73
-uptime 2307611
-bandwidth 1073741824 1073741824 1042931
-extra-info-digest E55427F2C9748408DAE2CEA846BEFB52123C7EEA iS1LGFUT5dc5S98wqJtIdEtO/fthYkIKZ9nO3biYz98
-onion-key
------BEGIN RSA PUBLIC KEY-----
-MIGJAoGBAKQcHTteDAa+3Q8i/G6YoGg8zBL1W+7S80itljYbwXDJGEkiHd2iL5yV
-Q999GaYalHJnDIcs6uBkYsTsptIFcd+kCErh32ZUAb2KUWY6673ojspTvNlGsrtm
-BsJ2aWqWNWgd+DsPH4yAv3O8VfA0CVGANDmrKLsEW9Z9WDpcxwPXAgMBAAE=
------END RSA PUBLIC KEY-----
-signing-key
------BEGIN RSA PUBLIC KEY-----
-MIGJAoGBAMDJc1I9JY2CddkOQ7p1fo/r+4eghk1xFREuQtTE/WLbmJchkF99DUVD
-vL6PXMlvp0eJyh2vGMNrBY1kvNrhqRzKiF/wbd3xz5/eDVI4f3zIuGm/jtiVbZP+
-THJuycSghEH4TFsDStQMsH4IcGAUUvByi9lh7YwqM7HMzHMiG9bRAgMBAAE=
------END RSA PUBLIC KEY-----
-onion-key-crosscert
------BEGIN CROSSCERT-----
-mPIiNb4tisWuqugFjYqYAe9wvKMADhgR+59OUr8XeLewuYdv6re6veG31GhHxS8s
-j4SG9Iu0Ed6qlotrQpQ7Wsr5G+7YFBg+eVA3mLPflncuTgPN1Pm50c6kXKzHbkO4
-ZywIY1wyFf47tdcsznxnArOqyvZ6ePcmFn6uGVfNPac=
------END CROSSCERT-----
-ntor-onion-key-crosscert 1
------BEGIN ED25519 CERT-----
-AQoAB4JnAdvL4PkqhJ5ojWvYZmJ12UwXIkI1dTkhCsjOrOV2CradAESNXdPeQDEm
-EmlEGcNi0h8ngWPD0q96AqMKNaEKSXmUaMZqObAHcxC47fgxNXCxoJ78dhndKc8P
-6b+E/c8RNgg=
------END ED25519 CERT-----
-hidden-service-dir
-ntor-onion-key gKrGzUXdFOuU5zXxpANsVAOwkF+WzmGZ2+VPYsrJ5AM
-reject *:*
-tunnelled-dir-server
-router-sig-ed25519 T7QLZ2Hs3s9gQgk+T48IKuvlgwoW71aD7/7J5AuWn3hZyavQgH+5G5SG7xNd4cIfbwAsM5ettTNkd4pku3DeDQ
-router-signature
------BEGIN SIGNATURE-----
-dxWusV2eKT6Gd2shfDQSD5csMH95Nz6TpeQTTjhMX0QyrfsrLzZ2wFLY/fSFga8X
-gw+EwoJxXbV7Suv7/07sAOoI3uo22f7YoOl2YUWEsmCQYjCVS3BNdcvbvkg/QnZz
-fx8lPGcchMA7BdeI6q8jEx8W2Q+7ydRqTnMaFsT2kAw=
------END SIGNATURE-----
-";
-        let signing_key = RsaPublicKey::from_pkcs1_pem(
-            r"-----BEGIN RSA PUBLIC KEY-----
-MIGJAoGBAMDJc1I9JY2CddkOQ7p1fo/r+4eghk1xFREuQtTE/WLbmJchkF99DUVD
-vL6PXMlvp0eJyh2vGMNrBY1kvNrhqRzKiF/wbd3xz5/eDVI4f3zIuGm/jtiVbZP+
-THJuycSghEH4TFsDStQMsH4IcGAUUvByi9lh7YwqM7HMzHMiG9bRAgMBAAE=
------END RSA PUBLIC KEY-----",
-        )
-        .unwrap();
-        let onion_key = RsaPublicKey::from_pkcs1_pem(
-            r"-----BEGIN RSA PUBLIC KEY-----
-MIGJAoGBAKQcHTteDAa+3Q8i/G6YoGg8zBL1W+7S80itljYbwXDJGEkiHd2iL5yV
-Q999GaYalHJnDIcs6uBkYsTsptIFcd+kCErh32ZUAb2KUWY6673ojspTvNlGsrtm
-BsJ2aWqWNWgd+DsPH4yAv3O8VfA0CVGANDmrKLsEW9Z9WDpcxwPXAgMBAAE=
------END RSA PUBLIC KEY-----",
-        )
-        .unwrap();
+    fn test_parse_descriptor() {
+        let rsa_sk = test_rsa_pk();
+        let rsa_pk = rsa_sk.to_public_key();
+        let ed_sk = SigningKey::from_bytes(&test_ed_pk());
+        let ed_pk = ed_sk.verifying_key();
 
-        let mut parser = DescriptorParser::new(s);
-        let desc = parser.next().unwrap().unwrap();
+        let doc = rsa_pk.to_pkcs1_der().unwrap();
+        let rsa_key = doc.to_pem("RSA PUBLIC KEY", LineEnding::LF).unwrap();
+        let fingerprint = RelayId::from(Sha1::new_with_prefix(doc.into_vec()).finalize());
 
-        assert_eq!(desc.nickname, "Tochar");
-        assert_eq!(desc.address, Ipv4Addr::new(113, 20, 28, 243));
-        assert_eq!(desc.orport, 9001);
-        assert_eq!(desc.dirport, 0);
-        assert_eq!(
-            desc.ed_id_pk.as_bytes(),
-            &[
-                0xdb, 0xcb, 0xe0, 0xf9, 0x2a, 0x84, 0x9e, 0x68, 0x8d, 0x6b, 0xd8, 0x66, 0x62, 0x75,
-                0xd9, 0x4c, 0x17, 0x22, 0x42, 0x35, 0x75, 0x39, 0x21, 0x0a, 0xc8, 0xce, 0xac, 0xe5,
-                0x76, 0x0a, 0xb6, 0x9d,
-            ]
-        );
-        assert_eq!(
-            desc.ed_sign_pk.as_bytes(),
-            &[
-                0x1e, 0xbb, 0x7b, 0x0f, 0x2e, 0x42, 0xd0, 0xf8, 0xbd, 0xce, 0xed, 0x17, 0xec, 0xfe,
-                0xec, 0x92, 0xda, 0x58, 0xcc, 0xb6, 0x3c, 0xa3, 0x28, 0x6d, 0x30, 0x74, 0xe7, 0x17,
-                0xc9, 0x27, 0x09, 0x4b,
-            ]
-        );
-        assert_eq!(desc.bandwidth.average, 1073741824);
-        assert_eq!(desc.bandwidth.burst, 1073741824);
-        assert_eq!(desc.bandwidth.observed, 1042931);
-        assert_eq!(desc.platform, Some("Tor 0.4.8.21 on Linux"));
-        assert_eq!(
-            desc.published,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(1769265317)
-        );
-        assert_eq!(
-            desc.fingerprint,
-            [
-                0x0f, 0x3d, 0x84, 0x93, 0xdd, 0x75, 0xcb, 0x13, 0xe5, 0x35, 0x9a, 0x46, 0x28, 0x05,
-                0x62, 0x48, 0x45, 0x80, 0xba, 0x73,
-            ]
-        );
-        assert_eq!(desc.hibernating, false);
-        assert_eq!(desc.uptime, Some(2307611));
-        assert_eq!(desc.onion_key.as_ref(), Some(&onion_key));
-        assert_eq!(
-            desc.ntor_onion_key,
-            [
-                0x80, 0xaa, 0xc6, 0xcd, 0x45, 0xdd, 0x14, 0xeb, 0x94, 0xe7, 0x35, 0xf1, 0xa4, 0x03,
-                0x6c, 0x54, 0x03, 0xb0, 0x90, 0x5f, 0x96, 0xce, 0x61, 0x99, 0xdb, 0xe5, 0x4f, 0x62,
-                0xca, 0xc9, 0xe4, 0x03,
-            ]
-        );
-        assert_eq!(desc.signing_key, signing_key);
-        assert_eq!(
-            desc.exit_policy,
-            [ExitPolicy {
-                accept: false,
-                addr: Addr::Any,
-                exit_port: None
-            }]
-        );
-        assert_eq!(desc.ipv6_policy, None);
-        assert_eq!(desc.bridge_distribution_request, None);
-        assert!(desc.family.is_none());
-        assert_eq!(desc.family_cert.len(), 0);
-        assert_eq!(desc.eventdns, true);
-        assert_eq!(desc.caches_extra_info, false);
-        assert_eq!(
-            desc.extra_info_digest.as_ref().map(|v| &v.sha1),
-            Some(&[
-                0xe5, 0x54, 0x27, 0xf2, 0xc9, 0x74, 0x84, 0x08, 0xda, 0xe2, 0xce, 0xa8, 0x46, 0xbe,
-                0xfb, 0x52, 0x12, 0x3c, 0x7e, 0xea,
-            ])
-        );
-        assert_eq!(
-            desc.extra_info_digest
-                .as_ref()
-                .and_then(|v| v.sha256.as_ref()),
-            Some(&[
-                0x89, 0x2d, 0x4b, 0x18, 0x55, 0x13, 0xe5, 0xd7, 0x39, 0x4b, 0xdf, 0x30, 0xa8, 0x9b,
-                0x48, 0x74, 0x4b, 0x4e, 0xfd, 0xfb, 0x61, 0x62, 0x42, 0x0a, 0x67, 0xd9, 0xce, 0xdd,
-                0xb8, 0x98, 0xcf, 0xdf,
-            ])
-        );
-        assert_eq!(desc.hidden_service_dir, true);
-        assert_eq!(desc.allow_single_hop_exits, false);
-        assert_eq!(desc.or_address, None);
-        assert_eq!(desc.tunnelled_dir_server, true);
+        let tap_crosscert = {
+            let mut v = Vec::with_capacity(size_of::<RelayId>() + size_of::<EdPublicKey>());
+            v.extend_from_slice(&fingerprint);
+            v.extend_from_slice(ed_pk.as_bytes());
+            let sig = rsa_sk.sign(Pkcs1v15Sign::new_unprefixed(), &v).unwrap();
+            drop(v);
+            encode_b64("CROSSCERT", sig)
+        };
+        let id_cert = {
+            let cert = EdCertHeader {
+                cert_ty: 4,
+                key_ty: 1,
+                key: ed_pk.to_bytes(),
+                expiry: u32::MAX.into(),
+                n_ext: 1,
+            };
+            let ext = EdCertExtHeader {
+                len: 32u16.into(),
+                ty: 4,
+                flags: 1,
+            };
 
-        if let Some(desc) = parser.next() {
-            panic!("expected parser to end, got {desc:?}");
+            let mut v = Vec::with_capacity(
+                1 + cert.as_bytes().len() + ext.as_bytes().len() + ed_pk.as_bytes().len() + 64,
+            );
+            v.push(1);
+            v.extend_from_slice(cert.as_bytes());
+            v.extend_from_slice(ext.as_bytes());
+            v.extend_from_slice(ed_pk.as_bytes());
+
+            let sig = ed_sk.sign(&v).to_bytes();
+            v.extend(sig);
+            encode_b64("ED25519 CERT", v)
+        };
+        let (ntor_pk, ntor_crosscert, ntor_crosscert_sign) = {
+            let (mp, sign) = edwards_to_montgomery(ed_pk.to_edwards());
+
+            let cert = EdCertHeader {
+                cert_ty: 0xa,
+                key_ty: 1,
+                key: ed_pk.to_bytes(),
+                expiry: u32::MAX.into(),
+                n_ext: 0,
+            };
+            let mut v = Vec::with_capacity(1 + cert.as_bytes().len() + 64);
+            v.push(1);
+            v.extend_from_slice(cert.as_bytes());
+
+            let sig = ed_sk.sign(&v).to_bytes();
+            v.extend(sig);
+            (mp.to_bytes(), encode_b64("ED25519 CERT", v), sign)
+        };
+
+        let f = move |descs: Vec<(
+            (String, (Ipv4Addr, u16, u16)),
+            (u64, u64, u64),
+            Vec<SocketAddr>,
+            Option<String>,
+            SystemTime,
+            Option<u64>,
+            (Vec<ExitPolicy>, bool, Option<ExitPortPolicy>),
+            Option<SystemTime>,
+            Option<String>,
+            Option<ExtraInfoDigest>,
+            (bool, bool, bool, bool, bool),
+            Vec<(String, VersionRange)>,
+        )>| {
+            let mut s = String::new();
+
+            for (
+                (nickname, (address, orport, dirport)),
+                (bw_average, bw_burst, bw_observed),
+                or_address,
+                platform,
+                published,
+                uptime,
+                (exit_policy, blanket_accept, ipv6_policy),
+                overload_general,
+                contact,
+                extra_info_digest,
+                (
+                    has_fingerprint,
+                    hibernating,
+                    caches_extra_info,
+                    hidden_service_dir,
+                    tunnelled_dir_server,
+                ),
+                proto,
+            ) in &descs
+            {
+                let si = s.len();
+
+                writeln!(s, "router {nickname} {address} {orport} 0 {dirport}").unwrap();
+                s += "identity-ed25519\n";
+                s += &id_cert;
+                writeln!(
+                    s,
+                    "master-key-ed25519 {}",
+                    Base64Unpadded::encode_string(ed_pk.as_bytes())
+                )
+                .unwrap();
+                writeln!(s, "bandwidth {bw_average} {bw_burst} {bw_observed}").unwrap();
+                if let Some(platform) = platform {
+                    writeln!(s, "platform {platform}").unwrap();
+                }
+                s += "published ";
+                write_datetime(&mut s, (*published).into());
+                s += "\n";
+                if *has_fingerprint {
+                    s += "fingerprint";
+                    for v in fingerprint.chunks_exact(2) {
+                        write!(s, " {}", print_hex(v)).unwrap();
+                    }
+                    s += "\n";
+                }
+                if *hibernating {
+                    s += "hibernating 1\n";
+                }
+                if let Some(uptime) = uptime {
+                    writeln!(s, "uptime {uptime}").unwrap();
+                }
+                s += "onion-key\n";
+                s += &rsa_key;
+                s += "onion-key-crosscert\n";
+                s += &tap_crosscert;
+                writeln!(
+                    s,
+                    "ntor-onion-key {}",
+                    Base64Unpadded::encode_string(&ntor_pk)
+                )
+                .unwrap();
+                writeln!(
+                    s,
+                    "ntor-onion-key-crosscert {}",
+                    if ntor_crosscert_sign { 1 } else { 0 }
+                )
+                .unwrap();
+                s += &ntor_crosscert;
+                s += "signing-key\n";
+                s += &rsa_key;
+                for p in exit_policy {
+                    s += if p.accept { "accept " } else { "reject " };
+                    match p.addr {
+                        Addr::Any => s += "*:",
+                        Addr::Ipv4 { ip, mask } => write!(s, "{ip}/{mask}:").unwrap(),
+                        Addr::Ipv6 { ip, bits } => write!(s, "[{ip}]/{bits}:").unwrap(),
+                    }
+                    match p.exit_port {
+                        None => s += "*\n",
+                        Some(v) => writeln!(s, "{v}").unwrap(),
+                    }
+                }
+                s += if *blanket_accept {
+                    "accept *:*\n"
+                } else {
+                    "reject *:*\n"
+                };
+                if let Some(ipv6_policy) = ipv6_policy {
+                    s += "ipv6-policy ";
+                    s += if ipv6_policy.accept {
+                        "accept"
+                    } else {
+                        "reject"
+                    };
+                    for (i, v) in ipv6_policy.ports.iter().enumerate() {
+                        s += if i > 0 { "," } else { " " };
+                        write!(s, "{v}").unwrap();
+                    }
+                    s += "\n";
+                }
+                if let Some(overload_general) = overload_general {
+                    s += "overload-general 1 ";
+                    write_datetime(&mut s, (*overload_general).into());
+                    s += "\n";
+                }
+                if let Some(contact) = contact {
+                    writeln!(s, "contact {contact}").unwrap();
+                }
+                if *caches_extra_info {
+                    s += "caches-extra-info\n";
+                }
+                if let Some(extra_info_digest) = extra_info_digest {
+                    write!(
+                        s,
+                        "extra-info-digest {}",
+                        print_hex(&extra_info_digest.sha1)
+                    )
+                    .unwrap();
+                    if let Some(v) = &extra_info_digest.sha256 {
+                        write!(s, " {}", Base64Unpadded::encode_string(v)).unwrap();
+                    }
+                    s += "\n";
+                }
+                if *hidden_service_dir {
+                    s += "hidden-service-dir\n";
+                }
+                for a in or_address {
+                    writeln!(s, "or-address {a}").unwrap();
+                }
+                if *tunnelled_dir_server {
+                    s += "tunnelled-dir-server\n";
+                }
+                s += "proto";
+                for (k, v) in proto {
+                    write!(s, " {k}={v}").unwrap();
+                }
+
+                s += "\nrouter-sig-ed25519 ";
+                let sig = ed_sk
+                    .sign(
+                        &Sha256::new()
+                            .chain_update(b"Tor router descriptor signature v1")
+                            .chain_update(s[si..].as_bytes())
+                            .finalize(),
+                    )
+                    .to_bytes();
+                writeln!(s, "{}", Base64Unpadded::encode_string(&sig)).unwrap();
+
+                s += "router-signature\n";
+                let sig = rsa_sk
+                    .sign(
+                        Pkcs1v15Sign::new_unprefixed(),
+                        &Sha1::digest(s[si..].as_bytes()),
+                    )
+                    .unwrap();
+                s += &encode_b64("SIGNATURE", sig);
+            }
+
+            let mut parser = DescriptorParser::new(&s);
+            for (
+                i,
+                (
+                    (nickname, (address, orport, dirport)),
+                    (bw_average, bw_burst, bw_observed),
+                    or_address,
+                    platform,
+                    published,
+                    uptime,
+                    (exit_policy, blanket_accept, ipv6_policy),
+                    overload_general,
+                    contact,
+                    extra_info_digest,
+                    (_, hibernating, caches_extra_info, hidden_service_dir, tunnelled_dir_server),
+                    proto,
+                ),
+            ) in descs.into_iter().enumerate()
+            {
+                let desc = match parser.next() {
+                    None => panic!("iteration should produce at least {i} items, but stopped"),
+                    Some(Err(e)) => panic!("error at index {i}: {e:?}"),
+                    Some(Ok(v)) => v,
+                };
+
+                assert_eq!(desc.nickname, nickname, "mismatch at index {i}");
+                assert_eq!(desc.address, address, "mismatch at index {i}");
+                assert_eq!(desc.orport, orport, "mismatch at index {i}");
+                assert_eq!(desc.dirport, dirport, "mismatch at index {i}");
+                assert_eq!(desc.ed_id_pk, ed_pk, "mismatch at index {i}");
+                assert_eq!(desc.ed_sign_pk, ed_pk, "mismatch at index {i}");
+                assert_eq!(desc.bandwidth.average, bw_average, "mismatch at index {i}");
+                assert_eq!(desc.bandwidth.burst, bw_burst, "mismatch at index {i}");
+                assert_eq!(
+                    desc.bandwidth.observed, bw_observed,
+                    "mismatch at index {i}"
+                );
+                assert_eq!(
+                    desc.platform,
+                    platform
+                        .as_deref()
+                        .map(|s| s.trim_start_matches([' ', '\t'])),
+                    "mismatch at index {i}"
+                );
+                assert_eq!(desc.published, published, "mismatch at index {i}");
+                assert_eq!(desc.fingerprint, fingerprint, "mismatch at index {i}");
+                assert_eq!(desc.hibernating, hibernating, "mismatch at index {i}");
+                assert_eq!(desc.uptime, uptime, "mismatch at index {i}");
+                assert_eq!(
+                    desc.onion_key.as_ref(),
+                    Some(&rsa_pk),
+                    "mismatch at index {i}"
+                );
+                assert_eq!(desc.ntor_onion_key, ntor_pk, "mismatch at index {i}");
+                assert_eq!(desc.ntor_onion_key_ed, ed_pk, "mismatch at index {i}");
+                assert_eq!(desc.signing_key, rsa_pk, "mismatch at index {i}");
+                assert_eq!(
+                    desc.exit_policy.split_last(),
+                    Some((
+                        &ExitPolicy {
+                            accept: blanket_accept,
+                            addr: Addr::Any,
+                            exit_port: None,
+                        },
+                        &exit_policy[..],
+                    )),
+                    "mismatch at index {i}"
+                );
+                assert_eq!(desc.ipv6_policy, ipv6_policy, "mismatch at index {i}");
+                assert_eq!(
+                    desc.overload_general, overload_general,
+                    "mismatch at index {i}"
+                );
+                assert_eq!(
+                    desc.contact,
+                    contact
+                        .as_deref()
+                        .map(|s| s.trim_start_matches([' ', '\t'])),
+                    "mismatch at index {i}"
+                );
+                assert_eq!(
+                    desc.bridge_distribution_request, None,
+                    "mismatch at index {i}"
+                );
+                assert_eq!(
+                    desc.family.as_ref().map(|v| v.raw_string()),
+                    None,
+                    "mismatch at index {i}"
+                );
+                assert_eq!(desc.family_cert.len(), 0, "mismatch at index {i}");
+                assert_eq!(desc.eventdns, true, "mismatch at index {i}");
+                assert_eq!(
+                    desc.caches_extra_info, caches_extra_info,
+                    "mismatch at index {i}"
+                );
+                assert!(
+                    match (&desc.extra_info_digest, &extra_info_digest) {
+                        (None, None) => true,
+                        (
+                            Some(ExtraInfoDigest {
+                                sha1: a1,
+                                sha256: a2,
+                            }),
+                            Some(ExtraInfoDigest {
+                                sha1: b1,
+                                sha256: b2,
+                            }),
+                        ) => a1 == b1 && a2 == b2,
+                        _ => false,
+                    },
+                    "extra info digest mismatch at index {i}\nexpected: {:#?}\ngot: {:#?}",
+                    extra_info_digest,
+                    desc.extra_info_digest,
+                );
+                assert_eq!(
+                    desc.hidden_service_dir, hidden_service_dir,
+                    "mismatch at index {i}"
+                );
+                assert_eq!(desc.allow_single_hop_exits, false, "mismatch at index {i}");
+                assert_eq!(
+                    desc.tunnelled_dir_server, tunnelled_dir_server,
+                    "mismatch at index {i}"
+                );
+                assert_eq!(
+                    desc.or_address.as_ref(),
+                    or_address.first(),
+                    "mismatch at index {i}"
+                );
+
+                let mut it = desc.proto.iter();
+                for (j, (k, v)) in proto.into_iter().enumerate() {
+                    let r = match it.next() {
+                        None => panic!(
+                            "error at index {i}:\niteration should produce at least {j} items, but stopped"
+                        ),
+                        Some(Err(e)) => panic!("error at index {i} subindex {j}: {e:?}"),
+                        Some(Ok(v)) => v,
+                    };
+                    assert_eq!(r.keyword, k, "mismatch at index {i} subindex {j}");
+                    assert_eq!(r.versions, [v], "mismatch at index {i} subindex {j}");
+                }
+
+                if let Some(v) = it.next() {
+                    panic!("error at index {i}:\nexpect None, got {v:?}");
+                }
+            }
+
+            if let Some(i) = parser.next() {
+                panic!("expect None, got {i:?}");
+            }
+        };
+
+        proptest! {
+            |(descs in vec((
+                (
+                    "[a-zA-Z0-9]+",
+                    any::<(Ipv4Addr, u16, u16)>(),
+                ),
+                any::<(u64, u64, u64)>(),
+                vec(socket_strat(), 0..=8),
+                of("[^\0\n]*[^\0\n \t]"),
+                time_strat(),
+                any::<Option<u64>>(),
+                (
+                    vec(exit_policy_strat(), 0..=8),
+                    any::<bool>(),
+                    of((any::<bool>(), vec(any::<u8>(), 0..=64)).prop_map(|(accept, ports)| {
+                        let ports = map_exit_ports(ports);
+                        if ports.is_empty() {
+                            None
+                        } else {
+                            Some(ExitPortPolicy { accept, ports })
+                        }
+                    })).prop_map(Option::flatten),
+                ),
+                of(time_strat()),
+                of("[^\0\n]*[^\0\n \t]"),
+                any::<Option<(Sha1Output, Option<Sha256Output>)>>().prop_map(|v| v.map(|(sha1, sha256)| ExtraInfoDigest { sha1, sha256 })),
+                any::<(bool, bool, bool, bool, bool)>(),
+                vec((
+                    "[a-zA-Z0-9]+",
+                    any::<(u32, u32)>().prop_map(|(a, b)| match (a.min(b), a.max(b)) {
+                        (a, b) if a == b => VersionRange::Version(a),
+                        (from, to) => VersionRange::Range { from, to },
+                    }),
+                ), 1..=8),
+            ), 1..=8))| f(descs)
         }
     }
 

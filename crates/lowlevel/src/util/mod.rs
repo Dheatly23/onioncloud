@@ -602,6 +602,13 @@ pub(crate) use tests::*;
 mod tests {
     use super::*;
 
+    use std::fmt::Write as _;
+    use std::net::{IpAddr, SocketAddr};
+    use std::time::{Duration, SystemTime};
+
+    use chrono::format::Item as FmtItem;
+    use chrono::format::strftime::StrftimeItems;
+    use chrono::{DateTime, Utc};
     use ed25519_dalek::SecretKey;
     use once_cell::sync::OnceCell;
     use proptest::collection::vec;
@@ -702,6 +709,12 @@ mod tests {
         }
     }
 
+    pub(crate) fn write_datetime(s: &mut String, dt: DateTime<Utc>) {
+        static FMT: OnceCell<Vec<FmtItem>> = OnceCell::new();
+        let fmt = FMT.get_or_init(|| StrftimeItems::new("%Y-%m-%d %H:%M:%S").parse().unwrap());
+        write!(s, "{}", dt.naive_utc().format_with_items(fmt.iter())).unwrap();
+    }
+
     pub(crate) fn steps() -> impl Strategy<Value = Vec<usize>> {
         vec(0..=256usize, 0..32)
     }
@@ -712,6 +725,14 @@ mod tests {
 
     pub(crate) fn var_cell_strat() -> impl Strategy<Value = Vec<u8>> {
         vec(any::<u8>(), 0..=1024)
+    }
+
+    pub(crate) fn time_strat() -> impl Strategy<Value = SystemTime> {
+        any::<u32>().prop_map(|v| SystemTime::UNIX_EPOCH + Duration::from_secs(v.into()))
+    }
+
+    pub(crate) fn socket_strat() -> impl Strategy<Value = SocketAddr> {
+        any::<(IpAddr, u16)>().prop_map(|(ip, port)| SocketAddr::new(ip, port))
     }
 
     /// Gets test RSA private key.

@@ -343,26 +343,15 @@ mod tests {
     use super::*;
 
     use std::fmt::Write as _;
-    use std::net::IpAddr;
-    use std::time::Duration;
 
     use base64ct::{Base64, Encoder, LineEnding};
-    use chrono::format::Item as FmtItem;
-    use chrono::format::strftime::StrftimeItems;
-    use chrono::{DateTime, Utc};
-    use once_cell::sync::OnceCell;
     use proptest::collection::vec;
+    use proptest::option::of;
     use proptest::prelude::*;
     use rand::thread_rng;
     use rsa::pkcs1::EncodeRsaPublicKey;
 
-    use crate::util::{print_hex, test_rsa_pk};
-
-    fn write_datetime(s: &mut String, dt: DateTime<Utc>) {
-        static FMT: OnceCell<Vec<FmtItem>> = OnceCell::new();
-        let fmt = FMT.get_or_init(|| StrftimeItems::new("%Y-%m-%d %H:%M:%S").parse().unwrap());
-        write!(s, "{}", dt.naive_utc().format_with_items(fmt.iter())).unwrap();
-    }
+    use crate::util::{print_hex, socket_strat, test_rsa_pk, time_strat, write_datetime};
 
     fn encode_sig(sig: impl AsRef<[u8]>) -> String {
         let mut buf = [0; 1024];
@@ -458,9 +447,9 @@ kHgepW7IkJFnbeYWVaFDMDr+QwXHSj9SBySlkLlOxix+nopDQZAQQDkeL65ZRLI4
         }
 
         proptest!(|(v in vec((
-            any::<u32>().prop_map(|v| SystemTime::UNIX_EPOCH + Duration::from_secs(v.into())),
-            any::<u32>().prop_map(|v| SystemTime::UNIX_EPOCH + Duration::from_secs(v.into())),
-            any::<Option<(IpAddr, u16)>>().prop_map(|v| v.map(|(ip, port)| SocketAddr::new(ip, port))),
+            time_strat(),
+            time_strat(),
+            of(socket_strat()),
             Just([
                 Items::Address,
                 Items::Fingerprint,

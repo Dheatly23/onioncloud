@@ -252,7 +252,6 @@ mod tests {
     use super::*;
 
     use std::fmt::Write as _;
-    use std::net::IpAddr;
 
     use base64ct::{Base64Unpadded, Encoding, LineEnding};
     use proptest::collection::vec;
@@ -261,7 +260,7 @@ mod tests {
     use rsa::pkcs1::{DecodeRsaPublicKey, EncodeRsaPublicKey};
 
     use crate::parse::strat_exit_policy;
-    use crate::util::{print_hex, test_rsa_pk};
+    use crate::util::{print_hex, socket_strat, test_rsa_pk};
 
     #[test]
     fn test_microdesc_example() {
@@ -347,7 +346,7 @@ HGVOFPyWODM4fP3eiA7tazFUXXr9Es1lU3ZquLygHlvBKuEWjnEYWfvlESfS0FeY
             |(descs in vec((
                 any::<bool>(),
                 any::<RelayIdEd>(),
-                vec(any::<(IpAddr, u16)>(), 0..=8),
+                vec(socket_strat(), 0..=8),
                 vec(any::<RelayId>(), 0..=8),
                 of(strat_exit_policy()),
                 of(strat_exit_policy()),
@@ -393,8 +392,8 @@ HGVOFPyWODM4fP3eiA7tazFUXXr9Es1lU3ZquLygHlvBKuEWjnEYWfvlESfS0FeY
                         match e {
                             Entry::NtorOnionKey => write!(s, "ntor-onion-key {}\n", Base64Unpadded::encode(ntor_onion_key, &mut [0; 43]).unwrap()).unwrap(),
                             Entry::Addr => {
-                                if let Some((ip, port)) = addrs.next() {
-                                    write!(s, "a {}\n", SocketAddr::new(*ip, *port)).unwrap();
+                                if let Some(socket) = addrs.next() {
+                                    write!(s, "a {socket}\n").unwrap();
                                 }
                             }
                             Entry::Family => {

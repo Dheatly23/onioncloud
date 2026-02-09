@@ -3,6 +3,7 @@
 use base64ct::{Base64, Base64Unpadded, Decoder, Encoding, Error as B64Error};
 use chrono::{DateTime, NaiveDateTime, Utc};
 
+use memchr::memchr_iter;
 use rsa::RsaPublicKey;
 use rsa::pkcs1::DecodeRsaPublicKey;
 use rsa::pkcs1::der::pem::BASE64_WRAP_WIDTH;
@@ -10,7 +11,7 @@ use rsa::pkcs1::der::pem::BASE64_WRAP_WIDTH;
 use super::netdoc::{ArgumentsIter, Item};
 use super::{ExitPort, ExitPortPolicy};
 use crate::errors::{CertFormatError, CertVerifyError};
-use crate::util::parse::{MaybeRange, parse_date, parse_maybe_range, parse_time};
+use crate::util::parse::{parse_date, parse_maybe_range, parse_time};
 
 pub(crate) enum Error {
     CertFormatError(CertFormatError),
@@ -107,25 +108,41 @@ pub(crate) fn args_exit_policy(
         .next()
         .ok_or(CertFormatError)
         .and_then(parse_exit_ports)?;
-    let mut ret = ExitPortPolicy { accept, ports };
-    if !ret.sort_validate() {
-        return Err(CertFormatError);
-    }
-    Ok(ret)
+    Ok(ExitPortPolicy { accept, ports })
 }
 
 pub(crate) fn parse_exit_port(s: &str) -> Result<ExitPort, CertFormatError> {
-    match parse_maybe_range(s) {
-        None => Err(CertFormatError),
-        Some(MaybeRange::Num(v)) => Ok(ExitPort::Port(v)),
-        Some(MaybeRange::Range { from, to }) => Ok(ExitPort::PortRange { from, to }),
-    }
+    parse_maybe_range(s)
+        .map(ExitPort::from)
+        .ok_or(CertFormatError)
 }
 
 pub(crate) fn parse_exit_ports(s: &str) -> Result<Vec<ExitPort>, CertFormatError> {
-    s.split(',')
-        .map(parse_exit_port)
-        .collect::<Result<Vec<_>, _>>()
+    let mut last = 0;
+    let mut r = Vec::new();
+    for i in memchr_iter(b',', s.as_bytes()).chain([s.len()]) {
+        // SAFETY: Index points to , character in string or is string length
+        let s = unsafe { s.get_unchecked(last..i) };
+        last = i + 1;
+        let v = parse_exit_port(s)?;
+
+        if let ExitPort::PortRange { from, to } = v
+            && to <= from
+        {
+            return Err(CertFormatError);
+        } else if let (
+            Some(ExitPort::Port(p) | ExitPort::PortRange { to: p, .. }),
+            ExitPort::Port(v) | ExitPort::PortRange { from: v, .. },
+        ) = (r.last(), &v)
+            && v.saturating_sub(*p) <= 1
+        {
+            return Err(CertFormatError);
+        }
+
+        r.push(v);
+    }
+
+    Ok(r)
 }
 
 #[cfg(test)]

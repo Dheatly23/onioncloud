@@ -9,6 +9,8 @@ pub mod netdoc;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 
+use crate::util::parse::MaybeRange;
+
 /// Exit port policy.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -26,35 +28,6 @@ impl ExitPortPolicy {
     /// Create new [`ExitPortPolicy`].
     pub fn new(accept: bool, ports: Vec<ExitPort>) -> Self {
         Self { accept, ports }
-    }
-
-    /// Sort and validate port range.
-    fn sort_validate(&mut self) -> bool {
-        self.ports.sort_unstable_by(|a, b| {
-            let (
-                ExitPort::Port(a) | ExitPort::PortRange { from: a, .. },
-                ExitPort::Port(b) | ExitPort::PortRange { from: b, .. },
-            ) = (a, b);
-            a.cmp(b)
-        });
-
-        for (i, v) in self.ports.iter().enumerate() {
-            if let ExitPort::PortRange { from, to } = *v
-                && from >= to
-            {
-                return false;
-            } else if i > 0 {
-                let (
-                    ExitPort::Port(a) | ExitPort::PortRange { to: a, .. },
-                    ExitPort::Port(b) | ExitPort::PortRange { from: b, .. },
-                ) = (self.ports[i - 1], *v);
-                if b.saturating_sub(a) <= 1 {
-                    return false;
-                }
-            }
-        }
-
-        true
     }
 }
 
@@ -84,6 +57,15 @@ impl Debug for ExitPort {
 impl Display for ExitPort {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         Debug::fmt(self, f)
+    }
+}
+
+impl From<MaybeRange<u16>> for ExitPort {
+    fn from(v: MaybeRange<u16>) -> Self {
+        match v {
+            MaybeRange::Num(v) => Self::Port(v),
+            MaybeRange::Range { from, to } => Self::PortRange { from, to },
+        }
     }
 }
 
@@ -194,9 +176,20 @@ mod tests {
 
     proptest! {
         #[test]
-        fn test_exit_ports_valid(v in strat_exit_ports()) {
-            let mut v = ExitPortPolicy { accept: false, ports: v };
-            assert!(v.sort_validate());
+        fn test_exit_ports_valid(val in strat_exit_ports()) {
+            for (i, v) in val.iter().enumerate() {
+                if let ExitPort::PortRange { from, to } = *v
+                {
+                    assert!(to > from, "invalid range {from}..{to} at index {i}");
+                }
+                if i > 0 {
+                    let (
+                        ExitPort::Port(a) | ExitPort::PortRange { to: a, .. },
+                        ExitPort::Port(b) | ExitPort::PortRange { from: b, .. },
+                    ) = (val[i - 1], *v);
+                    assert!(b.saturating_sub(a) > 1, "invalid gap {a} - {b} before index {i}");
+                }
+            }
         }
 
         #[test]
