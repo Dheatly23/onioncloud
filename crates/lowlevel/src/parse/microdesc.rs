@@ -368,7 +368,7 @@ HGVOFPyWODM4fP3eiA7tazFUXXr9Es1lU3ZquLygHlvBKuEWjnEYWfvlESfS0FeY
                     Entry::IdRsa,
                     Entry::IdEd,
                 ]).prop_shuffle(),
-            ), 1..=32))| {
+            ), 1..=16))| {
                 let mut s = String::new();
 
                 for (

@@ -161,6 +161,8 @@ pub(crate) enum ProtoParseErrorInner {
     VersionRange,
     #[error("version range overlaps with previous version")]
     VersionOverlap,
+    #[error("too many version ranges")]
+    TooManyVersions,
 }
 
 display2debug! {ProtoParseErrorInner}

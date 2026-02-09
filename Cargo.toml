@@ -14,6 +14,7 @@ publish = false
 aes = "0.8"
 arrayvec = "0.7"
 base64ct = "1"
+bit-set = "0.8"
 cfg-if = "1"
 cipher = "0.4"
 clap = "4"

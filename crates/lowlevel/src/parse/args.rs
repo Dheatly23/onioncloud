@@ -11,6 +11,8 @@ use super::netdoc::{Arguments, ArgumentsIter};
 use crate::errors::{NetparamParseError, ProtoParseError, ProtoParseErrorInner};
 use crate::util::parse::{MaybeRange, parse_maybe_range};
 
+const MAX_VERSIONS_RANGE: usize = 256;
+
 /// Subprotocol versions parser.
 ///
 /// See also: [spec](https://spec.torproject.org/dir-spec/server-descriptor-format.html#item:proto).
@@ -215,6 +217,9 @@ impl<'a> ProtoParserIter<'a> {
             {
                 return Err(ProtoParseError::new(ProtoParseErrorInner::VersionOverlap));
             }
+            if versions.len() >= MAX_VERSIONS_RANGE {
+                return Err(ProtoParseError::new(ProtoParseErrorInner::TooManyVersions));
+            }
             versions.push(v);
         }
 
@@ -398,10 +403,12 @@ mod tests {
     use std::fmt::Write as _;
     use std::mem::take;
 
+    use bit_set::BitSet;
+    use proptest::bits::bitset::between;
     use proptest::collection::vec;
     use proptest::prelude::*;
 
-    fn proto_str(v: &Vec<(String, String, [u8; 32])>) -> String {
+    fn proto_str(v: &Vec<(String, String, BitSet)>) -> String {
         let mut s = String::new();
         for (i, (sp, v, a)) in v.iter().enumerate() {
             if i != 0 {
@@ -411,19 +418,14 @@ mod tests {
 
             let mut first = true;
             let mut p = None;
-            for (i, v) in a.iter().enumerate() {
-                for j in 0..8usize {
-                    let i = i * 8 + j;
-                    let t = *v & (1 << j) != 0;
-
-                    if t && p.is_none() {
-                        s += if take(&mut first) { "=" } else { "," };
-                        write!(&mut s, "{i}").unwrap();
-                        p = Some(i);
-                    } else if !t && let Some(p) = p.take() {
-                        if p < i - 1 {
-                            write!(&mut s, "-{}", i - 1).unwrap();
-                        }
+            for (i, t) in a.get_ref().iter().enumerate() {
+                if t && p.is_none() {
+                    s += if take(&mut first) { "=" } else { "," };
+                    write!(&mut s, "{i}").unwrap();
+                    p = Some(i);
+                } else if !t && let Some(p) = p.take() {
+                    if p < i - 1 {
+                        write!(&mut s, "-{}", i - 1).unwrap();
                     }
                 }
             }
@@ -440,7 +442,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn test_proto_parse(v in vec(("[ \t]+", "[a-zA-Z0-9][a-zA-Z0-9\\-]*", any::<[u8; 32]>().prop_filter("empty version", |v| v.iter().any(|v| *v != 0))), 0..=32)) {
+        fn test_proto_parse(v in vec(("[ \t]+", "[a-zA-Z0-9][a-zA-Z0-9\\-]*", between(0, 256)), 0..=32)) {
             let s = proto_str(&v);
 
             let mut it = ProtoParser::new(Arguments::try_from(&*s).unwrap()).into_iter();
@@ -453,7 +455,7 @@ mod tests {
 
                 assert_eq!(p.keyword, v, "mismatch at index {i}");
                 for ix in 0..256 {
-                    assert_eq!(VersionRange::in_versions(&p.versions, ix as u32), a[ix / 8] & (1 << (ix % 8)) != 0, "error at item index {i} and index {ix}");
+                    assert_eq!(VersionRange::in_versions(&p.versions, ix as u32), a.contains(ix), "error at item index {i} and index {ix}");
                 }
             }
 

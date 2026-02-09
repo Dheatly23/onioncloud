@@ -107,33 +107,35 @@ pub(crate) use tests::*;
 mod tests {
     use super::*;
 
-    use proptest::collection::vec;
+    use bit_set::BitSet;
+    use proptest::bits::bitset::between;
     use proptest::prelude::*;
 
-    pub(crate) fn map_exit_ports(a: impl IntoIterator<Item = u8>) -> Vec<ExitPort> {
+    pub(crate) fn map_exit_ports(n: usize, bs: BitSet) -> Vec<ExitPort> {
         let mut v = Vec::new();
         let mut prev = None;
-        for (ix, i) in a.into_iter().enumerate() {
-            let ix = ix as u16 * 8;
-            for j in 0..8u16 {
-                let Some(ix) = ix.checked_add(j) else { break };
-                let t = i & (1 << j) != 0;
-                if t && prev.is_none() {
-                    prev = Some(ix);
-                } else if !t && let Some(prev) = prev.take() {
-                    v.push(if ix - 1 == prev {
-                        ExitPort::Port(prev)
-                    } else {
-                        ExitPort::PortRange {
-                            from: prev,
-                            to: ix - 1,
-                        }
-                    });
+        for (ix, t) in bs.into_bit_vec().into_iter().enumerate() {
+            let Ok(ix) = u16::try_from(ix) else { break };
+            if t && prev.is_none() {
+                prev = Some(ix);
+            } else if !t && let Some(prev) = prev.take() {
+                if v.len() >= n {
+                    break;
                 }
+                v.push(if ix - 1 == prev {
+                    ExitPort::Port(prev)
+                } else {
+                    ExitPort::PortRange {
+                        from: prev,
+                        to: ix - 1,
+                    }
+                });
             }
         }
 
-        if let Some(prev) = prev {
+        if let Some(prev) = prev
+            && v.len() < n
+        {
             v.push(if 65535 == prev {
                 ExitPort::Port(prev)
             } else {
@@ -148,8 +150,8 @@ mod tests {
     }
 
     pub(crate) fn strat_exit_ports() -> impl Strategy<Value = Vec<ExitPort>> {
-        vec(any::<u8>(), 0..=65536 / 8).prop_filter_map("array is empty", |v| {
-            let v = map_exit_ports(v);
+        between(0, 65536).prop_filter_map("array is empty", |v| {
+            let v = map_exit_ports(usize::MAX, v);
             if v.is_empty() {
                 return None;
             }
@@ -170,8 +172,10 @@ mod tests {
     }
 
     pub(crate) fn strat_exit_policy() -> impl Strategy<Value = ExitPortPolicy> {
-        (any::<bool>(), strat_exit_ports())
-            .prop_map(|(accept, ports)| ExitPortPolicy { accept, ports })
+        (any::<bool>(), between(0, 65536)).prop_map(|(accept, v)| ExitPortPolicy {
+            accept,
+            ports: map_exit_ports(256, v),
+        })
     }
 
     proptest! {
@@ -210,15 +214,11 @@ mod tests {
 
         #[test]
         fn test_exit_port_in_ports(
-            a in vec(any::<u8>(), 0..=65536 / 8),
+            bs in between(0, 65536),
             port: u16,
         ) {
-            let t = match a.get((port >> 3) as usize) {
-                Some(v) => *v >> (port & 7),
-                None => a.last().copied().unwrap_or(0) >> 7,
-            };
-            let ok = t & 1 != 0;
-            let p = map_exit_ports(a);
+            let ok = bs.contains(port as _);
+            let p = map_exit_ports(usize::MAX, bs);
             assert_eq!(p.iter().any(|p| p.contains(port)), ok);
             assert_eq!(ExitPort::in_ports(&p, port), ok);
         }

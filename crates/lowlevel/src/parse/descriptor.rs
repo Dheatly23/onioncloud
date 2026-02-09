@@ -993,6 +993,7 @@ mod tests {
 
     use base64ct::{Base64, Base64Unpadded, Encoder, Encoding, LineEnding};
     use ed25519_dalek::{Signer, SigningKey};
+    use proptest::bits::bitset::between;
     use proptest::collection::vec;
     use proptest::option::of;
     use proptest::prelude::*;
@@ -1484,8 +1485,8 @@ mod tests {
                 (
                     vec(exit_policy_strat(), 0..=8),
                     any::<bool>(),
-                    of((any::<bool>(), vec(any::<u8>(), 0..=64)).prop_map(|(accept, ports)| {
-                        let ports = map_exit_ports(ports);
+                    of((any::<bool>(), between(0, 256)).prop_map(|(accept, v)| {
+                        let ports = map_exit_ports(usize::MAX, v);
                         if ports.is_empty() {
                             None
                         } else {
@@ -1504,7 +1505,7 @@ mod tests {
                         (from, to) => VersionRange::Range { from, to },
                     }),
                 ), 1..=8),
-            ), 1..=8))| f(descs)
+            ), 1..=16))| f(descs)
         }
     }
 

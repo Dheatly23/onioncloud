@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 aes.workspace = true
 base64ct.workspace = true
+bit-set.workspace = true
 cfg-if.workspace = true
 chrono.workspace = true
 cipher.workspace = true

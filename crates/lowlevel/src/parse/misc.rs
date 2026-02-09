@@ -104,10 +104,10 @@ pub(crate) fn args_exit_policy(
         Some("reject") => false,
         _ => return Err(CertFormatError),
     };
-    let ports = args
-        .next()
-        .ok_or(CertFormatError)
-        .and_then(parse_exit_ports)?;
+    let ports = args.next().ok_or(CertFormatError).and_then(|s| {
+        // Limit number of exit port ranges to 256
+        parse_exit_ports(256, s)
+    })?;
     Ok(ExitPortPolicy { accept, ports })
 }
 
@@ -117,7 +117,7 @@ pub(crate) fn parse_exit_port(s: &str) -> Result<ExitPort, CertFormatError> {
         .ok_or(CertFormatError)
 }
 
-pub(crate) fn parse_exit_ports(s: &str) -> Result<Vec<ExitPort>, CertFormatError> {
+pub(crate) fn parse_exit_ports(max_n: usize, s: &str) -> Result<Vec<ExitPort>, CertFormatError> {
     let mut last = 0;
     let mut r = Vec::new();
     for i in memchr_iter(b',', s.as_bytes()).chain([s.len()]) {
@@ -139,6 +139,9 @@ pub(crate) fn parse_exit_ports(s: &str) -> Result<Vec<ExitPort>, CertFormatError
             return Err(CertFormatError);
         }
 
+        if r.len() >= max_n {
+            return Err(CertFormatError);
+        }
         r.push(v);
     }
 
@@ -166,7 +169,7 @@ mod tests {
                 write!(s, "{v}").unwrap();
             }
 
-            let r = parse_exit_ports(&s).unwrap();
+            let r = parse_exit_ports(usize::MAX, &s).unwrap();
             assert_eq!(r, v);
         }
 
