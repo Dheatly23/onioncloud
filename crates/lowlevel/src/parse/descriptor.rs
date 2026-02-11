@@ -35,12 +35,12 @@ use crate::errors::{CertFormatError, CertVerifyError, DescriptorError};
 use crate::util::parse::parse_hex;
 
 /// Parser for (concatenated) descriptors.
-pub struct DescriptorParser<'a> {
+pub struct Parser<'a> {
     inner: NetdocParser<'a>,
 }
 
-impl<'a> DescriptorParser<'a> {
-    /// Create a new [`DescriptorParser`].
+impl<'a> Parser<'a> {
+    /// Create a new [`Parser`].
     pub const fn new(s: &'a str) -> Self {
         Self {
             inner: NetdocParser::new(s),
@@ -50,11 +50,11 @@ impl<'a> DescriptorParser<'a> {
     /// Gets the original string.
     ///
     /// ```
-    /// use onioncloud_lowlevel::parse::descriptor::DescriptorParser;
+    /// use onioncloud_lowlevel::parse::descriptor::Parser;
     ///
     /// // Doesn't have to be a valid certificate.
     /// let s = "abc";
-    /// let parser = DescriptorParser::new(s);
+    /// let parser = Parser::new(s);
     ///
     /// assert_eq!(parser.original_string(), s);
     /// ```
@@ -646,7 +646,7 @@ impl<'a> DescriptorParser<'a> {
     }
 }
 
-impl<'a> Iterator for DescriptorParser<'a> {
+impl<'a> Iterator for Parser<'a> {
     type Item = Result<Descriptor<'a>, DescriptorError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -661,7 +661,7 @@ impl<'a> Iterator for DescriptorParser<'a> {
     }
 }
 
-impl FusedIterator for DescriptorParser<'_> {}
+impl FusedIterator for Parser<'_> {}
 
 /// A single descriptor.
 #[derive(Debug, Clone)]
@@ -1319,7 +1319,7 @@ mod tests {
                 s += &encode_b64("SIGNATURE", sig);
             }
 
-            let mut parser = DescriptorParser::new(&s);
+            let mut parser = Parser::new(&s);
             for (
                 i,
                 (
