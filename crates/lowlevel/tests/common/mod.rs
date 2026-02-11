@@ -65,14 +65,6 @@ pub(crate) fn assert_cast_relay<T: Cachable + TryFromRelay, C: CellCache + Clone
 }
 
 #[allow(dead_code)]
-pub(crate) fn receive_oneshot<T>(recv: Receiver<T>) -> T {
-    let Poll::Ready(v) = pin!(recv).poll(&mut Context::from_waker(&Waker::noop())) else {
-        panic!("receive must succeed");
-    };
-    v.expect("receiver is cancelled")
-}
-
-#[allow(dead_code)]
 pub(crate) fn spawn<F>(
     rt: &TestRuntime,
     f: impl FnOnce(TestRuntime) -> F,
