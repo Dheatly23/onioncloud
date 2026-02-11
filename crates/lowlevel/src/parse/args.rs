@@ -241,7 +241,7 @@ impl<'a> Iterator for ProtoParserIter<'a> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         match &self.0 {
             None => (0, Some(0)),
-            Some(it) => it.size_hint(),
+            Some(_) => (1, None),
         }
     }
 }
@@ -379,7 +379,7 @@ impl<'a> Iterator for NetparamParserIter<'a> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         match &self.0 {
             None => (0, Some(0)),
-            Some(it) => it.size_hint(),
+            Some(_) => (1, None),
         }
     }
 }
