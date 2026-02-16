@@ -156,6 +156,99 @@ pub(crate) fn proto_keyword(s: &str) -> Result<usize, usize> {
 }
 
 #[target_feature(enable = "simd128")]
+pub(crate) fn pt_keyword(s: &str) -> Result<usize, usize> {
+    // SAFETY: It's more ergonomic to wrap the entire function in unsafe :D
+    unsafe {
+        let mut i = 0usize;
+        let c = from_ref(s.as_bytes());
+
+        // Should be impossible even with maximal allocation.
+        // Rust don't allow pointer offset > isize::MAX.
+        // But we do sanity check anyway.
+        debug_assert_ne!(c.len(), usize::MAX);
+
+        // Main
+        while i + 16 <= c.len() {
+            let v = arch::v128_load(get_unchecked(c, i).cast());
+
+            if i == 0 {
+                let v_ = arch::u8x16_bitmask(arch::u8x16_eq(
+                    arch::u64x2_shuffle < 0,
+                    0 > (v, arch::u8x16_splat(0)),
+                    arch::u8x16(
+                        b'<', b'O', b'R', b'>', b'=', 0, 0, 0, b'<', b'?', b'?', b'>', b'=', 0, 0,
+                        0,
+                    ),
+                )) & 0x1f1f;
+                if v_ as u8 == 0x1f || (v_ >> 8) as u8 == 0x1f {
+                    // String is lead by <OR>= or <??>=
+                    return Ok(4);
+                } else if matches!(arch::u8x16_extract_lane(v, 0), b'-' | b'=') {
+                    // First character is - or =
+                    return Err(0);
+                }
+            }
+
+            // =
+            let eq = arch::u8x16_eq(v, arch::u8x16_splat(b'='));
+
+            // A-Z and a-z
+            let v_ = arch::v128_and(v, arch::u8x16_splat(0xdfu8));
+            let mut t = arch::v128_or(
+                arch::u8x16_lt(v_, arch::u8x16_splat(0x41)),
+                arch::u8x16_gt(v_, arch::u8x16_splat(0x5a)),
+            );
+
+            // Numbers
+            let n = arch::v128_or(
+                arch::u8x16_lt(v, arch::u8x16_splat(0x30)),
+                arch::u8x16_gt(v, arch::u8x16_splat(0x39)),
+            );
+            t = arch::v128_and(t, n);
+
+            // -
+            let n = arch::u8x16_eq(v, arch::u8x16_splat(b'-'));
+            t = arch::v128_andnot(t, n);
+
+            let v1 = arch::u8x16_bitmask(t).trailing_zeros();
+            let v2 = arch::u8x16_bitmask(eq).trailing_zeros();
+
+            if v1 < v2 {
+                // Non-matching character before space or tab
+                return Err(i + v1 as usize);
+            } else if v2 < 16 {
+                // Space or tab
+                return Ok(i + v2 as usize);
+            }
+            debug_assert_eq!(v1, 16);
+            debug_assert_eq!(v2, 16);
+
+            i += 16;
+        }
+
+        if i == 0 {
+            let s = str::from_utf8_unchecked(&*c);
+            if s.starts_with("<??>=") || s.starts_with("<OR>=") {
+                // String is lead by <OR>= or <??>=
+                return Ok(4);
+            }
+        }
+
+        // Tail
+        for i in i..c.len() {
+            match *get_unchecked(c, i) {
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' => (),
+                b'-' if i != 0 => (),
+                b'=' if i != 0 => return Ok(i),
+                _ => return Err(i),
+            }
+        }
+    }
+
+    Err(s.len())
+}
+
+#[target_feature(enable = "simd128")]
 pub(crate) fn next_non_ws(s: &str) -> usize {
     // SAFETY: It's more ergonomic to wrap the entire function in unsafe :D
     unsafe {
@@ -541,6 +634,14 @@ mod tests {
 
     use proptest::prelude::*;
 
+    #[test]
+    fn test_pt_keyword_must_pass() {
+        assert_eq!(pt_keyword("<OR>=a"), Ok(4));
+        assert_eq!(pt_keyword("<??>=a"), Ok(4));
+        assert_eq!(pt_keyword("<OR>=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), Ok(4));
+        assert_eq!(pt_keyword("<??>=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), Ok(4));
+    }
+
     proptest! {
         #[test]
         fn test_check_line((s, _o) in aligned_str()) {
@@ -552,6 +653,12 @@ mod tests {
         fn test_proto_keyword((s, _o) in aligned_str()) {
             //dbg!(_o, s.as_bytes());
             assert_eq!(reference::proto_keyword(&s), proto_keyword(&s));
+        }
+
+        #[test]
+        fn test_pt_keyword((s, _o) in aligned_str()) {
+            //dbg!(_o, s.as_bytes());
+            assert_eq!(reference::pt_keyword(&s), pt_keyword(&s));
         }
 
         #[test]

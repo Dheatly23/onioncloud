@@ -32,6 +32,7 @@ fn get_fptr() -> NonNull<FPtrs> {
             FPtrs {
                 check_line: |v| avx::check_line(v),
                 proto_keyword: |v| avx::proto_keyword(v),
+                pt_keyword: |v| avx::pt_keyword(v),
                 next_non_ws: |v| avx::next_non_ws(v),
                 check_argument: |v| avx::check_argument(v),
                 check_object_keyword: |v| avx::check_object_keyword(v),
@@ -50,6 +51,7 @@ fn get_fptr() -> NonNull<FPtrs> {
             FPtrs {
                 check_line: |v| sse::check_line(v),
                 proto_keyword: |v| sse::proto_keyword(v),
+                pt_keyword: |v| sse::pt_keyword(v),
                 next_non_ws: |v| sse::next_non_ws(v),
                 check_argument: |v| sse::check_argument(v),
                 check_object_keyword: |v| sse::check_object_keyword(v),
@@ -66,6 +68,7 @@ fn get_fptr() -> NonNull<FPtrs> {
         static FP: FPtrs = FPtrs {
             check_line: universal::check_line,
             proto_keyword: universal::proto_keyword,
+            pt_keyword: universal::pt_keyword,
             next_non_ws: universal::next_non_ws,
             check_argument: universal::check_argument,
             check_object_keyword: universal::check_object_keyword,
@@ -89,6 +92,10 @@ pub(crate) fn check_line(s: &str) -> Result<usize, usize> {
 
 pub(crate) fn proto_keyword(s: &str) -> Result<usize, usize> {
     unsafe { (get_fptr().as_ref().proto_keyword)(s) }
+}
+
+pub(crate) fn pt_keyword(s: &str) -> Result<usize, usize> {
+    unsafe { (get_fptr().as_ref().pt_keyword)(s) }
 }
 
 pub(crate) fn next_non_ws(s: &str) -> usize {
@@ -191,6 +198,38 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
+    fn test_pt_keyword_must_pass() {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                assert_eq!(avx::pt_keyword("<OR>=a"), Ok(4));
+                assert_eq!(avx::pt_keyword("<??>=a"), Ok(4));
+                assert_eq!(
+                    avx::pt_keyword("<OR>=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                    Ok(4)
+                );
+                assert_eq!(
+                    avx::pt_keyword("<??>=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                    Ok(4)
+                );
+            }
+        }
+        if is_x86_feature_detected!("sse2") {
+            unsafe {
+                assert_eq!(sse::pt_keyword("<OR>=a"), Ok(4));
+                assert_eq!(sse::pt_keyword("<??>=a"), Ok(4));
+                assert_eq!(
+                    sse::pt_keyword("<OR>=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                    Ok(4)
+                );
+                assert_eq!(
+                    sse::pt_keyword("<??>=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                    Ok(4)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_check_line() {
         let is_sse = is_x86_feature_detected!("sse2");
         let is_avx = is_x86_feature_detected!("avx2");
@@ -221,6 +260,24 @@ mod tests {
                 }
                 if is_sse {
                     assert_eq!(r, unsafe { sse::proto_keyword(&s) });
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn test_pt_keyword() {
+        let is_sse = is_x86_feature_detected!("sse2");
+        let is_avx = is_x86_feature_detected!("avx2");
+
+        if is_sse || is_avx {
+            proptest!(|((s, _o) in aligned_str())| {
+                let r = reference::pt_keyword(&s);
+                if is_avx {
+                    assert_eq!(r, unsafe { avx::pt_keyword(&s) });
+                }
+                if is_sse {
+                    assert_eq!(r, unsafe { sse::pt_keyword(&s) });
                 }
             });
         }

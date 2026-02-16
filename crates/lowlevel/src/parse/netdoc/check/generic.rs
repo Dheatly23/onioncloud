@@ -31,6 +31,23 @@ pub(crate) fn proto_keyword(s: &str) -> Result<usize, usize> {
     Err(s.len())
 }
 
+pub(crate) fn pt_keyword(s: &str) -> Result<usize, usize> {
+    if s.starts_with("<??>=") || s.starts_with("<OR>=") {
+        return Ok(4);
+    }
+
+    for (i, c) in s.as_bytes().iter().enumerate() {
+        match c {
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' => (),
+            b'0'..=b'9' if i != 0 => (),
+            b'=' if i != 0 => return Ok(i),
+            _ => return Err(i),
+        }
+    }
+
+    Err(s.len())
+}
+
 pub(crate) fn next_non_ws(s: &str) -> usize {
     s.as_bytes()
         .iter()
@@ -144,6 +161,12 @@ mod tests {
     use super::*;
 
     use proptest::prelude::*;
+
+    #[test]
+    fn test_pt_keyword_must_pass() {
+        assert_eq!(pt_keyword("<OR>=a"), Ok(4));
+        assert_eq!(pt_keyword("<??>=a"), Ok(4));
+    }
 
     proptest! {
         #[test]

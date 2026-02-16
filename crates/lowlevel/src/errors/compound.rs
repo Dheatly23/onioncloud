@@ -266,3 +266,23 @@ impl From<MiscError> for MicrodescError {
         v.to_err()
     }
 }
+
+/// Extra info processing error.
+#[derive(Error)]
+#[non_exhaustive]
+pub enum ExtraInfoError {
+    #[error(transparent)]
+    NetdocParseError(#[from] super::NetdocParseError),
+    #[error(transparent)]
+    CertFormatError(#[from] super::CertFormatError),
+    #[error(transparent)]
+    CertVerifyError(#[from] super::CertVerifyError),
+}
+
+display2debug! {ExtraInfoError}
+
+impl From<MiscError> for ExtraInfoError {
+    fn from(v: MiscError) -> Self {
+        v.to_err()
+    }
+}

@@ -29,6 +29,7 @@ fn get_fptr() -> NonNull<FPtrs> {
             FPtrs {
                 check_line: |v| neon::check_line(v),
                 proto_keyword: |v| neon::proto_keyword(v),
+                pt_keyword: |v| neon::pt_keyword(v),
                 next_non_ws: |v| neon::next_non_ws(v),
                 check_argument: |v| neon::check_argument(v),
                 check_object_keyword: |v| neon::check_object_keyword(v),
@@ -45,6 +46,7 @@ fn get_fptr() -> NonNull<FPtrs> {
         static FP: FPtrs = FPtrs {
             check_line: universal::check_line,
             proto_keyword: universal::proto_keyword,
+            pt_keyword: universal::pt_keyword,
             next_non_ws: universal::next_non_ws,
             check_argument: universal::check_argument,
             check_object_keyword: universal::check_object_keyword,
@@ -68,6 +70,10 @@ pub(crate) fn check_line(s: &str) -> Result<usize, usize> {
 
 pub(crate) fn proto_keyword(s: &str) -> Result<usize, usize> {
     unsafe { (get_fptr().as_ref().proto_keyword)(s) }
+}
+
+pub(crate) fn pt_keyword(s: &str) -> Result<usize, usize> {
+    unsafe { (get_fptr().as_ref().pt_keyword)(s) }
 }
 
 pub(crate) fn next_non_ws(s: &str) -> usize {
@@ -167,6 +173,24 @@ mod tests {
     use super::super::tests::{aligned_arg_str, aligned_str};
 
     use proptest::prelude::*;
+
+    #[test]
+    fn test_pt_keyword_must_pass() {
+        if is_aarch64_feature_detected!("neon") {
+            unsafe {
+                assert_eq!(neon::pt_keyword("<OR>=a"), Ok(4));
+                assert_eq!(neon::pt_keyword("<??>=a"), Ok(4));
+                assert_eq!(
+                    neon::pt_keyword("<OR>=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                    Ok(4)
+                );
+                assert_eq!(
+                    neon::pt_keyword("<??>=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                    Ok(4)
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_check_line() {

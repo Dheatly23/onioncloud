@@ -33,6 +33,7 @@ unsafe fn get_unchecked<T>(p: *const [T], i: usize) -> *const T {
 struct FPtrs<It> {
     check_line: fn(s: &str) -> Result<usize, usize>,
     proto_keyword: fn(s: &str) -> Result<usize, usize>,
+    pt_keyword: fn(s: &str) -> Result<usize, usize>,
     next_non_ws: fn(s: &str) -> usize,
     check_argument: fn(s: &str) -> Option<usize>,
     check_object_keyword: fn(s: &str) -> Option<usize>,

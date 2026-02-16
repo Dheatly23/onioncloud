@@ -186,6 +186,100 @@ pub(crate) fn proto_keyword(s: &str) -> Result<usize, usize> {
 }
 
 #[target_feature(enable = "neon")]
+pub(crate) fn pt_keyword(s: &str) -> Result<usize, usize> {
+    // SAFETY: It's more ergonomic to wrap the entire function in unsafe :D
+    unsafe {
+        let mut i = 0usize;
+        let c = from_ref(s.as_bytes());
+
+        // Should be impossible even with maximal allocation.
+        // Rust don't allow pointer offset > isize::MAX.
+        // But we do sanity check anyway.
+        debug_assert_ne!(c.len(), usize::MAX);
+
+        // Main
+        while i + 16 <= c.len() {
+            let v = arch::vld1q_u8(get_unchecked(c, i));
+
+            if i == 0 {
+                const C: [u8; 16] = b"<OR>=\0\0\0<??>=\0\0\0";
+                let v_ = movemask(arch::vceqq_u8(
+                    arch::vreinterpretq_u64_u8(arch::vdupq_laneq_u64(
+                        arch::vreinterpretq_u8_u64(v),
+                        0b01_00_01_00,
+                    )),
+                    arch::vld1q_u8(from_ref(&C).cast()),
+                )) as u32 as u16
+                    & 0x1f1f;
+                if v_ as u8 == 0x1f || (v_ >> 8) as u8 == 0x1f {
+                    // String is lead by <OR>= or <??>=
+                    return Ok(4);
+                } else if matches!(arch::vgetq_lane_u8(v, 0), b'0'..=b'9' | b'=') {
+                    // First character is 0-9 or =
+                    return Err(0);
+                }
+            }
+
+            // =
+            let eq = arch::vceqq_u8(v, arch::vdupq_n_u8(b'='));
+
+            // A-Z and a-z
+            let v_ = arch::vandq_u8(v, arch::vdupq_n_u8(0xdfu8));
+            let mut t = arch::vorrq_u8(
+                arch::vcltq_u8(v_, arch::vdupq_n_u8(0x41)),
+                arch::vcgtq_u8(v_, arch::vdupq_n_u8(0x5a)),
+            );
+
+            // Numbers
+            let n = arch::vorrq_u8(
+                arch::vcltq_u8(v, arch::vdupq_n_u8(0x30)),
+                arch::vcgtq_u8(v, arch::vdupq_n_u8(0x39)),
+            );
+            t = arch::vandq_u8(t, n);
+
+            // _
+            let n = arch::vceqq_u8(v, arch::vdupq_n_u8(b'_'));
+            t = arch::vbicq_u8(t, n);
+
+            let v1 = movemask(t).trailing_zeros();
+            let v2 = movemask(eq).trailing_zeros();
+
+            if v1 < v2 {
+                // Non-matching character before =
+                return Err(i + v1 as usize);
+            } else if v2 < 16 {
+                // =
+                return Ok(i + v2 as usize);
+            }
+            debug_assert_eq!(v1, 16);
+            debug_assert_eq!(v2, 16);
+
+            i += 16;
+        }
+
+        if i == 0 {
+            let s = str::from_utf8_unchecked(&*c);
+            if s.starts_with("<??>=") || s.starts_with("<OR>=") {
+                // String is lead by <OR>= or <??>=
+                return Ok(4);
+            }
+        }
+
+        // Tail
+        for i in i..c.len() {
+            match *get_unchecked(c, i) {
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' => (),
+                b'-' if i != 0 => (),
+                b' ' | b'\t' => return Ok(i),
+                _ => return Err(i),
+            }
+        }
+    }
+
+    Ok(s.len())
+}
+
+#[target_feature(enable = "neon")]
 pub(crate) fn next_non_ws(s: &str) -> Option<usize> {
     // SAFETY: It's more ergonomic to wrap the entire function in unsafe :D
     unsafe {

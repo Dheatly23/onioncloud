@@ -153,6 +153,99 @@ pub(crate) fn proto_keyword(s: &str) -> Result<usize, usize> {
 }
 
 #[target_feature(enable = "avx2")]
+pub(crate) fn pt_keyword(s: &str) -> Result<usize, usize> {
+    // SAFETY: It's more ergonomic to wrap the entire function in unsafe :D
+    unsafe {
+        let mut i = 0usize;
+        let c = from_ref(s.as_bytes());
+
+        // Should be impossible even with maximal allocation.
+        // Rust don't allow pointer offset > isize::MAX.
+        // But we do sanity check anyway.
+        debug_assert_ne!(c.len(), usize::MAX);
+
+        // Main
+        while i + 32 <= c.len() {
+            let v = arch::_mm256_loadu_si256(get_unchecked(c, i).cast());
+
+            if i == 0 {
+                let v_ = arch::_mm_movemask_epi8(arch::_mm_cmpeq_epi8(
+                    arch::_mm_shuffle_epi32(arch::_mm256_extractf128_si256(v, 0), 0b01_00_01_00),
+                    arch::_mm_setr_epi8(
+                        b'<' as _, b'O' as _, b'R' as _, b'>' as _, b'=' as _, 0, 0, 0, b'<' as _,
+                        b'?' as _, b'?' as _, b'>' as _, b'=' as _, 0, 0, 0,
+                    ),
+                )) as u32 as u16
+                    & 0x1f1f;
+                if v_ as u8 == 0x1f || (v_ >> 8) as u8 == 0x1f {
+                    // String is lead by <OR>= or <??>=
+                    return Ok(4);
+                } else if matches!(arch::_mm256_extract_epi8(v, 0) as u8, b'0'..=b'9' | b'=') {
+                    // First character is 0-9 or =
+                    return Err(0);
+                }
+            }
+
+            // =
+            let eq = arch::_mm256_cmpeq_epi8(v, arch::_mm256_set1_epi8(b'=' as _));
+
+            // A-Z and a-z
+            let v_ = arch::_mm256_and_si256(v, arch::_mm256_set1_epi8(0xdfu8 as _));
+            let mut t = arch::_mm256_or_si256(
+                arch::_mm256_cmpgt_epi8(arch::_mm256_set1_epi8(0x41), v_),
+                arch::_mm256_cmpgt_epi8(v_, arch::_mm256_set1_epi8(0x5a)),
+            );
+
+            // Numbers
+            let n = arch::_mm256_or_si256(
+                arch::_mm256_cmpgt_epi8(arch::_mm256_set1_epi8(0x30), v),
+                arch::_mm256_cmpgt_epi8(v, arch::_mm256_set1_epi8(0x39)),
+            );
+            t = arch::_mm256_and_si256(t, n);
+
+            // _
+            let n = arch::_mm256_cmpeq_epi8(v, arch::_mm256_set1_epi8(b'_' as _));
+            t = arch::_mm256_andnot_si256(n, t);
+
+            let v1 = (arch::_mm256_movemask_epi8(t) as u32).trailing_zeros();
+            let v2 = (arch::_mm256_movemask_epi8(eq) as u32).trailing_zeros();
+
+            if v1 < v2 {
+                // Non-matching character before =
+                return Err(i + v1 as usize);
+            } else if v2 < 32 {
+                // =
+                return Ok(i + v2 as usize);
+            }
+            debug_assert_eq!(v1, 32);
+            debug_assert_eq!(v2, 32);
+
+            i += 32;
+        }
+
+        if i == 0 {
+            let s = str::from_utf8_unchecked(&*c);
+            if s.starts_with("<??>=") || s.starts_with("<OR>=") {
+                // String is lead by <OR>= or <??>=
+                return Ok(4);
+            }
+        }
+
+        // Tail
+        for i in i..c.len() {
+            match *get_unchecked(c, i) {
+                b'a'..=b'z' | b'A'..=b'Z' | b'_' => (),
+                b'0'..=b'9' if i != 0 => (),
+                b'=' if i != 0 => return Ok(i),
+                _ => return Err(i),
+            }
+        }
+    }
+
+    Err(s.len())
+}
+
+#[target_feature(enable = "avx2")]
 pub(crate) fn next_non_ws(s: &str) -> usize {
     // SAFETY: It's more ergonomic to wrap the entire function in unsafe :D
     unsafe {

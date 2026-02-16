@@ -2,6 +2,7 @@ pub mod args;
 pub mod auth_cert;
 pub mod consensus;
 pub mod descriptor;
+pub mod extrainfo;
 pub mod microdesc;
 pub(crate) mod misc;
 pub mod netdoc;

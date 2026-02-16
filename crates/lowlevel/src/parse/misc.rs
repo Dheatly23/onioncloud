@@ -1,9 +1,11 @@
 //! Helper functions for netdoc parsing.
 
+use std::iter::FusedIterator;
+use std::mem::take;
+
 use base64ct::{Base64, Base64Unpadded, Decoder, Encoding, Error as B64Error};
 use chrono::{DateTime, NaiveDateTime, Utc};
-
-use memchr::memchr_iter;
+use memchr::{Memchr, memchr_iter};
 use rsa::RsaPublicKey;
 use rsa::pkcs1::DecodeRsaPublicKey;
 use rsa::pkcs1::der::pem::BASE64_WRAP_WIDTH;
@@ -147,6 +149,68 @@ pub(crate) fn parse_exit_ports(max_n: usize, s: &str) -> Result<Vec<ExitPort>, C
 
     Ok(r)
 }
+
+#[derive(Debug, Clone)]
+pub(crate) struct CommaIter<'a> {
+    s: &'a str,
+    off: usize,
+    it: Memchr<'a>,
+}
+
+impl CommaIter<'_> {
+    pub(crate) fn terminate(&mut self) {
+        self.s = "";
+    }
+}
+
+impl<'a> From<&'a str> for CommaIter<'a> {
+    fn from(s: &'a str) -> Self {
+        Self {
+            s,
+            off: 0,
+            it: Memchr::new(b',', s.as_bytes()),
+        }
+    }
+}
+
+impl<'a> Iterator for CommaIter<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.s.is_empty() {
+            return None;
+        }
+
+        let Some(mut i) = self.it.next() else {
+            return Some(take(&mut self.s));
+        };
+        i -= self.off;
+        self.off += i + 1;
+        // SAFETY: Index points to , character in string
+        let (a, b) = unsafe { (self.s.get_unchecked(..i), self.s.get_unchecked(i + 1..)) };
+        self.s = b;
+        Some(a)
+    }
+}
+
+impl DoubleEndedIterator for CommaIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.s.is_empty() {
+            return None;
+        }
+
+        let Some(mut i) = self.it.next_back() else {
+            return Some(take(&mut self.s));
+        };
+        i -= self.off;
+        // SAFETY: Index points to , character in string
+        let (a, b) = unsafe { (self.s.get_unchecked(..i), self.s.get_unchecked(i + 1..)) };
+        self.s = a;
+        Some(b)
+    }
+}
+
+impl FusedIterator for CommaIter<'_> {}
 
 #[cfg(test)]
 mod tests {

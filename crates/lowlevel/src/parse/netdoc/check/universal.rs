@@ -274,6 +274,113 @@ pub(crate) fn proto_keyword(s: &str) -> Result<usize, usize> {
     Err(s.len())
 }
 
+pub(crate) fn pt_keyword(s: &str) -> Result<usize, usize> {
+    if s.starts_with("<??>=") || s.starts_with("<OR>=") {
+        return Ok(4);
+    }
+
+    #[inline(always)]
+    fn f(c: u8, i: usize) -> Option<Result<usize, usize>> {
+        match c {
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' => None,
+            b'0'..=b'9' if i != 0 => None,
+            b'=' if i != 0 => Some(Ok(i)),
+            _ => Some(Err(i)),
+        }
+    }
+
+    // SAFETY: It's more ergonomic to wrap the entire function in unsafe :D
+    unsafe {
+        let mut i = 0usize;
+        let c = from_ref(s.as_bytes());
+
+        // Should be impossible even with maximal allocation.
+        // Rust don't allow pointer offset > isize::MAX.
+        // But we do sanity check anyway.
+        debug_assert_ne!(c.len(), usize::MAX);
+
+        if c.addr() & 7 != 0 {
+            // Head
+            i = 8 - (c.addr() & 7);
+            for i in 0..i {
+                if i >= c.len() {
+                    break;
+                }
+                let Some(r) = f(*get_unchecked(c, i), i) else {
+                    continue;
+                };
+                return r;
+            }
+        }
+
+        debug_assert_eq!(c.addr().wrapping_add(i) & 7, 0);
+
+        // Main
+        while i + 8 <= c.len() {
+            let v = u64::from_le(*get_unchecked(c, i).cast::<u64>());
+
+            if i == 0 && matches!(v as u8, b'0'..=b'9' | b'=') {
+                // First character is 0-9 or =
+                return Err(0);
+            }
+
+            // =
+            let eq = test_eq_c::<0x3d3d_3d3d_3d3d_3d3d>(v);
+            //dbg!(eq);
+
+            // A-Z and a-z
+            let v_ = v & 0x5f5f_5f5f_5f5f_5f5f;
+            let mut t =
+                test_le_c::<0x4040_4040_4040_4040>(v_) | test_gt_c::<0x5a5a_5a5a_5a5a_5a5a>(v_);
+            //dbg!(t);
+
+            // Numbers
+            let v_ = v & 0x7f7f_7f7f_7f7f_7f7f;
+            let n = test_le_c::<0x2f2f_2f2f_2f2f_2f2f>(v_) | test_gt_c::<0x3939_3939_3939_3939>(v_);
+            t &= n;
+            //dbg!(n);
+
+            // _
+            let n = test_ne_c::<0x5f5f_5f5f_5f5f_5f5f>(v);
+            t &= n;
+            //dbg!(n);
+
+            // Lane is >= 128
+            t |= v;
+            //dbg!(t);
+
+            let o1 = (t & 0x8080_8080_8080_8080).trailing_zeros();
+            debug_assert!(o1 == 64 || o1 % 8 == 7);
+            let v1 = o1 / 8;
+            let o2 = (eq & 0x8080_8080_8080_8080).trailing_zeros();
+            debug_assert!(o2 == 64 || o2 % 8 == 7);
+            let v2 = o2 / 8;
+
+            if v1 < v2 {
+                // Non-matching character before =
+                return Err(i + v1 as usize);
+            } else if v2 < 8 {
+                // =
+                return Ok(i + v2 as usize);
+            }
+            debug_assert_eq!(v1, 8);
+            debug_assert_eq!(v2, 8);
+
+            i += 8;
+        }
+
+        // Tail
+        for i in i..c.len() {
+            let Some(r) = f(*get_unchecked(c, i), i) else {
+                continue;
+            };
+            return r;
+        }
+    }
+
+    Err(s.len())
+}
+
 pub(crate) fn next_non_ws(s: &str) -> usize {
     #[inline(always)]
     fn f(c: u8, i: usize) -> Option<usize> {
@@ -792,6 +899,12 @@ mod tests {
 
     use proptest::prelude::*;
 
+    #[test]
+    fn test_pt_keyword_must_pass() {
+        assert_eq!(pt_keyword("<OR>=a"), Ok(4));
+        assert_eq!(pt_keyword("<??>=a"), Ok(4));
+    }
+
     proptest! {
         #[test]
         fn test_check_line((s, _o) in aligned_str()) {
@@ -803,6 +916,12 @@ mod tests {
         fn test_proto_keyword((s, _o) in aligned_str()) {
             //dbg!(_o, s.as_bytes());
             assert_eq!(reference::proto_keyword(&s), proto_keyword(&s));
+        }
+
+        #[test]
+        fn test_pt_keyword((s, _o) in aligned_str()) {
+            //dbg!(_o, s.as_bytes());
+            assert_eq!(reference::pt_keyword(&s), pt_keyword(&s));
         }
 
         #[test]
