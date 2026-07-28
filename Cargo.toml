@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
-  "crates/*",
+  "crates/ll-cell",
 ]
 
 [workspace.package]
