@@ -404,7 +404,7 @@ mod tests {
     fn test_executor_build() {
         #[instrument]
         fn test() {
-            black_box(Executor::builder().build());
+            let _ = black_box(Executor::builder().build());
         }
 
         run_test(test);
