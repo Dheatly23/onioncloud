@@ -146,10 +146,18 @@ unsafe fn from_ptr(p: *const ()) -> ArcLike<InnerMultiWaker> {
 
 #[cfg_attr(test, tracing::instrument(skip_all))]
 unsafe fn clone_waker(p: *const ()) -> RawWaker {
+    let n = p.addr() & 63;
     // SAFETY: Pointer is points to valid InnerMultiWaker data with pointer tag.
     // Also we're only borrowing value, so use ManuallyDrop to prevent drop.
     let r = unsafe { ManuallyDrop::new(from_ptr(p)) };
-    RawWaker::new(ArcLike::clone(&r).into_raw().as_ptr().cast(), &VTABLE)
+    RawWaker::new(
+        ArcLike::clone(&r)
+            .into_raw()
+            .as_ptr()
+            .map_addr(|a| a | n)
+            .cast(),
+        &VTABLE,
+    )
 }
 
 #[cfg_attr(test, tracing::instrument(skip_all))]
