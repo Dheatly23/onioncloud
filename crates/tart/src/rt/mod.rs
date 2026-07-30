@@ -5,12 +5,14 @@ use std::mem::ManuallyDrop;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use futures_core::FusedFuture;
 use pin_project::pin_project;
 use tracing::{Span, error, info, info_span, instrument, trace};
 
 use crate::oneshot::{Receiver, Sender, oneshot};
+use crate::timer::Timers;
 use crate::waker::{MultiWaker, Selector};
 use guard::RuntimeGuard;
 
@@ -40,10 +42,23 @@ pub(crate) struct Tasklist {
 pub(crate) struct InnerRuntime {
     offset: usize,
     queued: Vec<Task>,
+    timers: Timers,
 }
 
 impl InnerRuntime {
-    fn queue_task(&mut self, fut: Pin<Box<dyn Future<Output = ()> + Send + Sync>>) {
+    fn new(timers: Timers) -> Self {
+        Self {
+            offset: 0,
+            queued: Vec::new(),
+            timers,
+        }
+    }
+
+    pub(crate) fn timers(&mut self) -> &mut Timers {
+        &mut self.timers
+    }
+
+    pub(crate) fn queue_task(&mut self, fut: Pin<Box<dyn Future<Output = ()> + Send + Sync>>) {
         let span = info_span!(parent: None, "task", id = self.offset + self.queued.len());
         span.follows_from(Span::current());
         self.queued.push(Task {
@@ -53,9 +68,14 @@ impl InnerRuntime {
     }
 }
 
+pub(crate) struct RunResult {
+    pub(crate) any_task: bool,
+    pub(crate) any_running: bool,
+}
+
 impl Tasklist {
     #[instrument(skip_all)]
-    fn register_queued(&mut self, rt: &mut InnerRuntime) -> bool {
+    pub(crate) fn register_queued(&mut self, rt: &mut InnerRuntime) -> bool {
         let mut n = 0usize;
         for task in rt.queued.drain(..) {
             let i = self.tasks.len();
@@ -74,8 +94,7 @@ impl Tasklist {
     }
 
     #[instrument(skip_all)]
-    fn run_tasks(&mut self) -> bool {
-        let mut has_any = false;
+    pub(crate) fn run_tasks(&mut self) -> RunResult {
         let mut pending = 0usize;
         let mut running = 0usize;
         let mut finished = 0usize;
@@ -99,7 +118,6 @@ impl Tasklist {
             let Some(task) = p else {
                 continue;
             };
-            has_any = true;
 
             if f & (1 << (i % 64)) == 0 {
                 pending += 1;
@@ -113,30 +131,20 @@ impl Tasklist {
                     .as_mut()
                     .poll(&mut Context::from_waker(&w.make_waker((i % 64) as u8)))
             });
-            running += 1;
             if ret.is_ready() {
                 *p = None;
                 finished += 1;
                 trace!(id = i, "task is finished");
+            } else {
+                running += 1;
             }
         }
 
         info!(running, finished, pending, "done running tasks");
 
-        if running == 0 && has_any {
-            error!("deadlock detected");
-            panic!("all tasks are waiting");
-        }
-
-        has_any
-    }
-}
-
-impl InnerRuntime {
-    fn new() -> Self {
-        Self {
-            offset: 0,
-            queued: Vec::new(),
+        RunResult {
+            any_running: running > 0 || finished > 0,
+            any_task: pending > 0 || running > 0,
         }
     }
 }
@@ -166,8 +174,19 @@ impl<T: Sized> FusedFuture for TaskHandle<T> {
 pub struct Runtime(Weak<RuntimeGuard>);
 
 impl Runtime {
-    fn inner(&self) -> Arc<RuntimeGuard> {
-        self.0.upgrade().expect("executor is dropped")
+    pub(crate) fn maybe_inner(&self) -> Option<Arc<RuntimeGuard>> {
+        self.0.upgrade()
+    }
+
+    pub(crate) fn inner(&self) -> Arc<RuntimeGuard> {
+        self.maybe_inner().expect("executor is dropped")
+    }
+
+    /// Gets current time.
+    ///
+    /// Unlike [`Instant::now`], this returns deterministic time in runtime.
+    pub fn get_time(&self) -> Instant {
+        self.inner().runtime().timers().get_time()
     }
 
     /// Spawns a new task.
@@ -227,20 +246,39 @@ impl Executor {
     #[instrument(skip_all)]
     pub fn run(&mut self) {
         let mut tasklist = self.rt.tasklist();
-        let mut should_continue = true;
+        let mut res = RunResult {
+            any_task: true,
+            any_running: true,
+        };
 
         for i in 0usize.. {
             info!("loop {i}");
 
             {
                 let mut rt = self.rt.runtime();
-                should_continue |= tasklist.register_queued(&mut rt);
+                let r = tasklist.register_queued(&mut rt);
+                // Registered tasks will run.
+                res.any_task |= r;
+                res.any_running |= r;
+
+                // If previous loop has no task running, only then advance time.
+                if !res.any_running {
+                    res.any_running |= rt.timers().advance_time();
+                }
             }
 
-            if !should_continue {
+            if !res.any_task {
                 return;
             }
-            should_continue = tasklist.run_tasks();
+            let r = tasklist.run_tasks();
+
+            // Deadlock: previous and current loop yielded no task running.
+            if !res.any_running && !r.any_running {
+                error!("deadlock detected");
+                panic!("all tasks are waiting");
+            }
+
+            res = r;
         }
     }
 }
@@ -248,13 +286,22 @@ impl Executor {
 /// Builder for [`Executor`].
 #[derive(Default)]
 #[non_exhaustive]
-pub struct ExecutorBuilder {}
+pub struct ExecutorBuilder {
+    epoch: Option<Instant>,
+}
 
 impl ExecutorBuilder {
+    pub fn with_epoch(mut self, epoch: Instant) -> Self {
+        self.epoch = Some(epoch);
+        self
+    }
+
     #[must_use]
     pub fn build(self) -> Executor {
         Executor {
-            rt: Arc::new(RuntimeGuard::new(InnerRuntime::new())),
+            rt: Arc::new(RuntimeGuard::new(InnerRuntime::new(Timers::new(
+                self.epoch.unwrap_or_else(Instant::now),
+            )))),
         }
     }
 }

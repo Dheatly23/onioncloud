@@ -1,0 +1,408 @@
+use std::debug_assert_matches;
+use std::future::Future;
+use std::marker::PhantomPinned;
+use std::pin::Pin;
+use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
+
+use humantime::Duration as HumanDuration;
+use slab::Slab;
+use tracing::{info, instrument};
+
+use crate::rt::Runtime;
+
+/// Inner value for timer.
+#[derive(Debug)]
+struct InnerTimer {
+    waker: Option<Waker>,
+    delta: Option<Duration>,
+}
+
+impl InnerTimer {
+    fn wake(&mut self) -> bool {
+        let ret = if let Some(w) = self.waker.take() {
+            w.wake();
+            true
+        } else {
+            false
+        };
+        self.delta = None;
+        ret
+    }
+}
+
+/// Controller for timers.
+pub(crate) struct Timers {
+    timers: Slab<InnerTimer>,
+
+    epoch: Instant,
+    delta: Duration,
+}
+
+impl Timers {
+    pub(crate) fn new(epoch: Instant) -> Self {
+        Self {
+            timers: Slab::new(),
+
+            epoch,
+            delta: Duration::ZERO,
+        }
+    }
+
+    pub(crate) fn get_time(&self) -> Instant {
+        self.epoch + self.delta
+    }
+
+    #[instrument(skip_all)]
+    pub(crate) fn advance_time(&mut self) -> bool {
+        let mut min_delta = None;
+        let mut n = 0;
+
+        for (_ix, i) in self.timers.iter_mut() {
+            debug_assert_matches!(
+                i,
+                InnerTimer {
+                    waker: None,
+                    delta: None
+                } | InnerTimer {
+                    waker: None,
+                    delta: Some(_)
+                } | InnerTimer {
+                    waker: Some(_),
+                    delta: Some(_)
+                },
+                "invalid inner timer state"
+            );
+
+            let Some(ref delta) = i.delta else {
+                continue;
+            };
+            if *delta > self.delta {
+                min_delta = match min_delta {
+                    None => Some(*delta),
+                    Some(t) => Some(t.min(*delta)),
+                };
+                continue;
+            }
+
+            #[cfg(test)]
+            {
+                tracing::trace!(id = _ix, time = %HumanDuration::new(*delta), "waking timer");
+            }
+
+            if i.wake() {
+                n += 1;
+            }
+        }
+
+        if let Some(t) = min_delta {
+            assert!(t > self.delta);
+            info!("advance time by {}", HumanDuration::new(t - self.delta));
+            self.delta = t;
+
+            for (_ix, i) in self.timers.iter_mut() {
+                if let Some(ref delta) = i.delta
+                    && *delta <= self.delta
+                {
+                    #[cfg(test)]
+                    {
+                        tracing::trace!(id = _ix, time = %HumanDuration::new(*delta), "waking timer");
+                    }
+
+                    if i.wake() {
+                        n += 1;
+                    }
+                }
+            }
+        }
+
+        info!(awakened = n, "done processing timers");
+        n > 0
+    }
+}
+
+/// Handle to timer.
+pub struct Timer {
+    rt: Runtime,
+    index: usize,
+    _pinned: PhantomPinned,
+}
+
+impl Drop for Timer {
+    fn drop(&mut self) {
+        let Some(inner) = self.rt.maybe_inner() else {
+            return;
+        };
+        let mut rt = inner.runtime();
+        let timers = &mut rt.timers().timers;
+        if timers.contains(self.index) {
+            timers.remove(self.index);
+        }
+
+        #[cfg(test)]
+        {
+            tracing::trace!(id = self.index, "dropped timer");
+        }
+    }
+}
+
+impl Future for Timer {
+    type Output = ();
+
+    #[cfg_attr(test, instrument(skip_all))]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let inner = self.rt.inner();
+        let mut rt = inner.runtime();
+        let t = rt
+            .timers()
+            .timers
+            .get_mut(self.index)
+            .expect("timer must exist");
+
+        if t.delta.is_none() {
+            #[cfg(test)]
+            {
+                tracing::trace!(id = self.index, "timer finished");
+            }
+
+            return Poll::Ready(());
+        }
+
+        match t.waker {
+            Some(ref mut w) => w.clone_from(cx.waker()),
+            ref mut w @ None => *w = Some(cx.waker().clone()),
+        }
+
+        #[cfg(test)]
+        {
+            tracing::trace!(id = self.index, "registered timer waker");
+        }
+
+        Poll::Pending
+    }
+}
+
+impl Timer {
+    fn new(timers: &mut Timers, delta: Option<Duration>) -> usize {
+        let index = timers.timers.insert(InnerTimer { waker: None, delta });
+
+        #[cfg(test)]
+        if let Some(delta) = delta {
+            tracing::trace!(id = index, time = %HumanDuration::new(delta), "created new timer");
+        } else {
+            tracing::trace!(id = index, "created new finished timer");
+        }
+
+        index
+    }
+
+    /// Create timer with [`Duration`].
+    #[cfg_attr(test, instrument(skip_all))]
+    pub fn with_duration(rt: Runtime, delta: Duration) -> Self {
+        let inner = rt.inner();
+        let mut g = inner.runtime();
+        let timers = g.timers();
+
+        let delta = delta_nonzero(delta + timers.delta);
+        let index = Self::new(timers, delta);
+
+        Self {
+            rt,
+            index,
+            _pinned: PhantomPinned,
+        }
+    }
+
+    /// Create timer with [`Instant`].
+    #[cfg_attr(test, instrument(skip_all))]
+    pub fn with_instant(rt: Runtime, time: Instant) -> Self {
+        let inner = rt.inner();
+        let mut g = inner.runtime();
+        let timers = g.timers();
+
+        let delta = time
+            .checked_duration_since(timers.get_time())
+            .filter(|t| *t != Duration::ZERO);
+        let index = Self::new(timers, delta);
+
+        Self {
+            rt,
+            index,
+            _pinned: PhantomPinned,
+        }
+    }
+
+    /// Create timer that always resolves.
+    #[cfg_attr(test, instrument(skip_all))]
+    pub fn always_resolve(rt: Runtime) -> Self {
+        let inner = rt.inner();
+        let mut g = inner.runtime();
+        let timers = g.timers();
+        let index = Self::new(timers, None);
+
+        Self {
+            rt,
+            index,
+            _pinned: PhantomPinned,
+        }
+    }
+
+    fn set_delta(&self, timers: &mut Timers, delta: Option<Duration>) {
+        let t = timers.timers.get_mut(self.index).expect("timer must exist");
+        t.delta = delta;
+        if t.delta.is_none() {
+            t.waker = None;
+        }
+
+        #[cfg(test)]
+        if let Some(delta) = delta {
+            tracing::trace!(id = self.index, time = %HumanDuration::new(delta), "reset timer");
+        } else {
+            tracing::trace!(id = self.index, "reset timer");
+        }
+    }
+
+    /// Reset timer to [`Duration`] from now.
+    #[cfg_attr(test, instrument(skip_all))]
+    pub fn set_duration(self: Pin<&mut Self>, delta: Duration) {
+        let inner = self.rt.inner();
+        let mut rt = inner.runtime();
+        let timers = rt.timers();
+
+        let delta = delta_nonzero(delta + timers.delta);
+        self.set_delta(timers, delta);
+    }
+
+    /// Reset timer to [`Instant`].
+    #[cfg_attr(test, instrument(skip_all))]
+    pub fn set_instant(self: Pin<&mut Self>, time: Instant) {
+        let inner = self.rt.inner();
+        let mut rt = inner.runtime();
+        let timers = rt.timers();
+
+        let delta = time
+            .checked_duration_since(timers.get_time())
+            .filter(|t| *t != Duration::ZERO);
+        self.set_delta(timers, delta);
+    }
+
+    /// Reset timer.
+    #[cfg_attr(test, instrument(skip_all))]
+    pub fn reset(self: Pin<&mut Self>) {
+        let inner = self.rt.inner();
+        let mut rt = inner.runtime();
+        let timers = rt.timers();
+        *timers.timers.get_mut(self.index).expect("timer must exist") = InnerTimer {
+            waker: None,
+            delta: None,
+        };
+
+        #[cfg(test)]
+        {
+            tracing::trace!(id = self.index, "reset timer");
+        }
+    }
+}
+
+fn delta_nonzero(delta: Duration) -> Option<Duration> {
+    if delta != Duration::ZERO {
+        Some(delta)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::future::poll_fn;
+    use std::hint::black_box;
+    use std::pin::pin;
+
+    use test_log::test;
+
+    use crate::rt::Executor;
+    use crate::utils::run_test;
+
+    #[test]
+    fn test_timer_create() {
+        #[instrument]
+        fn test() {
+            let executor = Executor::builder().build();
+            let rt = executor.runtime();
+            let _t1 = black_box(Timer::with_duration(rt.clone(), Duration::from_secs(1)));
+            let _t2a = black_box(Timer::with_instant(
+                rt.clone(),
+                rt.get_time() + Duration::from_secs(1),
+            ));
+            let _t2b = black_box(Timer::with_instant(rt.clone(), rt.get_time()));
+            let _t3 = black_box(Timer::always_resolve(rt.clone()));
+        }
+
+        run_test(test);
+    }
+
+    #[test]
+    fn test_timer_always_resolve() {
+        #[instrument]
+        fn test() {
+            let mut executor = Executor::builder().build();
+            let rt = executor.runtime();
+
+            let rt_ = rt.clone();
+            rt_.spawn(async move {
+                info!("waiting for 120 seconds");
+                Timer::always_resolve(rt).await;
+                info!("done waiting");
+            });
+
+            executor.run();
+        }
+
+        run_test(test);
+    }
+
+    #[test]
+    fn test_timer_wait() {
+        #[instrument]
+        fn test() {
+            let mut executor = Executor::builder().build();
+            let rt = executor.runtime();
+
+            let rt_ = rt.clone();
+            rt_.spawn(async move {
+                info!("waiting for 120 seconds");
+                Timer::with_duration(rt, Duration::from_secs(120)).await;
+                info!("done waiting");
+            });
+
+            executor.run();
+        }
+
+        run_test(test);
+    }
+
+    #[test]
+    fn test_timer_multi() {
+        #[instrument]
+        fn test() {
+            let mut executor = Executor::builder().build();
+            let rt = executor.runtime();
+
+            let rt_ = rt.clone();
+            for i in 0..2 {
+                let rt = rt.clone();
+                rt_.spawn(async move {
+                    info!("waiting for {i} seconds");
+                    Timer::with_duration(rt, Duration::from_secs(i)).await;
+                    info!("done waiting");
+                });
+            }
+
+            executor.run();
+        }
+
+        run_test(test);
+    }
+}

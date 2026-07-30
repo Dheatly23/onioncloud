@@ -5,8 +5,7 @@
 //! `onioncloud-tart` is an async runtime focused on testing and fuzzing async code.
 
 mod oneshot;
-mod rt;
+pub mod rt;
+pub mod timer;
 mod utils;
 mod waker;
-
-pub use rt::*;
