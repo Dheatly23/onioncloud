@@ -1,4 +1,5 @@
 use std::debug_assert_matches;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::future::Future;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
@@ -122,6 +123,46 @@ impl Timers {
 }
 
 /// Handle to timer.
+///
+/// # Re-await safety
+///
+/// Timer is always safe to poll, even after it resolves.
+/// Timer will only do two things when polled:
+/// - Register waker and return [`Poll::Pending`].
+/// - Return [`Poll::Ready`].
+///
+/// That way, you can reuse the same timer indefinitely.
+///
+/// # Example
+///
+/// ```
+/// # use std::pin::pin;
+/// # use std::time::Duration;
+/// # use onioncloud_tart::{rt::Executor, timer::Timer};
+/// // Make executor
+/// let mut executor = Executor::builder().build();
+/// let rt = executor.runtime();
+///
+/// rt.spawn({
+///     let rt = rt.clone();
+///     async move {
+///         // Wait for 1 second
+///         Timer::with_duration(rt.clone(), Duration::from_secs(1)).await;
+///
+///         // Alternate construction with get_time()
+///         Timer::with_instant(rt.clone(), rt.get_time() + Duration::from_secs(1)).await;
+///
+///         // Reset timer
+///         let mut timer = pin!(Timer::with_duration(rt.clone(), Duration::from_secs(1)));
+///         timer.as_mut().reset();
+///         timer.await;
+///     }
+/// });
+///
+/// // Run executor
+/// executor.run();
+/// ```
+#[must_use]
 pub struct Timer {
     rt: Runtime,
     index: usize,
@@ -143,6 +184,15 @@ impl Drop for Timer {
         {
             tracing::trace!(id = self.index, "dropped timer");
         }
+    }
+}
+
+impl Debug for Timer {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("Timer")
+            .field("rt", &self.rt)
+            .field("index", &self.index)
+            .finish()
     }
 }
 
@@ -263,6 +313,8 @@ impl Timer {
     }
 
     /// Reset timer to [`Duration`] from now.
+    ///
+    /// See also: [`Timer::with_duration`].
     #[cfg_attr(test, instrument(skip_all))]
     pub fn set_duration(self: Pin<&mut Self>, delta: Duration) {
         let inner = self.rt.inner();
@@ -274,6 +326,8 @@ impl Timer {
     }
 
     /// Reset timer to [`Instant`].
+    ///
+    /// See also: [`Timer::with_instant`].
     #[cfg_attr(test, instrument(skip_all))]
     pub fn set_instant(self: Pin<&mut Self>, time: Instant) {
         let inner = self.rt.inner();
@@ -287,6 +341,10 @@ impl Timer {
     }
 
     /// Reset timer.
+    ///
+    /// Timer will instantly resolves.
+    ///
+    /// See also: [`Timer::always_resolve`].
     #[cfg_attr(test, instrument(skip_all))]
     pub fn reset(self: Pin<&mut Self>) {
         let inner = self.rt.inner();
@@ -316,7 +374,6 @@ fn delta_nonzero(delta: Duration) -> Option<Duration> {
 mod tests {
     use super::*;
 
-    use std::future::poll_fn;
     use std::hint::black_box;
     use std::pin::pin;
 
@@ -371,12 +428,54 @@ mod tests {
             let mut executor = Executor::builder().build();
             let rt = executor.runtime();
 
-            let rt_ = rt.clone();
-            rt_.spawn(async move {
-                info!("waiting for 120 seconds");
-                Timer::with_duration(rt, Duration::from_secs(120)).await;
-                info!("done waiting");
+            rt.spawn({
+                let rt = rt.clone();
+                async move {
+                    info!("waiting for 265409 seconds");
+                    Timer::with_duration(rt, Duration::from_secs(265409)).await;
+                    info!("done waiting");
+                }
             });
+
+            rt.spawn({
+                let rt = rt.clone();
+                async move {
+                    info!("waiting for 274028 seconds");
+                    Timer::with_duration(rt, Duration::from_secs(274028)).await;
+                    info!("done waiting");
+                }
+            });
+
+            rt.spawn({
+                let rt = rt.clone();
+                async move {
+                    info!("waiting for 288693 seconds");
+                    Timer::with_duration(rt, Duration::from_secs(288693)).await;
+                    info!("done waiting");
+                }
+            });
+
+            executor.run();
+        }
+
+        run_test(test);
+    }
+
+    #[test]
+    fn test_timer_multi() {
+        #[instrument]
+        fn test() {
+            let mut executor = Executor::builder().build();
+            let rt_ = executor.runtime();
+
+            for i in 0..10 {
+                let rt = rt_.clone();
+                rt_.spawn(async move {
+                    info!("waiting for {i} seconds");
+                    Timer::with_duration(rt, Duration::from_secs(i)).await;
+                    info!("done waiting");
+                });
+            }
 
             executor.run();
         }
@@ -400,6 +499,57 @@ mod tests {
                     _ = Timer::with_duration(rt.clone(), Duration::from_secs(1)).fuse() => (),
                     _ = Timer::with_duration(rt.clone(), Duration::from_secs(3)).fuse() => panic!("longer timer fires before shorter timer"),
                 }
+
+                info!("done waiting");
+            });
+
+            executor.run();
+        }
+
+        run_test(test);
+    }
+
+    #[test]
+    fn test_timer_reset() {
+        #[instrument]
+        fn test() {
+            let mut executor = Executor::builder().build();
+            let rt = executor.runtime();
+
+            let rt_ = rt.clone();
+            rt_.spawn(async move {
+                info!("waiting...");
+
+                let mut t1 = pin!(Timer::with_duration(rt.clone(), Duration::from_secs(2)));
+                let mut t2 = pin!(Timer::with_duration(rt.clone(), Duration::from_secs(1)));
+                let mut t3 = pin!(Timer::with_duration(rt.clone(), Duration::from_secs(2)));
+
+                select_biased! {
+                    _ = t1.as_mut().fuse() => panic!("longer timer fires before shorter timer"),
+                    _ = t2.as_mut().fuse() => (),
+                    _ = t3.as_mut().fuse() => panic!("longer timer fires before shorter timer"),
+                }
+
+                info!("done waiting, resetting timer");
+
+                t2.as_mut().set_duration(Duration::from_secs(5));
+
+                select_biased! {
+                    _ = t1.fuse() => (),
+                    _ = t2.as_mut().fuse() => panic!("longer timer fires before shorter timer"),
+                    _ = t3.as_mut().fuse() => panic!("longer timer fires before shorter timer"),
+                }
+
+                info!("done waiting, resetting another timer");
+
+                t3.as_mut().set_duration(Duration::from_secs(1));
+
+                select_biased! {
+                    _ = t2.as_mut().fuse() => panic!("longer timer fires before shorter timer"),
+                    _ = t3.fuse() => (),
+                }
+
+                t2.await;
 
                 info!("done waiting");
             });

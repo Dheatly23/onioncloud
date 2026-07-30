@@ -1,5 +1,6 @@
 mod guard;
 
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::future::Future;
 use std::mem::ManuallyDrop;
 use std::pin::Pin;
@@ -155,6 +156,12 @@ impl Tasklist {
 /// When `await`-ed, it will either return the return value of subtask or panic if subtask panicked.
 pub struct TaskHandle<T: Sized>(Receiver<T>);
 
+impl<T: Sized> Debug for TaskHandle<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "TaskHandle")
+    }
+}
+
 impl<T: Sized> Future for TaskHandle<T> {
     type Output = T;
 
@@ -173,6 +180,12 @@ impl<T: Sized> FusedFuture for TaskHandle<T> {
 #[derive(Clone)]
 pub struct Runtime(Weak<RuntimeGuard>);
 
+impl Debug for Runtime {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_tuple("Runtime").field(&self.0.as_ptr()).finish()
+    }
+}
+
 impl Runtime {
     pub(crate) fn maybe_inner(&self) -> Option<Arc<RuntimeGuard>> {
         self.0.upgrade()
@@ -185,6 +198,31 @@ impl Runtime {
     /// Gets current time.
     ///
     /// Unlike [`Instant::now`], this returns deterministic time in runtime.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use std::time::Duration;
+    /// # use onioncloud_tart::{rt::Executor, timer::Timer};
+    /// // Make default executor
+    /// let mut executor = Executor::builder().build();
+    /// let rt = executor.runtime();
+    ///
+    /// rt.clone().spawn(async move {
+    ///     // Get current time
+    ///     let t1 = rt.get_time();
+    ///
+    ///     // Wait for 1 second
+    ///     Timer::with_duration(rt.clone(), Duration::from_secs(1)).await;
+    ///
+    ///     // Get current time (after 1 second)
+    ///     let t2 = rt.get_time();
+    ///     assert_eq!(t2.checked_duration_since(t1), Some(Duration::from_secs(1)));
+    /// });
+    ///
+    /// // Run executor
+    /// executor.run();
+    /// ```
     pub fn get_time(&self) -> Instant {
         self.inner().runtime().timers().get_time()
     }
@@ -225,8 +263,27 @@ impl Runtime {
 }
 
 /// Runtime executor.
+///
+/// # Example
+///
+/// ```
+/// # use onioncloud_tart::rt::Executor;
+/// // Make default executor
+/// let mut executor = Executor::builder().build();
+///
+/// // Run executor
+/// executor.run();
+/// ```
 pub struct Executor {
     rt: Arc<RuntimeGuard>,
+}
+
+impl Debug for Executor {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("Executor")
+            .field("rt", &Arc::as_ptr(&self.rt))
+            .finish()
+    }
 }
 
 impl Executor {
@@ -310,14 +367,29 @@ impl ExecutorBuilder {
 mod tests {
     use super::*;
 
-    use std::future::poll_fn;
     use std::hint::black_box;
-    use std::task::Poll;
 
     use futures_util::future::pending;
     use test_log::test;
 
     use crate::utils::run_test;
+
+    #[derive(Default)]
+    struct Yield(bool);
+
+    impl Future for Yield {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            let this = Pin::into_inner(self);
+            if this.0 {
+                return Poll::Ready(());
+            }
+            this.0 = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
 
     #[test]
     fn test_executor_build() {
@@ -365,20 +437,39 @@ mod tests {
 
                 let _s = S();
 
-                let mut yielded = false;
-                poll_fn(|cx| {
-                    if yielded {
-                        return Poll::Ready(());
-                    }
-
-                    yielded = true;
-                    cx.waker().wake_by_ref();
-
-                    Poll::Pending
-                })
-                .await;
+                Yield::default().await;
 
                 info!("called from task");
+            });
+
+            executor.run();
+        }
+
+        run_test(test);
+    }
+
+    #[test]
+    fn test_executor_spawn_join() {
+        #[instrument]
+        fn test() {
+            let mut executor = Executor::builder().build();
+
+            let rt_ = executor.runtime();
+            let rt = rt_.clone();
+            rt_.spawn(async move {
+                info!("spawning task");
+
+                let handle = rt.spawn(async move {
+                    Yield::default().await;
+                    info!("called from subtask");
+                    Yield::default().await;
+                });
+
+                info!("joining handle");
+
+                handle.await;
+
+                info!("done joining");
             });
 
             executor.run();
