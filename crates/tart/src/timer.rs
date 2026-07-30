@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
+use futures_core::FusedFuture;
 use humantime::Duration as HumanDuration;
 use slab::Slab;
 use tracing::{info, instrument};
@@ -232,6 +233,13 @@ impl Future for Timer {
     }
 }
 
+/// Marks [`Timer`] as never terminated so it can be used for `select!`.
+impl FusedFuture for Timer {
+    fn is_terminated(&self) -> bool {
+        false
+    }
+}
+
 impl Timer {
     fn allocate(timers: &mut Timers, delta: Option<Duration>) -> usize {
         let index = timers.timers.insert(InnerTimer { waker: None, delta });
@@ -377,7 +385,7 @@ mod tests {
     use std::hint::black_box;
     use std::pin::pin;
 
-    use futures_util::{FutureExt, select_biased};
+    use futures_util::select_biased;
     use test_log::test;
 
     use crate::rt::Executor;
@@ -495,9 +503,9 @@ mod tests {
                 info!("waiting...");
 
                 select_biased!{
-                    _ = Timer::with_duration(rt.clone(), Duration::from_secs(2)).fuse() => panic!("longer timer fires before shorter timer"),
-                    _ = Timer::with_duration(rt.clone(), Duration::from_secs(1)).fuse() => (),
-                    _ = Timer::with_duration(rt.clone(), Duration::from_secs(3)).fuse() => panic!("longer timer fires before shorter timer"),
+                    _ = Timer::with_duration(rt.clone(), Duration::from_secs(2)) => panic!("longer timer fires before shorter timer"),
+                    _ = Timer::with_duration(rt.clone(), Duration::from_secs(1)) => (),
+                    _ = Timer::with_duration(rt.clone(), Duration::from_secs(3)) => panic!("longer timer fires before shorter timer"),
                 }
 
                 info!("done waiting");
@@ -525,9 +533,9 @@ mod tests {
                 let mut t3 = pin!(Timer::with_duration(rt.clone(), Duration::from_secs(2)));
 
                 select_biased! {
-                    _ = t1.as_mut().fuse() => panic!("longer timer fires before shorter timer"),
-                    _ = t2.as_mut().fuse() => (),
-                    _ = t3.as_mut().fuse() => panic!("longer timer fires before shorter timer"),
+                    _ = t1 => panic!("longer timer fires before shorter timer"),
+                    _ = t2 => (),
+                    _ = t3 => panic!("longer timer fires before shorter timer"),
                 }
 
                 info!("done waiting, resetting timer");
@@ -535,9 +543,9 @@ mod tests {
                 t2.as_mut().set_duration(Duration::from_secs(5));
 
                 select_biased! {
-                    _ = t1.fuse() => (),
-                    _ = t2.as_mut().fuse() => panic!("longer timer fires before shorter timer"),
-                    _ = t3.as_mut().fuse() => panic!("longer timer fires before shorter timer"),
+                    _ = t1 => (),
+                    _ = t2 => panic!("longer timer fires before shorter timer"),
+                    _ = t3 => panic!("longer timer fires before shorter timer"),
                 }
 
                 info!("done waiting, resetting another timer");
@@ -545,8 +553,8 @@ mod tests {
                 t3.as_mut().set_duration(Duration::from_secs(1));
 
                 select_biased! {
-                    _ = t2.as_mut().fuse() => panic!("longer timer fires before shorter timer"),
-                    _ = t3.fuse() => (),
+                    _ = t2 => panic!("longer timer fires before shorter timer"),
+                    _ = t3 => (),
                 }
 
                 t2.await;
