@@ -233,7 +233,7 @@ impl Future for Timer {
 }
 
 impl Timer {
-    fn new(timers: &mut Timers, delta: Option<Duration>) -> usize {
+    fn allocate(timers: &mut Timers, delta: Option<Duration>) -> usize {
         let index = timers.timers.insert(InnerTimer { waker: None, delta });
 
         #[cfg(test)]
@@ -254,7 +254,7 @@ impl Timer {
         let timers = g.timers();
 
         let delta = delta_nonzero(delta + timers.delta);
-        let index = Self::new(timers, delta);
+        let index = Self::allocate(timers, delta);
 
         Self {
             rt,
@@ -273,7 +273,7 @@ impl Timer {
         let delta = time
             .checked_duration_since(timers.get_time())
             .filter(|t| *t != Duration::ZERO);
-        let index = Self::new(timers, delta);
+        let index = Self::allocate(timers, delta);
 
         Self {
             rt,
@@ -288,7 +288,7 @@ impl Timer {
         let inner = rt.inner();
         let mut g = inner.runtime();
         let timers = g.timers();
-        let index = Self::new(timers, None);
+        let index = Self::allocate(timers, None);
 
         Self {
             rt,
