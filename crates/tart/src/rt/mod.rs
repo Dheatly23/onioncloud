@@ -2,6 +2,7 @@ mod guard;
 
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::future::Future;
+use std::marker::PhantomPinned;
 use std::mem::ManuallyDrop;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
@@ -154,7 +155,8 @@ impl Tasklist {
 ///
 /// Spawned task will run independently. You can safely discards the handle if you don't need it.
 /// When `await`-ed, it will either return the return value of subtask or panic if subtask panicked.
-pub struct TaskHandle<T: Sized>(Receiver<T>);
+#[pin_project]
+pub struct TaskHandle<T: Sized>(#[pin] Receiver<T>, #[pin] PhantomPinned);
 
 impl<T: Sized> Debug for TaskHandle<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
@@ -166,7 +168,7 @@ impl<T: Sized> Future for TaskHandle<T> {
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
-        Pin::new(&mut Pin::into_inner(self).0).poll(cx)
+        self.project().0.poll(cx)
     }
 }
 
@@ -265,7 +267,7 @@ impl Runtime {
         let mut rt = this.runtime();
         let (send, recv) = oneshot::<T>();
         rt.queue_task(Box::pin(Handle { fut: task, send }));
-        TaskHandle(recv)
+        TaskHandle(recv, PhantomPinned)
     }
 }
 
