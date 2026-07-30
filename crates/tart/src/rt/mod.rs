@@ -177,6 +177,12 @@ impl<T: Sized> FusedFuture for TaskHandle<T> {
 }
 
 /// Handle to runtime.
+///
+/// # Runtime validity
+///
+/// Runtime will only valid as long as it's [`Executor`] is not dropped.
+/// After the [`Executor`] is dropped, any operation with it's [`Runtime`] will panic.
+/// This ensure that [`Runtime`] is not leaked after [`Executor`] finished running.
 #[derive(Clone)]
 pub struct Runtime(Weak<RuntimeGuard>);
 
@@ -223,6 +229,7 @@ impl Runtime {
     /// // Run executor
     /// executor.run();
     /// ```
+    #[must_use]
     pub fn get_time(&self) -> Instant {
         self.inner().runtime().timers().get_time()
     }
@@ -274,6 +281,7 @@ impl Runtime {
 /// // Run executor
 /// executor.run();
 /// ```
+#[must_use]
 pub struct Executor {
     rt: Arc<RuntimeGuard>,
 }
@@ -288,12 +296,14 @@ impl Debug for Executor {
 
 impl Executor {
     /// Create default builder for executor.
-    #[must_use]
     pub fn builder() -> ExecutorBuilder {
         ExecutorBuilder::default()
     }
 
     /// Gets runtime of executor.
+    ///
+    /// Runtime is only valid as long as it's [`Executor`] is not dropped.
+    /// See [`Runtime`] docs for more info.
     #[must_use]
     pub fn runtime(&self) -> Runtime {
         Runtime(Arc::downgrade(&self.rt))
@@ -342,7 +352,7 @@ impl Executor {
 
 /// Builder for [`Executor`].
 #[derive(Default)]
-#[non_exhaustive]
+#[must_use]
 pub struct ExecutorBuilder {
     epoch: Option<Instant>,
 }
@@ -353,7 +363,6 @@ impl ExecutorBuilder {
         self
     }
 
-    #[must_use]
     pub fn build(self) -> Executor {
         Executor {
             rt: Arc::new(RuntimeGuard::new(InnerRuntime::new(Timers::new(
