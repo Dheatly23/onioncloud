@@ -320,6 +320,7 @@ mod tests {
     use std::hint::black_box;
     use std::pin::pin;
 
+    use futures_util::{FutureExt, select_biased};
     use test_log::test;
 
     use crate::rt::Executor;
@@ -384,21 +385,24 @@ mod tests {
     }
 
     #[test]
-    fn test_timer_multi() {
+    fn test_timer_select() {
         #[instrument]
         fn test() {
             let mut executor = Executor::builder().build();
             let rt = executor.runtime();
 
             let rt_ = rt.clone();
-            for i in 0..2 {
-                let rt = rt.clone();
-                rt_.spawn(async move {
-                    info!("waiting for {i} seconds");
-                    Timer::with_duration(rt, Duration::from_secs(i)).await;
-                    info!("done waiting");
-                });
-            }
+            rt_.spawn(async move {
+                info!("waiting...");
+
+                select_biased!{
+                    _ = Timer::with_duration(rt.clone(), Duration::from_secs(2)).fuse() => panic!("longer timer fires before shorter timer"),
+                    _ = Timer::with_duration(rt.clone(), Duration::from_secs(1)).fuse() => (),
+                    _ = Timer::with_duration(rt.clone(), Duration::from_secs(3)).fuse() => panic!("longer timer fires before shorter timer"),
+                }
+
+                info!("done waiting");
+            });
 
             executor.run();
         }
