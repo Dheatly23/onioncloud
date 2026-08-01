@@ -359,6 +359,7 @@ dependencies = [
  "arbitrary",
  "libfuzzer-sys",
  "onioncloud-tart",
+ "tracing",
 ]
 
 [[package]]

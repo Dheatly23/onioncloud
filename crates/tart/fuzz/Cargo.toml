@@ -11,6 +11,10 @@ cargo-fuzz = true
 arbitrary.workspace = true
 libfuzzer-sys.workspace = true
 
+[dependencies.tracing]
+workspace = true
+features = ["max_level_off"]
+
 [dependencies.onioncloud-tart]
 path = ".."
 
