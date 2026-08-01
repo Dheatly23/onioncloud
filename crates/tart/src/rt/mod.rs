@@ -334,6 +334,14 @@ impl Executor {
                 if !res.any_running {
                     res.any_running |= rt.timers().advance_time();
                 }
+
+                #[cfg(fuzzing)]
+                {
+                    let time = Instant::now();
+                    if time.duration_since(rt.timers().epoch) >= std::time::Duration::from_secs(1) {
+                        panic!("you're taking too long!");
+                    }
+                }
             }
 
             if !res.any_task {

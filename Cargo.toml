@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "crates/ll-cell",
   "crates/tart",
+  "crates/tart/fuzz",
 ]
 
 [workspace.package]
@@ -30,6 +31,7 @@ futures-sink = "0.3"
 http-body-util = "0.1"
 humantime = "2"
 hyper = "1"
+libfuzzer-sys = "0.4"
 loom = "0.7"
 memchr = "2"
 num-traits = "0.2"
@@ -56,6 +58,12 @@ zerocopy = "0.8"
 version = "1"
 features = [
   "backtrace",
+]
+
+[workspace.dependencies.arbitrary]
+version = "1"
+features = [
+  "derive",
 ]
 
 [workspace.dependencies.chrono]

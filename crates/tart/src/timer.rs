@@ -37,7 +37,7 @@ impl InnerTimer {
 pub(crate) struct Timers {
     timers: Slab<InnerTimer>,
 
-    epoch: Instant,
+    pub(crate) epoch: Instant,
     delta: Duration,
 }
 

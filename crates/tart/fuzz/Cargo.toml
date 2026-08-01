@@ -1,0 +1,22 @@
+[package]
+name = "onioncloud-tart-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary.workspace = true
+libfuzzer-sys.workspace = true
+
+[dependencies.onioncloud-tart]
+path = ".."
+
+[[bin]]
+name = "timer"
+path = "fuzz_targets/timer.rs"
+test = false
+doc = false
+bench = false

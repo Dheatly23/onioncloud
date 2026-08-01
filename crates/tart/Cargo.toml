@@ -42,3 +42,7 @@ loom = ["dep:loom"]
 
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"
+
+[lints.rust.unexpected_cfgs]
+level = "deny"
+check-cfg = ["cfg(fuzzing)"]
