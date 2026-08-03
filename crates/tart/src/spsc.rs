@@ -297,8 +297,9 @@ impl<T: Sized> PinnedDrop for Sender<T> {
             trace!(addr = ?p.as_ptr(), "dropping sending half of spsc channel");
         }
 
+        let t = SENDER_FLAG | if g.is_ok() { LOCK_FLAG } else { 0 };
         forget(g);
-        let t = r.lock.fetch_sub(LOCK_FLAG | SENDER_FLAG, Release);
+        let t = r.lock.fetch_sub(t, Release);
         assert!(
             t & SENDER_FLAG != 0,
             "Flag {t:02x} does not contain sender flag. It's a double-free bug."
@@ -481,8 +482,9 @@ impl<T: Sized> PinnedDrop for Receiver<T> {
             trace!(addr = ?p.as_ptr(), "dropping receiving half of spsc channel");
         }
 
+        let t = RECEIVER_FLAG | if g.is_ok() { LOCK_FLAG } else { 0 };
         forget(g);
-        let t = r.lock.fetch_sub(LOCK_FLAG | RECEIVER_FLAG, Release);
+        let t = r.lock.fetch_sub(t, Release);
         assert!(
             t & RECEIVER_FLAG != 0,
             "Flag {t:02x} does not contain receiver flag. It's a double-free bug."
