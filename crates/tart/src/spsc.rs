@@ -297,7 +297,7 @@ impl<T: Sized> PinnedDrop for Sender<T> {
             trace!(addr = ?p.as_ptr(), "dropping sending half of spsc channel");
         }
 
-        let t = SENDER_FLAG | if g.is_ok() { LOCK_FLAG } else { 0 };
+        let t = SENDER_FLAG | if g.is_some() { LOCK_FLAG } else { 0 };
         forget(g);
         let t = r.lock.fetch_sub(t, Release);
         assert!(
@@ -482,7 +482,7 @@ impl<T: Sized> PinnedDrop for Receiver<T> {
             trace!(addr = ?p.as_ptr(), "dropping receiving half of spsc channel");
         }
 
-        let t = RECEIVER_FLAG | if g.is_ok() { LOCK_FLAG } else { 0 };
+        let t = RECEIVER_FLAG | if g.is_some() { LOCK_FLAG } else { 0 };
         forget(g);
         let t = r.lock.fetch_sub(t, Release);
         assert!(
