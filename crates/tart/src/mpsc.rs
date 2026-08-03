@@ -876,6 +876,61 @@ mod tests {
     }
 
     #[test]
+    fn test_mpsc_send_many_sender() {
+        #[instrument]
+        fn test() {
+            reset_drop_cnt();
+
+            let waker = MultiWaker::new(Selector::default());
+
+            {
+                let w = waker.make_waker(0);
+                let mut cx = Context::from_waker(&w);
+                let w = waker.make_waker(1);
+                let mut cx2 = Context::from_waker(&w);
+                let w = waker.make_waker(2);
+                let mut cx3 = Context::from_waker(&w);
+                let (send, recv) = make_channel::<u32>(2);
+                let mut send2 = pin!(send.clone());
+                let mut send = pin!(send);
+                let mut recv = pin!(recv);
+
+                info!("sending data");
+                assert_eq!(waker.take_flags(false), 0);
+                assert_matches!(send.as_mut().poll_ready(&mut cx), Poll::Ready(Ok(())));
+                assert_eq!(waker.take_flags(false), 0);
+                assert_matches!(send.as_mut().start_send(1), Ok(()));
+                assert_matches!(send2.as_mut().poll_ready(&mut cx2), Poll::Ready(Ok(())));
+                assert_eq!(waker.take_flags(false), 0);
+                assert_matches!(send2.as_mut().start_send(2), Ok(()));
+                assert_matches!(send.as_mut().poll_ready(&mut cx), Poll::Pending);
+                assert_eq!(waker.take_flags(false), 0);
+                assert_matches!(send2.as_mut().poll_ready(&mut cx2), Poll::Pending);
+                assert_eq!(waker.take_flags(false), 0);
+
+                info!("receiving data");
+                assert_eq!(recv.as_mut().poll_next(&mut cx3), Poll::Ready(Some(1)));
+                assert_eq!(waker.take_flags(false), 3);
+                assert_eq!(recv.as_mut().poll_next(&mut cx3), Poll::Ready(Some(2)));
+                assert_eq!(waker.take_flags(false), 0);
+                assert_eq!(recv.as_mut().poll_next(&mut cx3), Poll::Pending);
+                assert_eq!(waker.take_flags(false), 0);
+
+                info!("closing sender");
+                assert_matches!(send.as_mut().poll_close(&mut cx), Poll::Ready(Ok(())));
+                assert_matches!(send2.as_mut().poll_close(&mut cx2), Poll::Ready(Ok(())));
+                assert_eq!(waker.take_flags(false), 4);
+                assert_eq!(recv.as_mut().poll_next(&mut cx), Poll::Ready(None));
+                assert_eq!(waker.take_flags(false), 0);
+            }
+
+            assert_eq!(get_drop_cnt(), 1, "drop count mismatch");
+        }
+
+        run_test(test);
+    }
+
+    #[test]
     fn test_mpsc_send_async() {
         #[instrument]
         fn test(register_send_first: bool) {
@@ -931,7 +986,7 @@ mod tests {
             let rt = executor.runtime();
             let (send, recv) = make_channel::<u32>(4);
 
-            #[instrument]
+            #[instrument(skip_all)]
             async fn send_task(send: Sender<u32>) {
                 let mut send = pin!(send);
                 info!("sending data");
@@ -942,7 +997,7 @@ mod tests {
                 send.close().await.unwrap();
             }
 
-            #[instrument]
+            #[instrument(skip_all)]
             async fn recv_task(recv: Receiver<u32>) {
                 let mut recv = pin!(recv);
                 info!("receiving data");
@@ -969,5 +1024,55 @@ mod tests {
             test(false);
             test(true);
         });
+    }
+
+    #[test]
+    fn test_mpsc_send_many_sender_async() {
+        #[instrument]
+        fn test() {
+            reset_drop_cnt();
+
+            let mut executor = Executor::builder().build();
+            let rt = executor.runtime();
+            let (send, recv) = make_channel::<(usize, u32)>(4);
+
+            #[instrument(skip(send))]
+            async fn send_task(send: Sender<(usize, u32)>, index: usize) {
+                let mut send = pin!(send);
+                info!("sending data");
+                for i in 0..10 {
+                    info!("sending ({index}, {i})");
+                    send.feed((index, i)).await.unwrap();
+                }
+                info!("closing sender");
+                send.close().await.unwrap();
+            }
+
+            #[instrument(skip_all)]
+            async fn recv_task(recv: Receiver<(usize, u32)>) {
+                let mut recv = pin!(recv);
+                let mut v = vec![0; 10];
+                info!("receiving data");
+                while !v.iter().all(|t| *t >= 10) {
+                    let (i, r) = recv.next().await.expect("sender should not be closed");
+                    info!("received ({i}, {r})");
+                    assert_eq!(r, v[i], "mismatch at index {i}");
+                    v[i] += 1;
+                }
+                assert_eq!(recv.next().await, None);
+            }
+
+            for i in 0..10 {
+                rt.spawn(send_task(send.clone(), i));
+            }
+            rt.spawn(recv_task(recv));
+            drop(send);
+
+            executor.run();
+
+            assert_eq!(get_drop_cnt(), 12, "drop count mismatch");
+        }
+
+        run_test(test);
     }
 }
