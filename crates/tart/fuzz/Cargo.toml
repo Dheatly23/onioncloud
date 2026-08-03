@@ -9,7 +9,9 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary.workspace = true
+futures-util.workspace = true
 libfuzzer-sys.workspace = true
+pin-project.workspace = true
 
 [dependencies.tracing]
 workspace = true
@@ -21,6 +23,13 @@ path = ".."
 [[bin]]
 name = "timer"
 path = "fuzz_targets/timer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "spsc"
+path = "fuzz_targets/spsc.rs"
 test = false
 doc = false
 bench = false

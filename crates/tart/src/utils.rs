@@ -114,7 +114,7 @@ impl<T: Sized> ArcLike<T> {
         #[cfg(test)]
         {
             tracing::trace!(
-                addr = tracing::field::debug(ret.p.as_ptr()),
+                addr = ?ret.p.as_ptr(),
                 "creating new value of {}",
                 type_name::<T>()
             );
@@ -145,7 +145,7 @@ impl<T: Sized> ArcLike<T> {
         #[cfg(test)]
         {
             tracing::trace!(
-                addr = tracing::field::debug(self.p.as_ptr()),
+                addr = ?self.p.as_ptr(),
                 "increasing reference count of {}",
                 type_name::<T>()
             );
@@ -161,7 +161,7 @@ impl<T: Sized> ArcLike<T> {
         #[cfg(test)]
         {
             tracing::trace!(
-                addr = tracing::field::debug(self.p.as_ptr()),
+                addr = ?self.p.as_ptr(),
                 "decreasing reference count of {}",
                 type_name::<T>()
             );
@@ -177,7 +177,7 @@ impl<T: Sized> ArcLike<T> {
             #[cfg(test)]
             {
                 tracing::trace!(
-                    addr = tracing::field::debug(p),
+                    addr = ?p,
                     "dropping value of {}",
                     type_name::<T>()
                 );
@@ -186,8 +186,9 @@ impl<T: Sized> ArcLike<T> {
 
             // SAFETY: Pointer points to valid allocation and we're about to drop it.
             unsafe {
+                let layout = Layout::for_value(&*p);
                 drop_in_place(p);
-                dealloc(p.cast(), Layout::for_value(&*p));
+                dealloc(p.cast(), layout);
             }
         }
     }

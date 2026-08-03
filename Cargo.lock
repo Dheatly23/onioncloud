@@ -341,6 +341,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures-core",
+ "futures-sink",
  "futures-util",
  "humantime",
  "loom",
@@ -357,8 +358,10 @@ name = "onioncloud-tart-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
+ "futures-util",
  "libfuzzer-sys",
  "onioncloud-tart",
+ "pin-project",
  "tracing",
 ]
 

@@ -173,7 +173,7 @@ unsafe fn wake(p: *const ()) {
     #[cfg(test)]
     {
         tracing::trace!(
-            addr = tracing::field::debug(r.get_raw()),
+            addr = ?r.get_raw(),
             bit = n,
             bank = if bank { "left" } else { "right" },
             "waking by value",
@@ -194,7 +194,7 @@ unsafe fn wake_ref(p: *const ()) {
     #[cfg(test)]
     {
         tracing::trace!(
-            addr = tracing::field::debug(r.get_raw()),
+            addr = ?r.get_raw(),
             bit = n,
             bank = if bank { "left" } else { "right" },
             "waking by reference",

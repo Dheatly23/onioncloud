@@ -6,6 +6,7 @@
 
 mod oneshot;
 pub mod rt;
+pub mod spsc;
 pub mod timer;
 mod utils;
 mod waker;

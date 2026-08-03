@@ -1,9 +1,9 @@
 #![no_main]
 
 use std::future::Future;
+use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use std::pin::Pin;
 
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -38,8 +38,12 @@ impl TaskAction {
     async fn run_action(&self, rt: &Runtime, epoch: &Instant) {
         match self {
             Self::PollReady => Yield::default().await,
-            Self::WaitDuration(dur) => Timer::with_duration(rt.clone(), Duration::from_nanos(*dur)).await,
-            Self::WaitEpoch(dur) => Timer::with_instant(rt.clone(), *epoch + Duration::from_nanos(*dur)).await,
+            Self::WaitDuration(dur) => {
+                Timer::with_duration(rt.clone(), Duration::from_nanos(*dur)).await
+            }
+            Self::WaitEpoch(dur) => {
+                Timer::with_instant(rt.clone(), *epoch + Duration::from_nanos(*dur)).await
+            }
         }
     }
 }

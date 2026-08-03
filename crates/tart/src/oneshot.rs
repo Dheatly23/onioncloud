@@ -50,14 +50,15 @@ unsafe fn drop_inner<T: Sized>(p: NonNull<Inner<T>>) {
 
     #[cfg(test)]
     {
-        tracing::trace!(addr = tracing::field::debug(p), "dropping oneshot channel");
+        tracing::trace!(addr = ?p, "dropping oneshot channel");
         inc_drop_cnt();
     }
 
     // SAFETY: Pointer points to valid allocation and we're about to drop it.
     unsafe {
+        let layout = Layout::for_value(&*p);
         drop_in_place(p);
-        dealloc(p.cast(), Layout::for_value(&*p));
+        dealloc(p.cast(), layout);
     }
 }
 
@@ -98,7 +99,7 @@ impl<T: Sized> Sender<T> {
 
         #[cfg(test)]
         {
-            tracing::trace!(addr = tracing::field::debug(p.as_ptr()), "sending value");
+            tracing::trace!(addr = ?p.as_ptr(), "sending value");
         }
 
         // SAFETY: We have not set STATE_DATA_SENT flag yet.
@@ -121,7 +122,7 @@ impl<T: Sized> Sender<T> {
         } else if t & STATE_RECV_WAIT != 0 {
             #[cfg(test)]
             {
-                tracing::trace!(addr = tracing::field::debug(p.as_ptr()), "waking receiver");
+                tracing::trace!(addr = ?p.as_ptr(), "waking receiver");
             }
 
             // SAFETY: Waker has swapped ownership to sender.
@@ -134,8 +135,8 @@ impl<T: Sized> Sender<T> {
         #[cfg(test)]
         {
             tracing::trace!(
-                addr = tracing::field::debug(p.as_ptr()),
-                "dropping sending half",
+                addr = ?p.as_ptr(),
+                "dropping sending half"
             );
         }
 
@@ -178,7 +179,7 @@ impl<T: Sized> Drop for Receiver<T> {
 
             #[cfg(test)]
             {
-                tracing::trace!(addr = tracing::field::debug(p.as_ptr()), "receiving value");
+                tracing::trace!(addr = ?p.as_ptr(), "receiving value");
             }
 
             // SAFETY: Data has swapped ownership to receiver.
@@ -188,8 +189,8 @@ impl<T: Sized> Drop for Receiver<T> {
         #[cfg(test)]
         {
             tracing::trace!(
-                addr = tracing::field::debug(p.as_ptr()),
-                "dropping receiving half",
+                addr = ?p.as_ptr(),
+                "dropping receiving half"
             );
         }
 
@@ -226,7 +227,7 @@ impl<T: Sized> Future for Receiver<T> {
         if t & STATE_DATA_SENT != 0 {
             #[cfg(test)]
             {
-                tracing::trace!(addr = tracing::field::debug(p.as_ptr()), "receiving data");
+                tracing::trace!(addr = ?p.as_ptr(), "receiving data");
             }
 
             // SAFETY: Data has swapped ownership to receiver.
@@ -235,8 +236,8 @@ impl<T: Sized> Future for Receiver<T> {
             #[cfg(test)]
             {
                 tracing::trace!(
-                    addr = tracing::field::debug(p.as_ptr()),
-                    "setting receiver waker",
+                    addr = ?p.as_ptr(),
+                    "setting receiver waker"
                 );
             }
 
@@ -263,7 +264,7 @@ impl<T: Sized> Future for Receiver<T> {
 
                     #[cfg(test)]
                     {
-                        tracing::trace!(addr = tracing::field::debug(p.as_ptr()), "receiving data");
+                        tracing::trace!(addr = ?p.as_ptr(), "receiving data");
                     }
 
                     // SAFETY: Data has swapped ownership to receiver.
@@ -286,7 +287,7 @@ impl<T: Sized> Future for Receiver<T> {
         #[cfg(test)]
         {
             tracing::trace!(
-                addr = tracing::field::debug(p.as_ptr()),
+                addr = ?p.as_ptr(),
                 "dropping receiving half"
             );
         }
@@ -343,8 +344,8 @@ pub(crate) fn oneshot<T: Sized>() -> (Sender<T>, Receiver<T>) {
     #[cfg(test)]
     {
         tracing::trace!(
-            addr = tracing::field::debug(ret.as_ptr()),
-            "creating new oneshot channel",
+            addr = ?ret.as_ptr(),
+            "creating new oneshot channel"
         );
     }
 
