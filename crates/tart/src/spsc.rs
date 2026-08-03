@@ -804,7 +804,7 @@ mod tests {
             let rt = executor.runtime();
             let (send, recv) = make_channel::<u32>(1);
 
-            #[instrument]
+            #[instrument(skip_all)]
             async fn send_task(send: Sender<u32>) {
                 let mut send = pin!(send);
                 info!("sending data");
@@ -813,7 +813,7 @@ mod tests {
                 send.close().await.unwrap();
             }
 
-            #[instrument]
+            #[instrument(skip_all)]
             async fn recv_task(recv: Receiver<u32>) {
                 let mut recv = pin!(recv);
                 info!("receiving data");
@@ -850,7 +850,7 @@ mod tests {
             let rt = executor.runtime();
             let (send, recv) = make_channel::<u32>(4);
 
-            #[instrument]
+            #[instrument(skip_all)]
             async fn send_task(send: Sender<u32>) {
                 let mut send = pin!(send);
                 info!("sending data");
@@ -861,7 +861,7 @@ mod tests {
                 send.close().await.unwrap();
             }
 
-            #[instrument]
+            #[instrument(skip_all)]
             async fn recv_task(recv: Receiver<u32>) {
                 let mut recv = pin!(recv);
                 info!("receiving data");
