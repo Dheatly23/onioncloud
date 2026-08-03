@@ -3,7 +3,7 @@
 use std::assert_matches;
 use std::cell::Cell;
 use std::collections::VecDeque;
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::num::NonZeroU16;
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll};
@@ -64,6 +64,8 @@ impl Future for Yield {
 enum TaskActionSend {
     PollReady,
     Send(u64),
+    WaitReady,
+    WaitFlush,
     Close,
     WaitDuration(u64),
 }
@@ -82,9 +84,28 @@ impl SendTask {
             TaskActionSend::PollReady => Yield::default().await,
             TaskActionSend::Send(v) => {
                 let mut this = self.project();
+                let fut = this.send.feed(Item::new(v));
                 if *this.closed {
-                    this.send.feed(Item::new(v)).await.unwrap_err();
-                } else if this.send.feed(Item::new(v)).await.is_err() {
+                    fut.await.unwrap_err();
+                } else if fut.await.is_err() {
+                    *this.closed = true;
+                }
+            }
+            TaskActionSend::WaitReady => {
+                let mut this = self.project();
+                let fut = poll_fn(|cx| this.send.as_mut().poll_ready_unpin(cx));
+                if *this.closed {
+                    fut.await.unwrap_err();
+                } else if fut.await.is_err() {
+                    *this.closed = true;
+                }
+            }
+            TaskActionSend::WaitFlush => {
+                let mut this = self.project();
+                let fut = this.send.flush();
+                if *this.closed {
+                    fut.await.unwrap_err();
+                } else if fut.await.is_err() {
                     *this.closed = true;
                 }
             }
