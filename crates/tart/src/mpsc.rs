@@ -139,7 +139,7 @@ impl<T: Sized> Outer<T> {
 
         #[cfg(test)]
         {
-            trace!(addr = ?ret.as_ptr(), size, "creating new spsc channel");
+            trace!(addr = ?ret.as_ptr(), size, "creating new mpsc channel");
         }
 
         ret
@@ -148,7 +148,7 @@ impl<T: Sized> Outer<T> {
     fn try_lock(&self) -> Result<Guard<'_, T>, u8> {
         #[cfg(test)]
         {
-            trace!(addr = ?(self as *const Self), "locking spsc channel");
+            trace!(addr = ?(self as *const Self), "locking mpsc channel");
         }
 
         let Err(t) =
@@ -170,7 +170,7 @@ impl<T: Sized> Outer<T> {
     fn lock(&self) -> Guard<'_, T> {
         #[cfg(test)]
         {
-            trace!(addr = ?(self as *const Self), "locking spsc channel");
+            trace!(addr = ?(self as *const Self), "locking mpsc channel");
         }
 
         let t = self.lock.fetch_or(LOCK_FLAG, Acquire);
@@ -193,7 +193,7 @@ unsafe fn drop_outer<T: Sized>(p: NonNull<Outer<T>>) {
     #[cfg(test)]
     {
         tracing::trace!(
-            addr = ?p, "dropping spsc channel"
+            addr = ?p, "dropping mpsc channel"
         );
         inc_drop_cnt();
     }
@@ -212,7 +212,7 @@ impl<T: Sized> Drop for Guard<'_, T> {
     fn drop(&mut self) {
         #[cfg(test)]
         {
-            trace!(addr = ?(self.0 as *const Outer<T>), "unlocking spsc channel");
+            trace!(addr = ?(self.0 as *const Outer<T>), "unlocking mpsc channel");
         }
 
         let t = self.0.lock.fetch_sub(LOCK_FLAG, Release);
@@ -302,7 +302,7 @@ impl<T: Sized> PinnedDrop for Sender<T> {
 
         #[cfg(test)]
         {
-            trace!(addr = ?p.as_ptr(), "dropping sending half of spsc channel");
+            trace!(addr = ?p.as_ptr(), "dropping sending half of mpsc channel");
         }
 
         let mut g = r.try_lock().ok();
@@ -551,7 +551,7 @@ impl<T: Sized> PinnedDrop for Receiver<T> {
 
         #[cfg(test)]
         {
-            trace!(addr = ?p.as_ptr(), "dropping receiving half of spsc channel");
+            trace!(addr = ?p.as_ptr(), "dropping receiving half of mpsc channel");
         }
 
         let t = RECEIVER_FLAG | if g.is_some() { LOCK_FLAG } else { 0 };
@@ -592,18 +592,20 @@ impl<T: Sized> Stream for Receiver<T> {
         let r = &mut *g;
 
         if let ret @ Some(_) = r.pop() {
-            r.ready_generation += 1;
-            while let Some(w) = r.ready_wakers.pop() {
-                if let Some(w) = w {
-                    w.wake();
-                }
-            }
-
-            if r.len == 0 {
-                r.flush_generation += 1;
-                while let Some(w) = r.flush_wakers.pop() {
+            if o.lock.load(Relaxed) & SENDER_FLAG != 0 {
+                r.ready_generation += 1;
+                while let Some(w) = r.ready_wakers.pop() {
                     if let Some(w) = w {
                         w.wake();
+                    }
+                }
+
+                if r.len == 0 {
+                    r.flush_generation += 1;
+                    while let Some(w) = r.flush_wakers.pop() {
+                        if let Some(w) = w {
+                            w.wake();
+                        }
                     }
                 }
             }
@@ -684,7 +686,7 @@ mod tests {
     use crate::waker::{MultiWaker, Selector};
 
     #[test]
-    fn test_spsc_create() {
+    fn test_mpsc_create() {
         #[instrument]
         fn test() {
             reset_drop_cnt();
@@ -696,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn test_spsc_send() {
+    fn test_mpsc_send() {
         #[instrument]
         fn test() {
             reset_drop_cnt();
@@ -738,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn test_spsc_send_close_first() {
+    fn test_mpsc_send_close_first() {
         #[instrument]
         fn test() {
             reset_drop_cnt();
@@ -782,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn test_spsc_recv_drop() {
+    fn test_mpsc_recv_drop() {
         #[instrument]
         fn test() {
             reset_drop_cnt();
@@ -827,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn test_spsc_send_many() {
+    fn test_mpsc_send_many() {
         #[instrument]
         fn test() {
             reset_drop_cnt();
@@ -874,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn test_spsc_send_async() {
+    fn test_mpsc_send_async() {
         #[instrument]
         fn test(register_send_first: bool) {
             reset_drop_cnt();
@@ -920,7 +922,7 @@ mod tests {
     }
 
     #[test]
-    fn test_spsc_send_many_async() {
+    fn test_mpsc_send_many_async() {
         #[instrument]
         fn test(register_send_first: bool) {
             reset_drop_cnt();
