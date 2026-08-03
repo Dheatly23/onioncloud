@@ -3,7 +3,7 @@ use std::cell::UnsafeCell;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::marker::{PhantomData, PhantomPinned};
-use std::mem::{MaybeUninit, take, forget};
+use std::mem::{MaybeUninit, forget, take};
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::ptr::{NonNull, drop_in_place, write};
@@ -465,7 +465,7 @@ impl<T: Sized> PinnedDrop for Receiver<T> {
         let r = unsafe { p.as_ref() };
 
         let mut g = r.try_lock().ok();
-        if let Ok(g) = &mut g
+        if let Some(g) = &mut g
             && let WakerType::Send { ready, flush } = take(&mut g.waker)
         {
             if let Some(w) = ready {
