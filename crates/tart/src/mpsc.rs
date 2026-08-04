@@ -1,9 +1,10 @@
 use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::cell::UnsafeCell;
+use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::marker::{PhantomData, PhantomPinned};
-use std::mem::{MaybeUninit, forget, take};
+use std::mem::{MaybeUninit, forget};
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::ptr::{NonNull, drop_in_place, write};
@@ -19,19 +20,32 @@ use tracing::{instrument, trace};
 #[cfg(test)]
 use crate::utils::inc_drop_cnt;
 
-struct Inner<T: Sized> {
+struct RecvInner<T: Sized> {
     buf: Box<[MaybeUninit<T>]>,
     off: usize,
     len: usize,
-    ready_generation: u64,
-    ready_wakers: Vec<Option<Waker>>,
-    flush_generation: u64,
-    flush_wakers: Vec<Option<Waker>>,
-    recv_waker: Option<Waker>,
+    waker: Option<Waker>,
+    ready: VecDeque<NonNull<SendOuter<T>>>,
 }
 
-impl<T: Sized> Drop for Inner<T> {
+struct SendInner<T: Sized> {
+    inner: Option<T>,
+    waker: Option<Waker>,
+}
+
+impl<T: Sized> Default for SendInner<T> {
+    fn default() -> Self {
+        Self {
+            inner: None,
+            waker: None,
+        }
+    }
+}
+
+impl<T: Sized> Drop for RecvInner<T> {
     fn drop(&mut self) {
+        self.wake_all_senders();
+
         self.validate_state();
         if self.len == 0 {
             return;
@@ -50,7 +64,18 @@ impl<T: Sized> Drop for Inner<T> {
     }
 }
 
-impl<T: Sized> Inner<T> {
+impl<T: Sized> RecvInner<T> {
+    #[inline]
+    fn new(size: usize) -> Self {
+        Self {
+            buf: Box::new_uninit_slice(size),
+            off: 0,
+            len: 0,
+            waker: None,
+            ready: VecDeque::new(),
+        }
+    }
+
     #[track_caller]
     fn validate_state(&self) {
         debug_assert!(
@@ -92,33 +117,97 @@ impl<T: Sized> Inner<T> {
         let ret = unsafe { self.buf[i].assume_init_read() };
         Some(ret)
     }
+
+    fn wake_sender(&mut self) {
+        self.validate_state();
+
+        while self.len != self.buf.len() {
+            let Some(p) = self.ready.pop_front() else {
+                return;
+            };
+            // SAFETY: Pointer points to valid allocation.
+            let r = unsafe { p.as_ref() };
+
+            let mut g = r.try_lock().ok();
+            if let Some(r) = &mut g {
+                if let Some(i) = r.inner.take() {
+                    let _ = self.push(i);
+                }
+                if let Some(w) = r.waker.take() {
+                    #[cfg(test)]
+                    {
+                        tracing::trace!(addr = ?p.as_ptr(), "waking mpsc sender");
+                    }
+
+                    w.wake();
+                }
+            }
+
+            #[cfg(test)]
+            {
+                tracing::trace!(addr = ?p.as_ptr(), "dropping receiving half of mpsc sender");
+            }
+
+            let t = RECEIVER_FLAG | if g.is_some() { LOCK_FLAG } else { 0 };
+            forget(g);
+            let t = r.lock.fetch_sub(t, Release);
+
+            if t & SENDER_FLAG == 0 {
+                // SAFETY: We're exclusively owns value.
+                unsafe { SendOuter::drop_outer(p) };
+            }
+        }
+    }
+
+    fn wake_all_senders(&mut self) {
+        while let Some(p) = self.ready.pop_front() {
+            // SAFETY: Pointer points to valid allocation.
+            let r = unsafe { p.as_ref() };
+
+            #[cfg(test)]
+            {
+                tracing::trace!(addr = ?p.as_ptr(), "dropping receiving half of mpsc sender");
+            }
+
+            let mut g = r.try_lock().ok();
+            if let Some(r) = &mut g
+                && let Some(w) = r.waker.take()
+            {
+                w.wake();
+            }
+
+            let t = RECEIVER_FLAG | if g.is_some() { LOCK_FLAG } else { 0 };
+            forget(g);
+            let t = r.lock.fetch_sub(t, Release);
+
+            if t & SENDER_FLAG == 0 {
+                // SAFETY: We're exclusively owns value.
+                unsafe { SendOuter::drop_outer(p) };
+            }
+        }
+    }
 }
 
-struct Outer<T: Sized> {
+struct RecvOuter<T: Sized> {
+    inner: UnsafeCell<RecvInner<T>>,
     senders: AtomicUsize,
     lock: AtomicU8,
-    inner: UnsafeCell<Inner<T>>,
+    _pinned: PhantomPinned,
+}
+
+struct SendOuter<T: Sized> {
+    inner: UnsafeCell<SendInner<T>>,
+    lock: AtomicU8,
     _pinned: PhantomPinned,
 }
 
 const SENDER_FLAG: u8 = 1;
-const RECEIVER_FLAG: u8 = 4;
+const RECEIVER_FLAG: u8 = 2;
 const LOCK_FLAG: u8 = 16;
-const INIT_STATE: u8 = SENDER_FLAG | RECEIVER_FLAG | 2 | 8;
+const INIT_STATE: u8 = SENDER_FLAG | RECEIVER_FLAG;
 
-impl<T: Sized> Outer<T> {
+impl<T: Sized> RecvOuter<T> {
     fn new(size: usize) -> NonNull<Self> {
-        let inner = Inner {
-            buf: Box::new_uninit_slice(size),
-            off: 0,
-            len: 0,
-            ready_generation: 0,
-            ready_wakers: Vec::new(),
-            flush_generation: 0,
-            flush_wakers: Vec::new(),
-            recv_waker: None,
-        };
-
         let layout: Layout = Layout::new::<Self>();
         // SAFETY: Layout is valid and never zero sized.
         let Some(ret) = NonNull::new(unsafe { alloc(layout) }.cast::<Self>()) else {
@@ -131,7 +220,7 @@ impl<T: Sized> Outer<T> {
                 Self {
                     senders: AtomicUsize::new(1),
                     lock: AtomicU8::new(INIT_STATE),
-                    inner: UnsafeCell::new(inner),
+                    inner: UnsafeCell::new(RecvInner::new(size)),
                     _pinned: PhantomPinned,
                 },
             );
@@ -145,7 +234,7 @@ impl<T: Sized> Outer<T> {
         ret
     }
 
-    fn try_lock(&self) -> Result<Guard<'_, T>, u8> {
+    fn try_lock(&self) -> Result<Guard<'_, RecvInner<T>>, u8> {
         #[cfg(test)]
         {
             trace!(addr = ?(self as *const Self), "locking mpsc channel");
@@ -155,19 +244,19 @@ impl<T: Sized> Outer<T> {
             self.lock
                 .compare_exchange(INIT_STATE, INIT_STATE | LOCK_FLAG, Acquire, Relaxed)
         else {
-            return Ok(Guard(self));
+            // SAFETY: We locked value.
+            return Ok(Guard(unsafe { &mut *self.inner.get() }, &self.lock));
         };
 
         assert!(
             t & LOCK_FLAG == 0,
             "Trying to lock channel twice. Please do not use channel with multi-threaded runtime."
         );
-        assert!(t & (2 | 8) == (2 | 8), "invalid lock state");
 
         Err(t)
     }
 
-    fn lock(&self) -> Guard<'_, T> {
+    fn lock(&self) -> Guard<'_, RecvInner<T>> {
         #[cfg(test)]
         {
             trace!(addr = ?(self as *const Self), "locking mpsc channel");
@@ -179,43 +268,114 @@ impl<T: Sized> Outer<T> {
             t & LOCK_FLAG == 0,
             "Trying to lock channel twice. Please do not use channel with multi-threaded runtime."
         );
-        assert!(t & (2 | 8) == (2 | 8), "invalid lock state");
 
-        Guard(self)
+        // SAFETY: We locked value.
+        Guard(unsafe { &mut *self.inner.get() }, &self.lock)
+    }
+
+    unsafe fn drop_outer(p: NonNull<Self>) {
+        fence(Acquire);
+
+        let p = p.as_ptr();
+
+        #[cfg(test)]
+        {
+            tracing::trace!(
+                addr = ?p, "dropping mpsc channel"
+            );
+            inc_drop_cnt();
+        }
+
+        // SAFETY: Pointer points to valid allocation and we're about to drop it.
+        unsafe {
+            let layout = Layout::for_value(&*p);
+            drop_in_place(p);
+            dealloc(p.cast(), layout);
+        }
     }
 }
 
-unsafe fn drop_outer<T: Sized>(p: NonNull<Outer<T>>) {
-    fence(Acquire);
+impl<T: Sized> SendOuter<T> {
+    fn new() -> NonNull<Self> {
+        let layout: Layout = Layout::new::<Self>();
+        // SAFETY: Layout is valid and never zero sized.
+        let Some(ret) = NonNull::new(unsafe { alloc(layout) }.cast::<Self>()) else {
+            handle_alloc_error(layout)
+        };
+        // SAFETY: Pointer points to uninitialized allocation.
+        unsafe {
+            write(
+                ret.as_ptr(),
+                Self {
+                    lock: AtomicU8::new(SENDER_FLAG),
+                    inner: UnsafeCell::default(),
+                    _pinned: PhantomPinned,
+                },
+            );
+        }
 
-    let p = p.as_ptr();
+        #[cfg(test)]
+        {
+            trace!(addr = ?ret.as_ptr(), "creating new mpsc sender");
+        }
 
-    #[cfg(test)]
-    {
-        tracing::trace!(
-            addr = ?p, "dropping mpsc channel"
+        ret
+    }
+
+    fn try_lock(&self) -> Result<Guard<'_, SendInner<T>>, u8> {
+        #[cfg(test)]
+        {
+            trace!(addr = ?(self as *const Self), "locking mpsc sender");
+        }
+
+        let Err(t) =
+            self.lock
+                .compare_exchange(INIT_STATE, INIT_STATE | LOCK_FLAG, Acquire, Relaxed)
+        else {
+            // SAFETY: We locked value.
+            return Ok(Guard(unsafe { &mut *self.inner.get() }, &self.lock));
+        };
+
+        assert!(
+            t & LOCK_FLAG == 0,
+            "Trying to lock channel twice. Please do not use channel with multi-threaded runtime."
         );
-        inc_drop_cnt();
+
+        Err(t)
     }
 
-    // SAFETY: Pointer points to valid allocation and we're about to drop it.
-    unsafe {
-        let layout = Layout::for_value(&*p);
-        drop_in_place(p);
-        dealloc(p.cast(), layout);
+    unsafe fn drop_outer(p: NonNull<Self>) {
+        fence(Acquire);
+
+        let p = p.as_ptr();
+
+        #[cfg(test)]
+        {
+            tracing::trace!(
+                addr = ?p, "dropping mpsc sender"
+            );
+            inc_drop_cnt();
+        }
+
+        // SAFETY: Pointer points to valid allocation and we're about to drop it.
+        unsafe {
+            let layout = Layout::for_value(&*p);
+            drop_in_place(p);
+            dealloc(p.cast(), layout);
+        }
     }
 }
 
-struct Guard<'a, T: Sized>(&'a Outer<T>);
+struct Guard<'a, T: Sized>(&'a mut T, &'a AtomicU8);
 
 impl<T: Sized> Drop for Guard<'_, T> {
     fn drop(&mut self) {
         #[cfg(test)]
         {
-            trace!(addr = ?(self.0 as *const Outer<T>), "unlocking mpsc channel");
+            trace!(addr = ?(self.0 as *const T), "unlocking value");
         }
 
-        let t = self.0.lock.fetch_sub(LOCK_FLAG, Release);
+        let t = self.1.fetch_sub(LOCK_FLAG, Release);
         debug_assert!(
             t & LOCK_FLAG != 0,
             "Flag {t:02x} does not contain lock flag. It's a double-free bug."
@@ -224,37 +384,31 @@ impl<T: Sized> Drop for Guard<'_, T> {
 }
 
 impl<T: Sized> Deref for Guard<'_, T> {
-    type Target = Inner<T>;
+    type Target = T;
 
-    fn deref(&self) -> &Inner<T> {
-        // SAFETY: We locked outer.
-        unsafe { &*self.0.inner.get() }
+    fn deref(&self) -> &T {
+        &*self.0
     }
 }
 
 impl<T: Sized> DerefMut for Guard<'_, T> {
-    fn deref_mut(&mut self) -> &mut Inner<T> {
-        // SAFETY: We locked outer.
-        unsafe { &mut *self.0.inner.get() }
+    fn deref_mut(&mut self) -> &mut T {
+        &mut *self.0
     }
 }
 
-/// Sending half of SPSC channel.
+/// Sending half of MPSC channel.
 #[must_use]
 #[pin_project(PinnedDrop, project = SenderProj)]
 pub struct Sender<T: Sized> {
-    p: Option<NonNull<Outer<T>>>,
-    inner: SenderInner,
+    inner: Option<SenderInner<T>>,
     #[pin]
     _phantom: PhantomData<(*mut T, PhantomPinned)>,
 }
 
-#[derive(Clone, Copy)]
-struct SenderInner {
-    rt: u64,
-    ri: usize,
-    ft: u64,
-    fi: usize,
+struct SenderInner<T: Sized> {
+    p: NonNull<RecvOuter<T>>,
+    s: NonNull<SendOuter<T>>,
 }
 
 /// Type for marking send error.
@@ -290,13 +444,32 @@ impl<T: Sized> PinnedDrop for Sender<T> {
     #[cfg_attr(test, instrument(level = "trace", name = "send_drop", skip_all))]
     fn drop(self: Pin<&mut Self>) {
         let SenderProj {
-            p: &mut Some(p),
-            inner: &mut SenderInner { rt, ri, ft, fi },
+            inner: &mut Some(SenderInner { p, s }),
             ..
         } = self.project()
         else {
             return;
         };
+
+        // SAFETY: Pointer points to valid allocation of outer.
+        let r = unsafe { s.as_ref() };
+
+        #[cfg(test)]
+        {
+            trace!(addr = ?s.as_ptr(), "dropping sending half of mpsc sender");
+        }
+
+        let t = r.lock.fetch_sub(SENDER_FLAG, Release);
+        assert!(
+            t & SENDER_FLAG != 0,
+            "Flag {t:02x} does not contain sender flag. It's a double-free bug."
+        );
+
+        if t & RECEIVER_FLAG == 0 {
+            // SAFETY: Pointer points to valid allocation and we're exclusively owns it.
+            unsafe { SendOuter::drop_outer(s) };
+        }
+
         // SAFETY: Pointer points to valid allocation of outer.
         let r = unsafe { p.as_ref() };
 
@@ -305,63 +478,46 @@ impl<T: Sized> PinnedDrop for Sender<T> {
             trace!(addr = ?p.as_ptr(), "dropping sending half of mpsc channel");
         }
 
-        let mut g = r.try_lock().ok();
-        if let Some(g) = &mut g {
-            if rt == g.ready_generation
-                && let Some(w) = g.ready_wakers.get_mut(ri)
-            {
-                *w = None;
-            }
-            if ft == g.flush_generation
-                && let Some(w) = g.flush_wakers.get_mut(fi)
-            {
-                *w = None;
-            }
-        }
-
         let t = r.senders.fetch_sub(1, Relaxed);
         assert!(t != 0, "Too many senders dropped. It's a double-free bug.");
-        if t != 1 {
-            return;
-        }
+        if t == 1 {
+            let mut g = r.try_lock().ok();
+            if let Some(r) = &mut g
+                && let Some(w) = r.waker.take()
+            {
+                w.wake();
+            }
 
-        if let Some(g) = &mut g
-            && let Some(w) = take(&mut g.recv_waker)
-        {
-            w.wake();
-        }
+            let t = SENDER_FLAG | if g.is_some() { LOCK_FLAG } else { 0 };
+            forget(g);
+            let t = r.lock.fetch_sub(t, Release);
+            assert!(
+                t & SENDER_FLAG != 0,
+                "Flag {t:02x} does not contain sender flag. It's a double-free bug."
+            );
 
-        let t = SENDER_FLAG | if g.is_some() { LOCK_FLAG } else { 0 };
-        forget(g);
-        let t = r.lock.fetch_sub(t, Release);
-        assert!(
-            t & SENDER_FLAG != 0,
-            "Flag {t:02x} does not contain sender flag. It's a double-free bug."
-        );
-
-        if t & RECEIVER_FLAG == 0 {
-            // SAFETY: Pointer points to valid allocation and we're exclusively owns it.
-            unsafe { drop_outer(p) };
+            if t & RECEIVER_FLAG == 0 {
+                // SAFETY: Pointer points to valid allocation and we're exclusively owns it.
+                unsafe { RecvOuter::drop_outer(p) };
+            }
         }
     }
 }
 
 impl<T: Sized> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        if let Some(p) = self.p {
-            // SAFETY: Pointer points to valid allocation of outer.
-            let r = unsafe { p.as_ref() };
-            let t = r.senders.fetch_add(1, Relaxed);
-            assert!(t != usize::MAX, "reference count overflow");
-        }
-
         Self {
-            p: self.p,
-            inner: SenderInner {
-                rt: self.inner.rt,
-                ri: usize::MAX,
-                ft: self.inner.ft,
-                fi: usize::MAX,
+            inner: if let Some(SenderInner { p, .. }) = self.inner {
+                // SAFETY: Pointer points to valid allocation of outer.
+                let r = unsafe { p.as_ref() };
+                let t = r.senders.fetch_add(1, Relaxed);
+                assert!(t != usize::MAX, "reference count overflow");
+                Some(SenderInner {
+                    p,
+                    s: SendOuter::new(),
+                })
+            } else {
+                None
             },
             _phantom: PhantomData,
         }
@@ -381,26 +537,66 @@ impl<T: Sized> Sink<T> for Sender<T> {
 
     #[cfg_attr(test, instrument(level = "trace", skip_all))]
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        let (mut g, inner) = self.lock().ok_or(SendError {})?;
-        let r = &mut *g;
+        let &SenderInner { p, s } = self.inner.as_ref().ok_or(SendError {})?;
 
-        if r.len < r.buf.len() {
-            return Poll::Ready(Ok(()));
+        // SAFETY: Pointer points to valid allocation.
+        let r = unsafe { s.as_ref() };
+
+        let needs_register;
+        {
+            let mut g;
+            let r = if let Ok(v) = r.try_lock() {
+                g = v;
+                needs_register = false;
+                &mut *g
+            } else {
+                needs_register = true;
+                // SAFETY: We exclusively owns value.
+                unsafe { &mut *r.inner.get() }
+            };
+
+            if r.inner.is_none() {
+                // SAFETY: Pointer points to valid allocation.
+                let r = unsafe { p.as_ref() };
+
+                return Poll::Ready(if r.lock.load(Relaxed) & RECEIVER_FLAG == 0 {
+                    drop(Self {
+                        inner: self.project().inner.take(),
+                        _phantom: PhantomData,
+                    });
+
+                    Err(SendError {})
+                } else {
+                    Ok(())
+                });
+            }
+            match r.waker {
+                Some(ref mut w) => w.clone_from(cx.waker()),
+                ref mut w @ None => *w = Some(cx.waker().clone()),
+            }
         }
 
-        if inner.rt == r.ready_generation {
-            match r.ready_wakers.get_mut(inner.ri) {
-                Some(Some(w)) => w.clone_from(cx.waker()),
-                Some(w @ None) => *w = Some(cx.waker().clone()),
-                None => {
-                    r.ready_wakers.push(Some(cx.waker().clone()));
-                    inner.ri = r.ready_wakers.len();
-                }
+        if needs_register {
+            #[cfg(test)]
+            {
+                trace!(addr = ?s.as_ptr(), "registering sender to mpsc channel");
             }
-        } else {
-            r.ready_wakers.push(Some(cx.waker().clone()));
-            inner.ri = r.ready_wakers.len();
-            inner.rt = r.ready_generation;
+
+            // SAFETY: Pointer points to valid allocation.
+            unsafe { s.as_ref().lock.fetch_add(RECEIVER_FLAG, Relaxed) };
+
+            // SAFETY: Pointer points to valid allocation.
+            let r = unsafe { p.as_ref() };
+
+            let Ok(mut g) = r.try_lock() else {
+                drop(Self {
+                    inner: self.project().inner.take(),
+                    _phantom: PhantomData,
+                });
+
+                return Poll::Ready(Err(SendError {}));
+            };
+            g.ready.push_back(s);
         }
 
         Poll::Pending
@@ -408,44 +604,53 @@ impl<T: Sized> Sink<T> for Sender<T> {
 
     #[cfg_attr(test, instrument(level = "trace", skip_all))]
     fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
-        let mut g = self.lock().ok_or(SendError {})?.0;
-        let r = &mut *g;
+        let &SenderInner { p, s } = self.inner.as_ref().ok_or(SendError {})?;
 
-        if r.push(item).is_err() {
+        // SAFETY: Pointer points to valid allocation.
+        let r = unsafe { p.as_ref() };
+
+        let Ok(mut g) = r.try_lock() else {
+            drop(Self {
+                inner: self.project().inner.take(),
+                _phantom: PhantomData,
+            });
+
             return Err(SendError {});
-        } else if r.len == 1
-            && let Some(w) = r.recv_waker.take()
+        };
+
+        let Err(item) = g.push(item) else {
+            if g.len == 1
+                && let Some(w) = g.waker.take()
+            {
+                w.wake();
+            }
+
+            return Ok(());
+        };
+
+        // SAFETY: Pointer points to valid allocation.
+        let r = unsafe { s.as_ref() };
+
+        if r.lock
+            .compare_exchange(SENDER_FLAG, SENDER_FLAG | RECEIVER_FLAG, Relaxed, Relaxed)
+            .is_err()
         {
-            w.wake();
+            // We're queueing for receiver already.
+            return Err(SendError {});
         }
+
+        // SAFETY: We're exclusively owns value.
+        let r = unsafe { &mut *r.inner.get() };
+        r.inner = Some(item);
+        r.waker = None;
+
+        g.ready.push_back(s);
+
         Ok(())
     }
 
-    #[cfg_attr(test, instrument(level = "trace", skip_all))]
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        let (mut g, inner) = self.lock().ok_or(SendError {})?;
-        let r = &mut *g;
-
-        if r.len == 0 {
-            return Poll::Ready(Ok(()));
-        }
-
-        if inner.ft == r.flush_generation {
-            match r.flush_wakers.get_mut(inner.fi) {
-                Some(Some(w)) => w.clone_from(cx.waker()),
-                Some(w @ None) => *w = Some(cx.waker().clone()),
-                None => {
-                    r.flush_wakers.push(Some(cx.waker().clone()));
-                    inner.fi = r.flush_wakers.len();
-                }
-            }
-        } else {
-            r.flush_wakers.push(Some(cx.waker().clone()));
-            inner.fi = r.flush_wakers.len();
-            inner.ft = r.flush_generation;
-        }
-
-        Poll::Pending
+        self.poll_ready(cx)
     }
 
     /// Closing sender.
@@ -453,56 +658,28 @@ impl<T: Sized> Sink<T> for Sender<T> {
     /// Unlike other methods, this will always succeed.
     /// This is to preserve it's idempotence.
     #[cfg_attr(test, instrument(level = "trace", skip_all))]
-    fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        let this = self.project();
-        drop(Self {
-            p: this.p.take(),
-            inner: *this.inner,
-            _phantom: PhantomData,
-        });
-
-        Poll::Ready(Ok(()))
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if self.as_mut().poll_ready(cx).is_ready() {
+            drop(Self {
+                inner: self.project().inner.take(),
+                _phantom: PhantomData,
+            });
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
     }
 }
 
 impl<T: Sized> Sender<T> {
-    fn lock(self: Pin<&mut Self>) -> Option<(Guard<'_, T>, &mut SenderInner)> {
-        let SenderProj { p: p_, inner, .. } = self.project();
-        let p = (*p_)?;
-        // SAFETY: Pointer points to valid allocation of outer.
-        let o = unsafe { p.as_ref() };
-
-        match o.try_lock() {
-            Ok(v) => return Some((v, inner)),
-            Err(t) if t & RECEIVER_FLAG != 0 => return None,
-            Err(_) => (),
-        }
-
-        *p_ = None;
-
-        let t = o.senders.fetch_sub(1, Relaxed);
-        if t != 1 {
-            return None;
-        }
-
-        let t = o.lock.fetch_sub(SENDER_FLAG, Release);
-        assert!(
-            t & RECEIVER_FLAG == 0,
-            "Flag {t:02x} contains receiver flag. It's a double-free bug."
-        );
-
-        // SAFETY: Pointer points to valid allocation and we're exclusively owns it.
-        unsafe { drop_outer(p) };
-
-        None
-    }
-
     /// Check if receiver has disconnected.
     ///
     /// Once receiver has disconnected, any further attempt at sending data will result in [`SendError`].
     /// Exception being [`Sender::poll_close`], which will always succeed.
     pub fn is_disconnected(&self) -> bool {
-        let Some(p) = self.p else { return true };
+        let Some(SenderInner { p, .. }) = &self.inner else {
+            return true;
+        };
         // SAFETY: Pointer points to valid allocation of outer.
         let r = unsafe { p.as_ref() };
         r.lock.load(Relaxed) & RECEIVER_FLAG == 0
@@ -513,7 +690,7 @@ impl<T: Sized> Sender<T> {
 #[must_use]
 #[pin_project(PinnedDrop)]
 pub struct Receiver<T: Sized> {
-    p: Option<NonNull<Outer<T>>>,
+    p: Option<NonNull<RecvOuter<T>>>,
     #[pin]
     _phantom: PhantomData<(*mut T, PhantomPinned)>,
 }
@@ -534,19 +711,7 @@ impl<T: Sized> PinnedDrop for Receiver<T> {
         let mut g = r.try_lock().ok();
 
         if let Some(g) = &mut g {
-            g.ready_generation += 1;
-            g.flush_generation += 1;
-            g.recv_waker = None;
-            while let Some(w) = g.ready_wakers.pop() {
-                if let Some(w) = w {
-                    w.wake();
-                }
-            }
-            while let Some(w) = g.flush_wakers.pop() {
-                if let Some(w) = w {
-                    w.wake();
-                }
-            }
+            g.wake_all_senders();
         }
 
         #[cfg(test)]
@@ -564,7 +729,7 @@ impl<T: Sized> PinnedDrop for Receiver<T> {
 
         if t & SENDER_FLAG == 0 {
             // SAFETY: Pointer points to valid allocation and we're exclusively owns it.
-            unsafe { drop_outer(p) };
+            unsafe { RecvOuter::drop_outer(p) };
         }
     }
 }
@@ -591,26 +756,21 @@ impl<T: Sized> Stream for Receiver<T> {
         let mut g = o.lock();
         let r = &mut *g;
 
-        if let ret @ Some(_) = r.pop() {
-            if o.lock.load(Relaxed) & SENDER_FLAG != 0 {
-                r.ready_generation += 1;
-                while let Some(w) = r.ready_wakers.pop() {
-                    if let Some(w) = w {
-                        w.wake();
-                    }
+        loop {
+            if let ret @ Some(_) = r.pop() {
+                if o.lock.load(Relaxed) & SENDER_FLAG != 0 {
+                    r.wake_sender();
                 }
 
+                return Poll::Ready(ret);
+            } else if o.lock.load(Relaxed) & SENDER_FLAG != 0 {
+                r.wake_sender();
                 if r.len == 0 {
-                    r.flush_generation += 1;
-                    while let Some(w) = r.flush_wakers.pop() {
-                        if let Some(w) = w {
-                            w.wake();
-                        }
-                    }
+                    break;
                 }
+            } else {
+                break;
             }
-
-            return Poll::Ready(ret);
         }
 
         if o.lock.load(Relaxed) & SENDER_FLAG == 0 {
@@ -623,7 +783,7 @@ impl<T: Sized> Stream for Receiver<T> {
             return Poll::Ready(None);
         }
 
-        match r.recv_waker {
+        match r.waker {
             Some(ref mut w) => w.clone_from(cx.waker()),
             ref mut w @ None => *w = Some(cx.waker().clone()),
         }
@@ -644,26 +804,23 @@ impl<T: Sized> Receiver<T> {
     }
 }
 
-/// Create new SPSC channel.
+/// Create new MPSC channel.
 ///
 /// NOTE: `size` cannot be zero.
 #[cfg_attr(test, instrument(level = "trace"))]
 pub fn make_channel<T: Sized>(size: usize) -> (Sender<T>, Receiver<T>) {
     assert!(size > 0, "size is 0");
-    let p = Some(Outer::<T>::new(size));
+    let p = RecvOuter::<T>::new(size);
     (
         Sender {
-            p,
-            inner: SenderInner {
-                rt: 0,
-                ri: usize::MAX,
-                ft: 0,
-                fi: usize::MAX,
-            },
+            inner: Some(SenderInner {
+                p,
+                s: SendOuter::new(),
+            }),
             _phantom: PhantomData,
         },
         Receiver {
-            p,
+            p: Some(p),
             _phantom: PhantomData,
         },
     )
@@ -691,7 +848,7 @@ mod tests {
         fn test() {
             reset_drop_cnt();
             let _ = black_box(make_channel::<Box<u32>>(1));
-            assert_eq!(get_drop_cnt(), 1, "drop count mismatch");
+            assert_eq!(get_drop_cnt(), 2, "drop count mismatch");
         }
 
         run_test(test);
@@ -717,12 +874,17 @@ mod tests {
                 assert_matches!(send.as_mut().poll_ready(&mut cx), Poll::Ready(Ok(())));
                 assert_eq!(waker.take_flags(false), 0);
                 assert_matches!(send.as_mut().start_send(1), Ok(()));
+                assert_matches!(send.as_mut().poll_ready(&mut cx), Poll::Ready(Ok(())));
+                assert_eq!(waker.take_flags(false), 0);
+                assert_matches!(send.as_mut().start_send(2), Ok(()));
                 assert_matches!(send.as_mut().poll_ready(&mut cx), Poll::Pending);
                 assert_eq!(waker.take_flags(false), 0);
 
                 info!("receiving data");
                 assert_eq!(recv.as_mut().poll_next(&mut cx), Poll::Ready(Some(1)));
                 assert_eq!(waker.take_flags(false), 1);
+                assert_eq!(recv.as_mut().poll_next(&mut cx), Poll::Ready(Some(2)));
+                assert_eq!(waker.take_flags(false), 0);
                 assert_eq!(recv.as_mut().poll_next(&mut cx), Poll::Pending);
                 assert_eq!(waker.take_flags(false), 0);
 
@@ -733,7 +895,7 @@ mod tests {
                 assert_eq!(waker.take_flags(false), 0);
             }
 
-            assert_eq!(get_drop_cnt(), 1, "drop count mismatch");
+            assert_eq!(get_drop_cnt(), 2, "drop count mismatch");
         }
 
         run_test(test);
@@ -759,25 +921,34 @@ mod tests {
                 assert_matches!(send.as_mut().poll_ready(&mut cx), Poll::Ready(Ok(())));
                 assert_eq!(waker.take_flags(false), 0);
                 assert_matches!(send.as_mut().start_send(1), Ok(()));
+                assert_matches!(send.as_mut().poll_ready(&mut cx), Poll::Ready(Ok(())));
+                assert_eq!(waker.take_flags(false), 0);
+                assert_matches!(send.as_mut().start_send(2), Ok(()));
                 assert_matches!(send.as_mut().poll_ready(&mut cx), Poll::Pending);
                 assert_eq!(waker.take_flags(false), 0);
 
                 info!("closing sender");
                 assert_eq!(send.is_disconnected(), false);
                 assert_eq!(recv.is_disconnected(), false);
+                assert_matches!(send.as_mut().poll_close(&mut cx), Poll::Pending);
+                assert_eq!(waker.take_flags(false), 0);
+
+                info!("receiving data");
+                assert_eq!(recv.as_mut().poll_next(&mut cx), Poll::Ready(Some(1)));
+                assert_eq!(waker.take_flags(false), 1);
+
+                info!("closing sender");
                 assert_matches!(send.as_mut().poll_close(&mut cx), Poll::Ready(Ok(())));
                 assert_eq!(waker.take_flags(false), 0);
                 assert_eq!(send.is_disconnected(), true);
                 assert_eq!(recv.is_disconnected(), true);
 
                 info!("receiving data");
-                assert_eq!(recv.as_mut().poll_next(&mut cx), Poll::Ready(Some(1)));
-                assert_eq!(waker.take_flags(false), 0);
-                assert_eq!(recv.as_mut().poll_next(&mut cx), Poll::Ready(None));
+                assert_eq!(recv.as_mut().poll_next(&mut cx), Poll::Ready(Some(2)));
                 assert_eq!(waker.take_flags(false), 0);
             }
 
-            assert_eq!(get_drop_cnt(), 1, "drop count mismatch");
+            assert_eq!(get_drop_cnt(), 2, "drop count mismatch");
         }
 
         run_test(test);
@@ -822,7 +993,7 @@ mod tests {
                 assert_eq!(waker.take_flags(false), 0);
             }
 
-            assert_eq!(get_drop_cnt(), 1, "drop count mismatch");
+            assert_eq!(get_drop_cnt(), 2, "drop count mismatch");
         }
 
         run_test(test);
@@ -839,7 +1010,7 @@ mod tests {
             {
                 let w = waker.make_waker(0);
                 let mut cx = Context::from_waker(&w);
-                let (send, recv) = make_channel::<u32>(2);
+                let (send, recv) = make_channel::<u32>(1);
                 let mut send = pin!(send);
                 let mut recv = pin!(recv);
 
@@ -869,7 +1040,7 @@ mod tests {
                 assert_eq!(waker.take_flags(false), 0);
             }
 
-            assert_eq!(get_drop_cnt(), 1, "drop count mismatch");
+            assert_eq!(get_drop_cnt(), 2, "drop count mismatch");
         }
 
         run_test(test);
@@ -903,15 +1074,25 @@ mod tests {
                 assert_matches!(send2.as_mut().poll_ready(&mut cx2), Poll::Ready(Ok(())));
                 assert_eq!(waker.take_flags(false), 0);
                 assert_matches!(send2.as_mut().start_send(2), Ok(()));
+                assert_matches!(send.as_mut().poll_ready(&mut cx), Poll::Ready(Ok(())));
+                assert_eq!(waker.take_flags(false), 0);
+                assert_matches!(send.as_mut().start_send(3), Ok(()));
                 assert_matches!(send.as_mut().poll_ready(&mut cx), Poll::Pending);
                 assert_eq!(waker.take_flags(false), 0);
+                assert_matches!(send2.as_mut().poll_ready(&mut cx2), Poll::Ready(Ok(())));
+                assert_eq!(waker.take_flags(false), 0);
+                assert_matches!(send2.as_mut().start_send(4), Ok(()));
                 assert_matches!(send2.as_mut().poll_ready(&mut cx2), Poll::Pending);
                 assert_eq!(waker.take_flags(false), 0);
 
                 info!("receiving data");
                 assert_eq!(recv.as_mut().poll_next(&mut cx3), Poll::Ready(Some(1)));
-                assert_eq!(waker.take_flags(false), 3);
+                assert_eq!(waker.take_flags(false), 1);
                 assert_eq!(recv.as_mut().poll_next(&mut cx3), Poll::Ready(Some(2)));
+                assert_eq!(waker.take_flags(false), 2);
+                assert_eq!(recv.as_mut().poll_next(&mut cx3), Poll::Ready(Some(3)));
+                assert_eq!(waker.take_flags(false), 0);
+                assert_eq!(recv.as_mut().poll_next(&mut cx3), Poll::Ready(Some(4)));
                 assert_eq!(waker.take_flags(false), 0);
                 assert_eq!(recv.as_mut().poll_next(&mut cx3), Poll::Pending);
                 assert_eq!(waker.take_flags(false), 0);
@@ -924,7 +1105,7 @@ mod tests {
                 assert_eq!(waker.take_flags(false), 0);
             }
 
-            assert_eq!(get_drop_cnt(), 1, "drop count mismatch");
+            assert_eq!(get_drop_cnt(), 3, "drop count mismatch");
         }
 
         run_test(test);
@@ -967,7 +1148,7 @@ mod tests {
 
             executor.run();
 
-            assert_eq!(get_drop_cnt(), 3, "drop count mismatch");
+            assert_eq!(get_drop_cnt(), 4, "drop count mismatch");
         }
 
         run_test(|| {
@@ -1017,7 +1198,7 @@ mod tests {
 
             executor.run();
 
-            assert_eq!(get_drop_cnt(), 3, "drop count mismatch");
+            assert_eq!(get_drop_cnt(), 4, "drop count mismatch");
         }
 
         run_test(|| {
@@ -1070,7 +1251,7 @@ mod tests {
 
             executor.run();
 
-            assert_eq!(get_drop_cnt(), 12, "drop count mismatch");
+            assert_eq!(get_drop_cnt(), 23, "drop count mismatch");
         }
 
         run_test(test);
