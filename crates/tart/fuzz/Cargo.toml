@@ -33,3 +33,10 @@ path = "fuzz_targets/spsc.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "mpsc"
+path = "fuzz_targets/mpsc.rs"
+test = false
+doc = false
+bench = false
