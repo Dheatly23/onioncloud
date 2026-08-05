@@ -144,9 +144,9 @@ impl RecvTask {
             TaskActionRecv::Recv => {
                 let mut this = self.project();
                 let ret = this.recv.next().await;
-                if let Some((index, ret)) = ret {
+                if let Some((index, ref ret)) = ret {
                     let expect = this.expect[index].pop_front();
-                    assert_eq!(ret.0, expect, "mismatch at index {index}");
+                    assert_eq!(Some(ret.0), expect, "mismatch at index {index}");
                 }
                 assert_matches!(
                     (ret, this.recv.is_disconnected()),
@@ -182,8 +182,8 @@ impl TaskActionPair {
         for a in self.send.iter() {
             let mut v = VecDeque::new();
             for t in a.iter() {
-                match t {
-                    TaskActionSend::Send(&i) => v.push_back(i),
+                match *t {
+                    TaskActionSend::Send(i) => v.push_back(i),
                     TaskActionSend::Close => break,
                     _ => (),
                 }
@@ -194,10 +194,11 @@ impl TaskActionPair {
         let rt_ = rt.clone();
 
         (
-            self.send.into_iter().map(move |t| {
+            self.send.into_iter().enumerate().map(move |(i, t)| {
                 (
                     SendTask {
                         rt: rt_.clone(),
+                        index: i,
                         send: send.clone(),
                         closed: false,
                     },
