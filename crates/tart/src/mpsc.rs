@@ -1,3 +1,14 @@
+//! MPSC Channel.
+//!
+//! Single-thread only MPSC channel.
+//! Used best with [`Runtime`](`crate::rt::Runtime`).
+//!
+//! # Warning: Do Not Use With Multi-threaded Runtime
+//!
+//! Using it across threads will cause panics and possibly aborts.
+//! Even though both [`Sender`] and [`Receiver`] are [`Send`].
+//! All usage (including drop) are checked if it crosses thread.
+
 use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
@@ -398,6 +409,14 @@ impl<T: Sized> DerefMut for Guard<'_, T> {
 }
 
 /// Sending half of MPSC channel.
+///
+/// [`Clone`] sender to create another sender.
+/// Each sender behaves independently.
+///
+/// # Flush behavior
+///
+/// [`poll_flush`](`Self::poll_flush`) is equivalent to [`poll_ready`](`Self::poll_ready`).
+/// This is because there is no way of knowing which sender is each element belongs to.
 #[must_use]
 #[pin_project(PinnedDrop, project = SenderProj)]
 pub struct Sender<T: Sized> {
@@ -793,7 +812,7 @@ impl<T: Sized> Stream for Receiver<T> {
 }
 
 impl<T: Sized> Receiver<T> {
-    /// Check if sender has disconnected.
+    /// Check if all senders has disconnected.
     ///
     /// NOTE: There might be data still in transit.
     pub fn is_disconnected(&self) -> bool {

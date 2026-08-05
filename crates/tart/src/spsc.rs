@@ -1,3 +1,14 @@
+//! SPSC Channel.
+//!
+//! Single-thread only SPSC channel.
+//! Used best with [`Runtime`](`crate::rt::Runtime`).
+//!
+//! # Warning: Do Not Use With Multi-threaded Runtime
+//!
+//! Using it across threads will cause panics and possibly aborts.
+//! Even though both [`Sender`] and [`Receiver`] are [`Send`].
+//! All usage (including drop) are checked if it crosses thread.
+
 use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::cell::UnsafeCell;
 use std::error::Error;
