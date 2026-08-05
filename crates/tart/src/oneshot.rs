@@ -73,6 +73,7 @@ const INIT_STATE: u8 = SENDER_FLAG | RECEIVER_FLAG;
 #[pin_project(PinnedDrop)]
 pub(crate) struct Sender<T: Sized> {
     p: Option<NonNull<Inner<T>>>,
+    #[expect(clippy::type_complexity, reason = "all elements are important")]
     _phantom: PhantomData<(T, fn(T) -> T)>,
 }
 
@@ -162,6 +163,7 @@ impl<T: Sized> Sender<T> {
 #[pin_project(PinnedDrop)]
 pub(crate) struct Receiver<T: Sized> {
     p: Option<NonNull<Inner<T>>>,
+    #[expect(clippy::type_complexity, reason = "all elements are important")]
     _phantom: PhantomData<(T, fn(T) -> T)>,
 }
 
