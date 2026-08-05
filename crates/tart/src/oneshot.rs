@@ -11,6 +11,7 @@ use std::task::{Context, Poll, Waker, ready};
 use futures_core::FusedFuture;
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicU8, Ordering::*, fence};
+use pin_project::{pin_project, pinned_drop};
 use tracing::instrument;
 
 #[cfg(test)]
@@ -69,9 +70,10 @@ const RECEIVER_FLAG: u8 = 1 << 6;
 const INIT_STATE: u8 = SENDER_FLAG | RECEIVER_FLAG;
 
 /// Sender of value.
+#[pin_project(PinnedDrop)]
 pub(crate) struct Sender<T: Sized> {
     p: Option<NonNull<Inner<T>>>,
-    _phantom: PhantomData<*mut T>,
+    _phantom: PhantomData<(T, fn(T) -> T)>,
 }
 
 // SAFETY: Sender is send if and only if T is send.
@@ -79,8 +81,9 @@ unsafe impl<T: Sized + Send> Send for Sender<T> {}
 // SAFETY: Sender is sync if and only if T is send.
 unsafe impl<T: Sized + Send> Sync for Sender<T> {}
 
-impl<T: Sized> Drop for Sender<T> {
-    fn drop(&mut self) {
+#[pinned_drop]
+impl<T: Sized> PinnedDrop for Sender<T> {
+    fn drop(mut self: Pin<&mut Self>) {
         if self.p.is_none() {
             return;
         }
@@ -156,9 +159,10 @@ impl<T: Sized> Sender<T> {
 }
 
 /// Receiver of value.
+#[pin_project(PinnedDrop)]
 pub(crate) struct Receiver<T: Sized> {
     p: Option<NonNull<Inner<T>>>,
-    _phantom: PhantomData<*mut T>,
+    _phantom: PhantomData<(T, fn(T) -> T)>,
 }
 
 // SAFETY: Receiver is send if and only if T is send.
@@ -166,9 +170,10 @@ unsafe impl<T: Sized + Send> Send for Receiver<T> {}
 // SAFETY: Receiver is sync if and only if T is send.
 unsafe impl<T: Sized + Send> Sync for Receiver<T> {}
 
-impl<T: Sized> Drop for Receiver<T> {
+#[pinned_drop]
+impl<T: Sized> PinnedDrop for Receiver<T> {
     #[instrument(level = "trace", skip_all)]
-    fn drop(&mut self) {
+    fn drop(self: Pin<&mut Self>) {
         let Some(p) = self.p else { return };
         // SAFETY: Pointer points to valid allocation.
         let r = unsafe { p.as_ref() };
@@ -213,8 +218,8 @@ impl<T: Sized> Future for Receiver<T> {
 
     #[instrument(level = "trace", skip_all)]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
-        let this = Pin::into_inner(self);
-        let Some(p) = this.p else {
+        let this = self.project();
+        let Some(p) = *this.p else {
             panic!("polled after future has returned value");
         };
         // SAFETY: Pointer points to valid allocation.
@@ -293,7 +298,7 @@ impl<T: Sized> Future for Receiver<T> {
         }
 
         // Drop receiver.
-        this.p = None;
+        *this.p = None;
         t = r.state.fetch_sub(RECEIVER_FLAG, Release);
         assert!(
             t & RECEIVER_FLAG != 0,

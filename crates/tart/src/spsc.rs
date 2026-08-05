@@ -246,7 +246,7 @@ impl<T: Sized> DerefMut for Guard<'_, T> {
 pub struct Sender<T: Sized> {
     p: Option<NonNull<Outer<T>>>,
     #[pin]
-    _phantom: PhantomData<(*mut T, PhantomPinned)>,
+    _phantom: PhantomData<(T, fn(T) -> T, PhantomPinned)>,
 }
 
 /// Type for marking send error.
@@ -449,7 +449,7 @@ impl<T: Sized> Sender<T> {
 pub struct Receiver<T: Sized> {
     p: Option<NonNull<Outer<T>>>,
     #[pin]
-    _phantom: PhantomData<(*mut T, PhantomPinned)>,
+    _phantom: PhantomData<(T, fn(T) -> T, PhantomPinned)>,
 }
 
 // SAFETY: Receiver is send if T is send.

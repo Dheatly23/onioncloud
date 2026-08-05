@@ -403,7 +403,7 @@ impl<T: Sized> DerefMut for Guard<'_, T> {
 pub struct Sender<T: Sized> {
     inner: Option<SenderInner<T>>,
     #[pin]
-    _phantom: PhantomData<(*mut T, PhantomPinned)>,
+    _phantom: PhantomData<(T, fn(T) -> T, PhantomPinned)>,
 }
 
 struct SenderInner<T: Sized> {
@@ -692,7 +692,7 @@ impl<T: Sized> Sender<T> {
 pub struct Receiver<T: Sized> {
     p: Option<NonNull<RecvOuter<T>>>,
     #[pin]
-    _phantom: PhantomData<(*mut T, PhantomPinned)>,
+    _phantom: PhantomData<(T, fn(T) -> T, PhantomPinned)>,
 }
 
 // SAFETY: Receiver is send if T is send.

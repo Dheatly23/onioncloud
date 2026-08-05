@@ -239,7 +239,7 @@ impl Runtime {
     /// Spawns a new task.
     ///
     /// The resulting handle can be `await`ed to get the return value of subtask.
-    pub fn spawn<T: Send>(
+    pub fn spawn<T: Send + 'static>(
         &self,
         task: impl Future<Output = T> + 'static + Send + Sync,
     ) -> TaskHandle<T> {
