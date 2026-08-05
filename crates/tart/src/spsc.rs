@@ -11,8 +11,7 @@
 
 use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::cell::UnsafeCell;
-use std::error::Error;
-use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::marker::{PhantomData, PhantomPinned};
 use std::mem::{MaybeUninit, forget, take};
 use std::ops::{Deref, DerefMut};
@@ -27,6 +26,7 @@ use pin_project::{pin_project, pinned_drop};
 #[cfg(test)]
 use tracing::{instrument, trace};
 
+use crate::error::SendError;
 #[cfg(test)]
 use crate::utils::inc_drop_cnt;
 
@@ -257,31 +257,9 @@ impl<T: Sized> DerefMut for Guard<'_, T> {
 pub struct Sender<T: Sized> {
     p: Option<NonNull<Outer<T>>>,
     #[pin]
+    #[expect(clippy::type_complexity, reason = "all elements are important")]
     _phantom: PhantomData<(T, fn(T) -> T, PhantomPinned)>,
 }
-
-/// Type for marking send error.
-///
-/// It's not defined what error it is.
-/// Most likely reason is receiver disconnection.
-/// But only for [`Sender::start_send`], it could also means the buffer is full.
-#[derive(Clone)]
-#[non_exhaustive]
-pub struct SendError {}
-
-impl Debug for SendError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "SendError")
-    }
-}
-
-impl Display for SendError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "error sending data")
-    }
-}
-
-impl Error for SendError {}
 
 // SAFETY: Sender is send if T is send.
 unsafe impl<T: Sized + Send> Send for Sender<T> {}
@@ -460,6 +438,7 @@ impl<T: Sized> Sender<T> {
 pub struct Receiver<T: Sized> {
     p: Option<NonNull<Outer<T>>>,
     #[pin]
+    #[expect(clippy::type_complexity, reason = "all elements are important")]
     _phantom: PhantomData<(T, fn(T) -> T, PhantomPinned)>,
 }
 
