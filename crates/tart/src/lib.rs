@@ -8,6 +8,7 @@ pub mod error;
 pub mod mpsc;
 mod oneshot;
 pub mod rt;
+pub mod socket;
 pub mod spsc;
 pub mod timer;
 mod utils;

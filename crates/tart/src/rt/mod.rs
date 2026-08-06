@@ -2,18 +2,22 @@ mod guard;
 
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::future::Future;
+use std::io::{ErrorKind, IoSlice, IoSliceMut, Result as IoResult};
 use std::marker::PhantomPinned;
 use std::mem::ManuallyDrop;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use futures_core::FusedFuture;
+use futures_io::{AsyncRead, AsyncWrite};
 use pin_project::pin_project;
 use tracing::{Span, error, info, info_span, instrument, trace};
 
 use crate::oneshot::{Receiver, Sender, oneshot};
+use crate::socket::{Socket as SocketInner, SocketHandler, SocketOpener};
 use crate::timer::Timers;
 use crate::waker::{MultiWaker, Selector};
 use guard::RuntimeGuard;
@@ -45,19 +49,28 @@ pub(crate) struct InnerRuntime {
     offset: usize,
     queued: Vec<Task>,
     timers: Timers,
+    network: Option<Box<dyn Send + Sync + SocketHandler>>,
 }
 
 impl InnerRuntime {
-    fn new(timers: Timers) -> Self {
+    fn new(timers: Timers, network: Option<Box<dyn Send + Sync + SocketHandler>>) -> Self {
         Self {
             offset: 0,
             queued: Vec::new(),
             timers,
+            network,
         }
     }
 
     pub(crate) fn timers(&mut self) -> &mut Timers {
         &mut self.timers
+    }
+
+    pub(crate) fn network(&mut self) -> Option<&mut (dyn Send + Sync + SocketHandler)> {
+        match self.network {
+            Some(ref mut v) => Some(v.as_mut()),
+            None => None,
+        }
     }
 
     pub(crate) fn queue_task(&mut self, fut: Pin<Box<dyn Future<Output = ()> + Send + Sync>>) {
@@ -178,6 +191,123 @@ impl<T: Sized> FusedFuture for TaskHandle<T> {
     }
 }
 
+/// Handle of socket opener.
+#[pin_project]
+pub struct SocketFuture {
+    #[pin]
+    inner: SocketFutureInner,
+    addr: SocketAddr,
+    _pinned: PhantomPinned,
+}
+
+#[pin_project(project = SocketFutureInnerProj)]
+enum SocketFutureInner {
+    Fut(#[pin] SocketOpener),
+    Done,
+    None,
+}
+
+impl Debug for SocketFuture {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("SocketFuture")
+            .field("addr", &self.addr)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Future for SocketFuture {
+    type Output = IoResult<Socket>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+        let SocketFutureInnerProj::Fut(inner) = this.inner.as_mut().project() else {
+            this.inner.set(SocketFutureInner::Done);
+            return Poll::Ready(Err(ErrorKind::NetworkUnreachable.into()));
+        };
+        match inner.poll(cx) {
+            Poll::Ready(Ok(v)) => {
+                this.inner.set(SocketFutureInner::Done);
+                Poll::Ready(Ok(Socket {
+                    inner: v,
+                    addr: *this.addr,
+                    _pinned: PhantomPinned,
+                }))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl FusedFuture for SocketFuture {
+    fn is_terminated(&self) -> bool {
+        matches!(self.inner, SocketFutureInner::Done)
+    }
+}
+
+/// Handle of socket.
+#[pin_project]
+pub struct Socket {
+    #[pin]
+    inner: SocketInner,
+    addr: SocketAddr,
+    _pinned: PhantomPinned,
+}
+
+impl Debug for Socket {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("Socket")
+            .field("addr", &self.addr)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AsyncRead for Socket {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<IoResult<usize>> {
+        self.project().inner.poll_read(cx, buf)
+    }
+
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<IoResult<usize>> {
+        self.project().inner.poll_read_vectored(cx, bufs)
+    }
+}
+
+impl AsyncWrite for Socket {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<IoResult<usize>> {
+        self.project().inner.poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
+        self.project().inner.poll_flush(cx)
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
+        self.project().inner.poll_close(cx)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<IoResult<usize>> {
+        self.project().inner.poll_write_vectored(cx, bufs)
+    }
+}
+
+impl Socket {
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
 /// Handle to runtime.
 ///
 /// # Runtime validity
@@ -268,6 +398,17 @@ impl Runtime {
         let (send, recv) = oneshot::<T>();
         rt.queue_task(Box::pin(Handle { fut: task, send }));
         TaskHandle(recv, PhantomPinned)
+    }
+
+    pub fn connect(&self, addr: SocketAddr) -> SocketFuture {
+        SocketFuture {
+            inner: match self.inner().runtime().network() {
+                Some(v) => SocketFutureInner::Fut(v.open(addr)),
+                None => SocketFutureInner::None,
+            },
+            addr,
+            _pinned: PhantomPinned,
+        }
     }
 }
 
@@ -365,6 +506,7 @@ impl Executor {
 #[must_use]
 pub struct ExecutorBuilder {
     epoch: Option<Instant>,
+    network: Option<Box<dyn Send + Sync + SocketHandler>>,
 }
 
 impl ExecutorBuilder {
@@ -373,11 +515,17 @@ impl ExecutorBuilder {
         self
     }
 
+    pub fn with_network(mut self, value: impl 'static + Send + Sync + SocketHandler) -> Self {
+        self.network = Some(Box::new(value));
+        self
+    }
+
     pub fn build(self) -> Executor {
         Executor {
-            rt: Arc::new(RuntimeGuard::new(InnerRuntime::new(Timers::new(
-                self.epoch.unwrap_or_else(Instant::now),
-            )))),
+            rt: Arc::new(RuntimeGuard::new(InnerRuntime::new(
+                Timers::new(self.epoch.unwrap_or_else(Instant::now)),
+                self.network,
+            ))),
         }
     }
 }

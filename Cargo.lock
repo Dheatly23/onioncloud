@@ -339,8 +339,9 @@ dependencies = [
 name = "onioncloud-tart"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "arbitrary",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "futures-util",
  "humantime",
@@ -348,7 +349,6 @@ dependencies = [
  "pin-project",
  "slab",
  "test-log",
- "thiserror",
  "tracing",
  "tracing-subscriber",
 ]
