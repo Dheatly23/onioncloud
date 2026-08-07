@@ -27,11 +27,11 @@ const TASKLIST_FLAG: u8 = 1;
 const INNER_FLAG: u8 = 1 << 2;
 
 impl RuntimeGuard {
-    pub(crate) fn new(rt: InnerRuntime) -> Self {
+    pub(crate) fn new(rt: InnerRuntime, tasklist: Tasklist) -> Self {
         Self {
             state: AtomicU8::new(0),
 
-            tasklist: Default::default(),
+            tasklist: UnsafeCell::new(tasklist),
             inner: UnsafeCell::new(rt),
 
             _pinned: PhantomPinned,

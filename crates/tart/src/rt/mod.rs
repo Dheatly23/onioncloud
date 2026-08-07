@@ -1,4 +1,9 @@
+//! Runtime and executor.
+//!
+//! Contains the runtime executor and other types supporting it.
+
 mod guard;
+pub mod schedule;
 
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::future::Future;
@@ -21,6 +26,7 @@ use crate::socket::{Socket as SocketInner, SocketHandler, SocketOpener};
 use crate::timer::Timers;
 use crate::waker::{MultiWaker, Selector};
 use guard::RuntimeGuard;
+use schedule::FuzzSchedule;
 
 /// A task
 struct Task {
@@ -36,12 +42,17 @@ impl Drop for Task {
     }
 }
 
+struct TaskWaker {
+    waker: MultiWaker,
+    pending: u64,
+}
+
 /// Task list.
-#[derive(Default)]
 pub(crate) struct Tasklist {
     tasks: Vec<Option<Task>>,
-    wakers: Vec<MultiWaker>,
+    wakers: Vec<TaskWaker>,
     selector: Selector,
+    schedule: Option<FuzzSchedule>,
 }
 
 /// Inner runtime.
@@ -89,15 +100,27 @@ pub(crate) struct RunResult {
 }
 
 impl Tasklist {
+    fn new(schedule: Option<FuzzSchedule>) -> Self {
+        Self {
+            tasks: Vec::new(),
+            wakers: Vec::new(),
+            selector: Selector::default(),
+            schedule,
+        }
+    }
+
     #[instrument(skip_all)]
     pub(crate) fn register_queued(&mut self, rt: &mut InnerRuntime) -> bool {
         let mut n = 0usize;
         for task in rt.queued.drain(..) {
             let i = self.tasks.len();
             if i.is_multiple_of(64) {
-                self.wakers.push(MultiWaker::new(self.selector.clone()));
+                self.wakers.push(TaskWaker {
+                    waker: MultiWaker::new(self.selector.clone()),
+                    pending: 0,
+                });
             }
-            self.wakers[i / 64].wake_flag((i % 64) as u8);
+            self.wakers[i / 64].waker.wake_flag((i % 64) as u8);
             self.tasks.push(Some(task));
 
             n += 1;
@@ -113,8 +136,10 @@ impl Tasklist {
         let mut pending = 0usize;
         let mut running = 0usize;
         let mut finished = 0usize;
+        let mut skipped = 0usize;
         let sel = self.selector.switch();
         let mut f = 0;
+        let mut m = u64::MAX;
 
         trace!(
             "waker bank switched from {} to {}",
@@ -123,28 +148,39 @@ impl Tasklist {
         );
 
         for (i, p) in self.tasks.iter_mut().enumerate() {
-            let w = &self.wakers[i / 64];
+            let w = &mut self.wakers[i / 64];
             if i % 64 == 0 {
-                f = w.take_flags(sel);
-
-                trace!(id = i / 64, "loaded waker flags: {f:064b}");
+                let t = w.waker.take_flags(sel);
+                trace!(id = i / 64, "loaded waker flags: {t:064b}");
+                w.pending |= t;
+                m = match &mut self.schedule {
+                    Some(v) if w.pending != 0 => v.take_schedule(),
+                    _ => u64::MAX,
+                };
+                f = w.pending;
+                w.pending &= !m;
+                skipped += w.pending.count_ones() as usize;
             }
 
             let Some(task) = p else {
                 continue;
             };
 
-            if f & (1 << (i % 64)) == 0 {
+            let t = 1 << (i % 64);
+            if f & t == 0 {
                 pending += 1;
                 trace!(id = i, "task is pending");
+                continue;
+            } else if m & t == 0 {
+                trace!(id = i, "task is skipped");
                 continue;
             }
 
             trace!(id = i, "task is running");
             let ret = task.span.in_scope(|| {
-                task.fut
-                    .as_mut()
-                    .poll(&mut Context::from_waker(&w.make_waker((i % 64) as u8)))
+                task.fut.as_mut().poll(&mut Context::from_waker(
+                    &w.waker.make_waker((i % 64) as u8),
+                ))
             });
             if ret.is_ready() {
                 *p = None;
@@ -155,11 +191,11 @@ impl Tasklist {
             }
         }
 
-        info!(running, finished, pending, "done running tasks");
+        info!(running, finished, pending, skipped, "done running tasks");
 
         RunResult {
-            any_running: running > 0 || finished > 0,
-            any_task: pending > 0 || running > 0,
+            any_running: running > 0 || skipped > 0 || finished > 0,
+            any_task: pending > 0 || running > 0 || skipped > 0,
         }
     }
 }
@@ -233,7 +269,10 @@ impl Future for SocketFuture {
                     _pinned: PhantomPinned,
                 }))
             }
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Ready(Err(e)) => {
+                this.inner.set(SocketFutureInner::Done);
+                Poll::Ready(Err(e))
+            }
             Poll::Pending => Poll::Pending,
         }
     }
@@ -242,6 +281,12 @@ impl Future for SocketFuture {
 impl FusedFuture for SocketFuture {
     fn is_terminated(&self) -> bool {
         matches!(self.inner, SocketFutureInner::Done)
+    }
+}
+
+impl SocketFuture {
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
     }
 }
 
@@ -507,6 +552,7 @@ impl Executor {
 pub struct ExecutorBuilder {
     epoch: Option<Instant>,
     network: Option<Box<dyn Send + Sync + SocketHandler>>,
+    schedule: Option<FuzzSchedule>,
 }
 
 impl ExecutorBuilder {
@@ -520,12 +566,20 @@ impl ExecutorBuilder {
         self
     }
 
+    pub fn with_schedule(mut self, schedule: FuzzSchedule) -> Self {
+        self.schedule = Some(schedule);
+        self
+    }
+
     pub fn build(self) -> Executor {
         Executor {
-            rt: Arc::new(RuntimeGuard::new(InnerRuntime::new(
-                Timers::new(self.epoch.unwrap_or_else(Instant::now)),
-                self.network,
-            ))),
+            rt: Arc::new(RuntimeGuard::new(
+                InnerRuntime::new(
+                    Timers::new(self.epoch.unwrap_or_else(Instant::now)),
+                    self.network,
+                ),
+                Tasklist::new(self.schedule),
+            )),
         }
     }
 }
