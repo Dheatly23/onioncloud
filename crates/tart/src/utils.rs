@@ -3,11 +3,14 @@ use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::any::type_name;
 #[cfg(test)]
 use std::cell::Cell;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::marker::{PhantomData, PhantomPinned};
 use std::mem::forget;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::ptr::{NonNull, drop_in_place, write};
 use std::sync::atomic::{AtomicUsize, Ordering::*, fence};
+
+use arbitrary::{Arbitrary, MaxRecursionReached, Result as ArbResult, Unstructured};
 
 #[cfg(test)]
 thread_local! {
@@ -192,6 +195,69 @@ impl<T: Sized> ArcLike<T> {
             }
         }
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct RevVec<T>(Vec<T>);
+
+impl<T> From<Vec<T>> for RevVec<T> {
+    fn from(v: Vec<T>) -> Self {
+        Self(v)
+    }
+}
+
+impl<T> Deref for RevVec<T> {
+    type Target = Vec<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> DerefMut for RevVec<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<T: Debug> Debug for RevVec<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        print_rev_slice(&self.0).fmt(f)
+    }
+}
+
+impl<'a, T: Arbitrary<'a>> Arbitrary<'a> for RevVec<T> {
+    fn arbitrary(u: &mut Unstructured<'a>) -> ArbResult<Self> {
+        let mut ret = <Vec<T> as Arbitrary<'a>>::arbitrary(u)?;
+        ret.reverse();
+        Ok(Self(ret))
+    }
+
+    fn arbitrary_take_rest(u: Unstructured<'a>) -> ArbResult<Self> {
+        let mut ret = <Vec<T> as Arbitrary<'a>>::arbitrary_take_rest(u)?;
+        ret.reverse();
+        Ok(Self(ret))
+    }
+
+    fn size_hint(depth: usize) -> (usize, Option<usize>) {
+        <Vec<T> as Arbitrary<'a>>::size_hint(depth)
+    }
+
+    fn try_size_hint(depth: usize) -> Result<(usize, Option<usize>), MaxRecursionReached> {
+        <Vec<T> as Arbitrary<'a>>::try_size_hint(depth)
+    }
+}
+
+pub(crate) fn print_rev_slice<T: Debug>(s: &[T]) -> impl '_ + Debug {
+    struct S<'a, T: Debug>(&'a [T]);
+
+    impl<T: Debug> Debug for S<'_, T> {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            f.debug_list().entries(self.0.iter().rev()).finish()
+        }
+    }
+
+    S(s)
 }
 
 #[cfg(test)]

@@ -14,6 +14,8 @@ use futures_io::{AsyncRead, AsyncWrite};
 use pin_project::pin_project;
 use tracing::instrument;
 
+use crate::utils::RevVec;
+
 /// Trait for socket limiter entropy generation.
 ///
 /// Returned limit must be [`usize::MAX`] if it ran out of entropy bytes.
@@ -534,40 +536,10 @@ impl SocketLimiterEntropy for FuzzSocketLimiter {
 /// Useful for fuzzing by automatically generate limiter pattern.
 ///
 /// NOTE: Use [`FuzzSocketLimiter`] for implementation optimized for unidirectional socket.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Arbitrary)]
 pub struct FuzzBidiSocketLimiter {
-    read: Vec<NonZeroUsize>,
-    write: Vec<NonZeroUsize>,
-}
-
-impl<'a> Arbitrary<'a> for FuzzBidiSocketLimiter {
-    fn arbitrary(u: &mut Unstructured<'a>) -> ArbResult<Self> {
-        let mut ret = Self {
-            read: Arbitrary::arbitrary(u)?,
-            write: Arbitrary::arbitrary(u)?,
-        };
-        ret.read.reverse();
-        ret.write.reverse();
-        Ok(ret)
-    }
-
-    fn arbitrary_take_rest(mut u: Unstructured<'a>) -> ArbResult<Self> {
-        let mut ret = Self {
-            read: Arbitrary::arbitrary(&mut u)?,
-            write: Arbitrary::arbitrary_take_rest(u)?,
-        };
-        ret.read.reverse();
-        ret.write.reverse();
-        Ok(ret)
-    }
-
-    fn size_hint(depth: usize) -> (usize, Option<usize>) {
-        <(Vec<NonZeroUsize>, Vec<NonZeroUsize>) as Arbitrary<'a>>::size_hint(depth)
-    }
-
-    fn try_size_hint(depth: usize) -> Result<(usize, Option<usize>), MaxRecursionReached> {
-        <(Vec<NonZeroUsize>, Vec<NonZeroUsize>) as Arbitrary<'a>>::try_size_hint(depth)
-    }
+    read: RevVec<NonZeroUsize>,
+    write: RevVec<NonZeroUsize>,
 }
 
 impl SocketLimiterEntropy for FuzzBidiSocketLimiter {

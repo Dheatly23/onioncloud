@@ -3,37 +3,13 @@
 //! Allows for fuzzing scheduling to uncover order-dependent task bugs.
 //! By default, runtime have a deterministic (but not specified) order of task invocation.
 
-use arbitrary::{Arbitrary, MaxRecursionReached, Result as ArbResult, Unstructured};
+use arbitrary::Arbitrary;
 
-#[derive(Debug, Clone)]
+use crate::utils::RevVec;
+
+#[derive(Debug, Clone, Arbitrary)]
 pub struct FuzzSchedule {
-    schedule: Vec<u64>,
-}
-
-impl<'a> Arbitrary<'a> for FuzzSchedule {
-    fn arbitrary(u: &mut Unstructured<'a>) -> ArbResult<Self> {
-        let mut ret = Self {
-            schedule: Arbitrary::arbitrary(u)?,
-        };
-        ret.schedule.reverse();
-        Ok(ret)
-    }
-
-    fn arbitrary_take_rest(u: Unstructured<'a>) -> ArbResult<Self> {
-        let mut ret = Self {
-            schedule: Arbitrary::arbitrary_take_rest(u)?,
-        };
-        ret.schedule.reverse();
-        Ok(ret)
-    }
-
-    fn size_hint(depth: usize) -> (usize, Option<usize>) {
-        <Vec<u64> as Arbitrary<'a>>::size_hint(depth)
-    }
-
-    fn try_size_hint(depth: usize) -> Result<(usize, Option<usize>), MaxRecursionReached> {
-        <Vec<u64> as Arbitrary<'a>>::try_size_hint(depth)
-    }
+    schedule: RevVec<u64>,
 }
 
 impl FuzzSchedule {
@@ -80,7 +56,7 @@ mod tests {
         #[instrument]
         fn test() {
             let schedule = FuzzSchedule {
-                schedule: vec![1, 2, u64::MAX],
+                schedule: vec![1, 2, u64::MAX].into(),
             };
 
             let mut executor = Executor::builder().with_schedule(schedule).build();
