@@ -231,7 +231,7 @@ impl<T: Sized> FusedFuture for TaskHandle<T> {
 
 /// Handle of socket opener.
 ///
-/// See also: [`Runtime::open`].
+/// See also: [`Runtime::connect`].
 #[pin_project]
 pub struct SocketFuture {
     #[pin]
@@ -288,7 +288,7 @@ impl FusedFuture for SocketFuture {
 
 /// Handle of socket.
 ///
-/// See also: [`SocketFuture`] and [`Runtime::open`].
+/// See also: [`SocketFuture`] and [`Runtime::connect`].
 #[pin_project]
 pub struct Socket {
     #[pin]
