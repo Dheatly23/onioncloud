@@ -22,7 +22,7 @@ use pin_project::pin_project;
 use tracing::{Span, error, info, info_span, instrument, trace};
 
 use crate::oneshot::{Receiver, Sender, oneshot};
-use crate::socket::{Socket as SocketInner, SocketHandler, SocketOpener};
+use crate::socket::{OpenOpt, Socket as SocketInner, SocketHandler, SocketOpener};
 use crate::timer::Timers;
 use crate::waker::{MultiWaker, Selector};
 use guard::RuntimeGuard;
@@ -260,7 +260,7 @@ impl Future for SocketFuture {
         let SocketFutureInnerProj::Fut(inner) = this.inner.as_mut().project() else {
             // Simulates offline network.
             this.inner.set(SocketFutureInner::Done);
-            return Poll::Ready(Err(ErrorKind::NetworkUnreachable.into()));
+            return Poll::Ready(Err(ErrorKind::NotConnected.into()));
         };
         match inner.poll(cx) {
             Poll::Ready(Ok((a, v))) => {
@@ -476,7 +476,7 @@ impl Runtime {
     pub fn connect(&self, addrs: &[SocketAddr]) -> SocketFuture {
         SocketFuture {
             inner: match self.inner().runtime().network() {
-                Some(v) => SocketFutureInner::Fut(v.open(addrs)),
+                Some(v) => SocketFutureInner::Fut(v.open(OpenOpt { addrs, rt: self })),
                 None => SocketFutureInner::None,
             },
             _pinned: PhantomPinned,
