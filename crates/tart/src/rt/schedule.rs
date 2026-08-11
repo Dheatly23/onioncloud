@@ -7,6 +7,12 @@ use arbitrary::Arbitrary;
 
 use crate::utils::RevVec;
 
+/// Runtime schedule fuzzer.
+///
+/// Allows for fuzzing scheduling to uncover order-dependent task bugs.
+///
+/// The internal structure is not part of it's public interface.
+/// Use [`Arbitrary`] to generate it.
 #[derive(Debug, Clone, Arbitrary)]
 pub struct FuzzSchedule {
     schedule: RevVec<u64>,

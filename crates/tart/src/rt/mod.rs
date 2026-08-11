@@ -204,6 +204,8 @@ impl Tasklist {
 ///
 /// Spawned task will run independently. You can safely discards the handle if you don't need it.
 /// When `await`-ed, it will either return the return value of subtask or panic if subtask panicked.
+///
+/// See also: [`Runtime::spawn`].
 #[pin_project]
 pub struct TaskHandle<T: Sized>(#[pin] Receiver<T>, #[pin] PhantomPinned);
 
@@ -228,11 +230,12 @@ impl<T: Sized> FusedFuture for TaskHandle<T> {
 }
 
 /// Handle of socket opener.
+///
+/// See also: [`Runtime::open`].
 #[pin_project]
 pub struct SocketFuture {
     #[pin]
     inner: SocketFutureInner,
-    addr: SocketAddr,
     _pinned: PhantomPinned,
 }
 
@@ -245,9 +248,7 @@ enum SocketFutureInner {
 
 impl Debug for SocketFuture {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        f.debug_struct("SocketFuture")
-            .field("addr", &self.addr)
-            .finish_non_exhaustive()
+        f.debug_struct("SocketFuture").finish_non_exhaustive()
     }
 }
 
@@ -257,15 +258,16 @@ impl Future for SocketFuture {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
         let SocketFutureInnerProj::Fut(inner) = this.inner.as_mut().project() else {
+            // Simulates offline network.
             this.inner.set(SocketFutureInner::Done);
             return Poll::Ready(Err(ErrorKind::NetworkUnreachable.into()));
         };
         match inner.poll(cx) {
-            Poll::Ready(Ok(v)) => {
+            Poll::Ready(Ok((a, v))) => {
                 this.inner.set(SocketFutureInner::Done);
                 Poll::Ready(Ok(Socket {
                     inner: v,
-                    addr: *this.addr,
+                    addr: a,
                     _pinned: PhantomPinned,
                 }))
             }
@@ -284,13 +286,9 @@ impl FusedFuture for SocketFuture {
     }
 }
 
-impl SocketFuture {
-    pub fn addr(&self) -> SocketAddr {
-        self.addr
-    }
-}
-
 /// Handle of socket.
+///
+/// See also: [`SocketFuture`] and [`Runtime::open`].
 #[pin_project]
 pub struct Socket {
     #[pin]
@@ -348,6 +346,7 @@ impl AsyncWrite for Socket {
 }
 
 impl Socket {
+    /// Gets remote host address that this scoket connects to.
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
@@ -414,6 +413,31 @@ impl Runtime {
     /// Spawns a new task.
     ///
     /// The resulting handle can be `await`ed to get the return value of subtask.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use onioncloud_tart::rt::Executor;
+    /// // Create executor and get runtime.
+    /// let mut executor = Executor::builder().build();
+    /// let rt = executor.runtime();
+    /// let rt_ = rt.clone();
+    ///
+    /// // Spawn main task.
+    /// rt_.spawn(async move {
+    ///     // Spawn subtask.
+    ///     let subtask = rt.spawn(async move {
+    ///         // Return value from subtask.
+    ///         629495
+    ///     });
+    ///
+    ///     // Await subtask.
+    ///     let ret = subtask.await;
+    ///     assert_eq!(ret, 629495);
+    /// });
+    ///
+    /// executor.run();
+    /// ```
     pub fn spawn<T: Send + 'static>(
         &self,
         task: impl Future<Output = T> + 'static + Send + Sync,
@@ -445,13 +469,16 @@ impl Runtime {
         TaskHandle(recv, PhantomPinned)
     }
 
-    pub fn connect(&self, addr: SocketAddr) -> SocketFuture {
+    /// Open connection into address.
+    ///
+    /// Simulates connecting into remote host.
+    /// If handler is not set in executor, it will simulate offline network.
+    pub fn connect(&self, addrs: &[SocketAddr]) -> SocketFuture {
         SocketFuture {
             inner: match self.inner().runtime().network() {
-                Some(v) => SocketFutureInner::Fut(v.open(addr)),
+                Some(v) => SocketFutureInner::Fut(v.open(addrs)),
                 None => SocketFutureInner::None,
             },
-            addr,
             _pinned: PhantomPinned,
         }
     }
@@ -484,6 +511,7 @@ impl Debug for Executor {
 
 impl Executor {
     /// Create default builder for executor.
+    #[inline(always)]
     pub fn builder() -> ExecutorBuilder {
         ExecutorBuilder::default()
     }
@@ -547,6 +575,8 @@ impl Executor {
 }
 
 /// Builder for [`Executor`].
+///
+/// It has [`Default`] constructor to construct default builder.
 #[derive(Default)]
 #[must_use]
 pub struct ExecutorBuilder {
@@ -556,21 +586,36 @@ pub struct ExecutorBuilder {
 }
 
 impl ExecutorBuilder {
+    /// Sets epoch when executor is running.
+    ///
+    /// For the most part, you should not set this, as it's set automatically.
+    /// But it might be useful to coordinate multiple executors or something else entirely.
     pub fn with_epoch(mut self, epoch: Instant) -> Self {
         self.epoch = Some(epoch);
         self
     }
 
+    /// Sets network handler.
+    ///
+    /// By default, it is not set.
+    /// Set it to enable networking for runtime.
     pub fn with_network(mut self, value: impl 'static + Send + Sync + SocketHandler) -> Self {
         self.network = Some(Box::new(value));
         self
     }
 
+    /// Sets scheduler.
+    ///
+    /// This is only useful for fuzzing scheduling variance.
+    /// See [`FuzzSchedule`] for more info.
     pub fn with_schedule(mut self, schedule: FuzzSchedule) -> Self {
         self.schedule = Some(schedule);
         self
     }
 
+    /// Builds the executor.
+    ///
+    /// Panics if configuration is invalid.
     pub fn build(self) -> Executor {
         Executor {
             rt: Arc::new(RuntimeGuard::new(

@@ -147,14 +147,14 @@ impl Timers {
 /// rt.spawn({
 ///     let rt = rt.clone();
 ///     async move {
-///         // Wait for 1 second
-///         Timer::with_duration(rt.clone(), Duration::from_secs(1)).await;
+///         // Wait for a long time.
+///         Timer::with_duration(rt.clone(), Duration::from_secs(595627)).await;
 ///
 ///         // Alternate construction with get_time()
-///         Timer::with_instant(rt.clone(), rt.get_time() + Duration::from_secs(1)).await;
+///         Timer::with_instant(rt.clone(), rt.get_time() + Duration::from_secs(551840)).await;
 ///
-///         // Reset timer
-///         let mut timer = pin!(Timer::with_duration(rt.clone(), Duration::from_secs(1)));
+///         let mut timer = pin!(Timer::with_duration(rt.clone(), Duration::from_secs(225475)));
+///         // Reset timer so it waits for nothing.
 ///         timer.as_mut().reset();
 ///         timer.await;
 ///     }
@@ -278,9 +278,7 @@ impl Timer {
         let mut g = inner.runtime();
         let timers = g.timers();
 
-        let delta = time
-            .checked_duration_since(timers.get_time())
-            .filter(|t| *t != Duration::ZERO);
+        let delta = delta_nonzero(time.saturating_duration_since(timers.get_time()));
         let index = Self::allocate(timers, delta);
 
         Self {
@@ -342,9 +340,7 @@ impl Timer {
         let mut rt = inner.runtime();
         let timers = rt.timers();
 
-        let delta = time
-            .checked_duration_since(timers.get_time())
-            .filter(|t| *t != Duration::ZERO);
+        let delta = delta_nonzero(time.saturating_duration_since(timers.get_time()));
         self.set_delta(timers, delta);
     }
 
@@ -397,10 +393,13 @@ mod tests {
         fn test() {
             let executor = Executor::builder().build();
             let rt = executor.runtime();
-            let _t1 = black_box(Timer::with_duration(rt.clone(), Duration::from_secs(1)));
+            let _t1 = black_box(Timer::with_duration(
+                rt.clone(),
+                Duration::from_secs(354643),
+            ));
             let _t2a = black_box(Timer::with_instant(
                 rt.clone(),
-                rt.get_time() + Duration::from_secs(1),
+                rt.get_time() + Duration::from_secs(400641),
             ));
             let _t2b = black_box(Timer::with_instant(rt.clone(), rt.get_time()));
             let _t3 = black_box(Timer::always_resolve(rt.clone()));
@@ -418,7 +417,7 @@ mod tests {
 
             let rt_ = rt.clone();
             rt_.spawn(async move {
-                info!("waiting for 120 seconds");
+                info!("waiting for 0 seconds");
                 Timer::always_resolve(rt).await;
                 info!("done waiting");
             });
