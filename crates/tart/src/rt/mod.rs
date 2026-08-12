@@ -477,9 +477,16 @@ impl Runtime {
     /// Simulates connecting into remote host.
     /// If handler is not set in executor, it will simulate offline network.
     pub fn connect(&self, addrs: &[SocketAddr]) -> SocketFuture {
+        let inner = self.inner();
+        let mut rt = inner.runtime();
+        let opt = OpenOpt {
+            addrs,
+            rt: self,
+            time: rt.timers().get_time(),
+        };
         SocketFuture {
-            inner: match self.inner().runtime().network() {
-                Some(v) => SocketFutureInner::Fut(v.open(OpenOpt { addrs, rt: self })),
+            inner: match rt.network() {
+                Some(v) => SocketFutureInner::Fut(v.open(opt)),
                 None => SocketFutureInner::None,
             },
             _pinned: PhantomPinned,

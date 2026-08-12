@@ -9,6 +9,7 @@ use std::io::{ErrorKind, Result as IoResult};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use futures_io::{AsyncRead, AsyncWrite};
 
@@ -42,6 +43,8 @@ pub struct OpenOpt<'a> {
     pub addrs: &'a [SocketAddr],
     /// Runtime that calls into.
     pub rt: &'a Runtime,
+    /// Current time.
+    pub time: Instant,
 }
 
 struct Offline;
