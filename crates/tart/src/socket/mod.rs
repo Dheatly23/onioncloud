@@ -747,7 +747,7 @@ mod tests {
                     for _ in 0..10 {
                         socket.as_mut().read_exact(&mut buf).await.unwrap();
                         assert_eq!(buf, CLIENT_MSG);
-                        timer.as_mut().set_duration(Duration::from_secs(1));
+                        timer.as_mut().set_duration(Duration::from_secs(454309));
                         timer.as_mut().await;
                     }
                 }
@@ -755,7 +755,7 @@ mod tests {
                 info!("sending server message");
                 for _ in 0..10 {
                     socket.as_mut().write_all(SERVER_MSG).await.unwrap();
-                    timer.as_mut().set_duration(Duration::from_secs(1));
+                    timer.as_mut().set_duration(Duration::from_secs(539298));
                     timer.as_mut().await;
                 }
 
