@@ -36,13 +36,34 @@ enum TaskAction {
 
 impl TaskAction {
     async fn run_action(&self, rt: &Runtime, epoch: &Instant) {
-        match self {
-            Self::PollReady => Yield::default().await,
-            Self::WaitDuration(dur) => {
-                Timer::with_duration(rt.clone(), Duration::from_nanos(*dur)).await
+        match *self {
+            Self::PollReady => {
+                let start = rt.get_time();
+                Yield::default().await;
+                let end = rt.get_time();
+                assert_eq!(start, end, "yielding should not pass time");
             }
-            Self::WaitEpoch(dur) => {
-                Timer::with_instant(rt.clone(), *epoch + Duration::from_nanos(*dur)).await
+            Self::WaitDuration(d) => {
+                let start = rt.get_time();
+                let dur = Duration::from_nanos(d);
+                Timer::with_duration(rt.clone(), dur).await;
+                let end = rt.get_time();
+                assert_eq!(
+                    end.checked_duration_since(start),
+                    Some(dur),
+                    "duration should pass"
+                );
+            }
+            Self::WaitEpoch(d) => {
+                let start = rt.get_time();
+                let epoch = *epoch + Duration::from_nanos(d);
+                Timer::with_instant(rt.clone(), epoch).await;
+                let end = rt.get_time();
+                assert_eq!(
+                    end.saturating_duration_since(start).as_nanos(),
+                    epoch.saturating_duration_since(start).as_nanos(),
+                    "duration should pass"
+                );
             }
         }
     }
