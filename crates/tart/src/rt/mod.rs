@@ -233,6 +233,7 @@ impl<T: Sized> FusedFuture for TaskHandle<T> {
 ///
 /// See also: [`Runtime::connect`].
 #[pin_project]
+#[must_use]
 pub struct SocketFuture {
     #[pin]
     inner: SocketFutureInner,
@@ -290,6 +291,7 @@ impl FusedFuture for SocketFuture {
 ///
 /// See also: [`SocketFuture`] and [`Runtime::connect`].
 #[pin_project]
+#[must_use]
 pub struct Socket {
     #[pin]
     inner: SocketInner,
@@ -346,7 +348,8 @@ impl AsyncWrite for Socket {
 }
 
 impl Socket {
-    /// Gets remote host address that this scoket connects to.
+    /// Get remote host address that this scoket connects to.
+    #[must_use]
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
