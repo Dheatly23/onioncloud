@@ -33,8 +33,9 @@ pub trait SocketLimiterEntropy {
 /// It emulates buffer limitation, which can discover new bugs.
 ///
 /// It also wraps [`Read`] + [`Write`] socket for sync operation.
-#[derive(Clone, Debug)]
 #[pin_project(project = SocketLimiterWrapperProj)]
+#[derive(Clone, Debug)]
+#[must_use]
 pub struct SocketLimiterWrapper<S, R> {
     #[pin]
     socket: S,
