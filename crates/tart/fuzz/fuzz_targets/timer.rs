@@ -60,9 +60,9 @@ impl TaskAction {
                 Timer::with_instant(rt.clone(), epoch).await;
                 let end = rt.get_time();
                 assert_eq!(
-                    end.saturating_duration_since(start).as_nanos(),
-                    epoch.saturating_duration_since(start).as_nanos(),
-                    "duration should pass"
+                    end,
+                    start.max(epoch),
+                    "end must be maximum of start & epoch"
                 );
             }
         }

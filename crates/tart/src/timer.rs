@@ -261,7 +261,7 @@ impl Timer {
         let mut g = inner.runtime();
         let timers = g.timers();
 
-        let delta = delta_nonzero(delta + timers.delta, timers.delta);
+        let delta = delta_validate(delta + timers.delta, timers.delta);
         let index = Self::allocate(timers, delta);
 
         Self {
@@ -278,7 +278,7 @@ impl Timer {
         let mut g = inner.runtime();
         let timers = g.timers();
 
-        let delta = delta_nonzero(time.saturating_duration_since(timers.epoch), timers.delta);
+        let delta = delta_validate(time.saturating_duration_since(timers.epoch), timers.delta);
         let index = Self::allocate(timers, delta);
 
         Self {
@@ -327,7 +327,7 @@ impl Timer {
         let mut rt = inner.runtime();
         let timers = rt.timers();
 
-        let delta = delta_nonzero(delta + timers.delta, timers.delta);
+        let delta = delta_validate(delta + timers.delta, timers.delta);
         self.set_delta(timers, delta);
     }
 
@@ -340,7 +340,7 @@ impl Timer {
         let mut rt = inner.runtime();
         let timers = rt.timers();
 
-        let delta = delta_nonzero(time.saturating_duration_since(timers.epoch), timers.delta);
+        let delta = delta_validate(time.saturating_duration_since(timers.epoch), timers.delta);
         self.set_delta(timers, delta);
     }
 
@@ -366,12 +366,8 @@ impl Timer {
     }
 }
 
-fn delta_nonzero(delta: Duration, cur: Duration) -> Option<Duration> {
-    if delta != Duration::ZERO && delta > cur {
-        Some(delta)
-    } else {
-        None
-    }
+fn delta_validate(delta: Duration, cur: Duration) -> Option<Duration> {
+    (delta > cur).then_some(delta)
 }
 
 #[cfg(test)]
