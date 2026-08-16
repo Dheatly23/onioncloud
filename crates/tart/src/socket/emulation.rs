@@ -95,10 +95,22 @@ impl<S, R> SocketLimiterWrapper<S, R> {
         self.project().socket
     }
 
+    /// Gets reference to entropy generator.
+    #[inline(always)]
+    pub fn entropy_ref(&self) -> &R {
+        &self.entropy
+    }
+
     /// Gets mutable reference to entropy generator.
     #[inline(always)]
-    pub fn entropy_mut(&mut self) -> &mut R {
+    pub fn entropy_mut_unpin(&mut self) -> &mut R {
         &mut self.entropy
+    }
+
+    /// Gets mutable reference to entropy generator.
+    #[inline(always)]
+    pub fn entropy_mut(self: Pin<&mut Self>) -> &mut R {
+        self.project().entropy
     }
 }
 
@@ -481,9 +493,15 @@ impl<S: Write, R: SocketLimiterEntropy> Write for SocketLimiterWrapper<S, R> {
 /// **NOTE: Do not use it with bidirectional socket! Use [`FuzzBidiSocketLimiter`] instead.**
 #[derive(Debug, Clone)]
 pub struct FuzzSocketLimiter {
-    inner: Vec<NonZeroUsize>,
+    inner: Vec<usize>,
     read: usize,
     write: usize,
+}
+
+impl AsRef<Self> for FuzzSocketLimiter {
+    fn as_ref(&self) -> &Self {
+        self
+    }
 }
 
 impl<'a> Arbitrary<'a> for FuzzSocketLimiter {
@@ -504,11 +522,11 @@ impl<'a> Arbitrary<'a> for FuzzSocketLimiter {
     }
 
     fn size_hint(depth: usize) -> (usize, Option<usize>) {
-        <Vec<NonZeroUsize> as Arbitrary<'a>>::size_hint(depth)
+        <Vec<usize> as Arbitrary<'a>>::size_hint(depth)
     }
 
     fn try_size_hint(depth: usize) -> Result<(usize, Option<usize>), MaxRecursionReached> {
-        <Vec<NonZeroUsize> as Arbitrary<'a>>::try_size_hint(depth)
+        <Vec<usize> as Arbitrary<'a>>::try_size_hint(depth)
     }
 }
 
@@ -516,7 +534,7 @@ impl SocketLimiterEntropy for FuzzSocketLimiter {
     fn take_read_limit(&mut self) -> NonZeroUsize {
         if let Some(&r) = self.inner.get(self.read) {
             self.read += 1;
-            r
+            zero_to_one(r)
         } else {
             NonZeroUsize::MAX
         }
@@ -525,7 +543,51 @@ impl SocketLimiterEntropy for FuzzSocketLimiter {
     fn take_write_limit(&mut self) -> NonZeroUsize {
         if let Some(&r) = self.inner.get(self.write) {
             self.write += 1;
-            r
+            zero_to_one(r)
+        } else {
+            NonZeroUsize::MAX
+        }
+    }
+}
+
+/// Shared wrapper of [`FuzzSocketLimiter`].
+///
+/// Useful for reusing the same value for multiple connections (eg. server).
+#[derive(Debug, Clone)]
+pub struct FuzzSocketLimiterShared<Inner> {
+    read: usize,
+    write: usize,
+    inner: Inner,
+}
+
+impl<Inner: AsRef<FuzzSocketLimiter>> FuzzSocketLimiterShared<Inner> {
+    pub fn new(inner: Inner) -> Self {
+        Self {
+            inner,
+            read: 0,
+            write: 0,
+        }
+    }
+
+    pub fn inner(&self) -> &Inner {
+        &self.inner
+    }
+}
+
+impl<Inner: AsRef<FuzzSocketLimiter>> SocketLimiterEntropy for FuzzSocketLimiterShared<Inner> {
+    fn take_read_limit(&mut self) -> NonZeroUsize {
+        if let Some(&r) = self.inner.as_ref().inner.get(self.read) {
+            self.read += 1;
+            zero_to_one(r)
+        } else {
+            NonZeroUsize::MAX
+        }
+    }
+
+    fn take_write_limit(&mut self) -> NonZeroUsize {
+        if let Some(&r) = self.inner.as_ref().inner.get(self.write) {
+            self.write += 1;
+            zero_to_one(r)
         } else {
             NonZeroUsize::MAX
         }
@@ -539,18 +601,78 @@ impl SocketLimiterEntropy for FuzzSocketLimiter {
 /// NOTE: Use [`FuzzSocketLimiter`] for implementation optimized for unidirectional socket.
 #[derive(Debug, Clone, Arbitrary)]
 pub struct FuzzBidiSocketLimiter {
-    read: RevVec<NonZeroUsize>,
-    write: RevVec<NonZeroUsize>,
+    read: RevVec<usize>,
+    write: RevVec<usize>,
+}
+
+impl AsRef<Self> for FuzzBidiSocketLimiter {
+    fn as_ref(&self) -> &Self {
+        self
+    }
 }
 
 impl SocketLimiterEntropy for FuzzBidiSocketLimiter {
     fn take_read_limit(&mut self) -> NonZeroUsize {
-        self.read.pop().unwrap_or(NonZeroUsize::MAX)
+        self.read.pop().map_or(NonZeroUsize::MAX, zero_to_one)
     }
 
     fn take_write_limit(&mut self) -> NonZeroUsize {
-        self.write.pop().unwrap_or(NonZeroUsize::MAX)
+        self.write.pop().map_or(NonZeroUsize::MAX, zero_to_one)
     }
+}
+
+/// Shared wrapper of [`FuzzBidiSocketLimiter`].
+///
+/// Useful for sharing the same value for multiple connections (eg. server).
+///
+/// NOTE: Do not modify the inner [`FuzzBidiSocketLimiter`]. It will produce incorrect state.
+#[derive(Debug, Clone)]
+pub struct FuzzBidiSocketLimiterShared<Inner> {
+    read: usize,
+    write: usize,
+    inner: Inner,
+}
+
+impl<Inner: AsRef<FuzzBidiSocketLimiter>> FuzzBidiSocketLimiterShared<Inner> {
+    pub fn new(inner: Inner) -> Self {
+        Self {
+            inner,
+            read: 0,
+            write: 0,
+        }
+    }
+
+    pub fn inner(&self) -> &Inner {
+        &self.inner
+    }
+}
+
+impl<Inner: AsRef<FuzzBidiSocketLimiter>> SocketLimiterEntropy
+    for FuzzBidiSocketLimiterShared<Inner>
+{
+    fn take_read_limit(&mut self) -> NonZeroUsize {
+        let p = &self.inner.as_ref().read;
+        if let i @ 1.. = p.len().saturating_sub(self.read) {
+            self.read += 1;
+            zero_to_one(p[i - 1])
+        } else {
+            NonZeroUsize::MAX
+        }
+    }
+
+    fn take_write_limit(&mut self) -> NonZeroUsize {
+        let p = &self.inner.as_ref().write;
+        if let i @ 1.. = p.len().saturating_sub(self.write) {
+            self.write += 1;
+            zero_to_one(p[i - 1])
+        } else {
+            NonZeroUsize::MAX
+        }
+    }
+}
+
+fn zero_to_one(v: usize) -> NonZeroUsize {
+    NonZeroUsize::new(v).unwrap_or(NonZeroUsize::MIN)
 }
 
 #[cfg(test)]

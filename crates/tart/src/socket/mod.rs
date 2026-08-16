@@ -68,8 +68,7 @@ mod tests {
     use std::ops::{Deref, DerefMut};
     use std::pin::pin;
     use std::sync::atomic::{AtomicU8, Ordering::*};
-    use std::task::Waker;
-    use std::task::ready;
+    use std::task::{Waker, ready};
     use std::time::Duration;
 
     use futures_util::{AsyncReadExt, AsyncWriteExt, select_biased};
@@ -317,8 +316,10 @@ mod tests {
 
     struct NetworkPingPongEmulator<F>(F);
 
-    impl<Fut: 'static + Send + Sync + Future<Output = ()>, F: FnMut(Runtime, ServerHalf) -> Fut>
-        SocketHandler for NetworkPingPongEmulator<F>
+    impl<
+        Fut: 'static + Send + Sync + Future<Output = ()>,
+        F: FnMut(Runtime, ServerHalfRead, ServerHalfWrite) -> Fut,
+    > SocketHandler for NetworkPingPongEmulator<F>
     {
         fn open(&mut self, args: OpenOpt<'_>) -> SocketOpener {
             let Some(&addr) = args.addrs.last() else {
@@ -329,10 +330,11 @@ mod tests {
                 lock: AtomicU8::new(0),
                 inner: Default::default(),
             });
-            let server = ServerHalf(outer.clone());
+            let read = ServerHalfRead(outer.clone());
+            let write = ServerHalfWrite(outer.clone());
             let client = ClientHalf(outer);
 
-            let fut = (self.0)(args.rt.clone(), server);
+            let fut = (self.0)(args.rt.clone(), read, write);
             let rt = args.rt.clone();
             Box::pin(async move {
                 rt.spawn(fut);
@@ -606,9 +608,9 @@ mod tests {
         }
     }
 
-    struct ServerHalf(ArcLike<PingPongOuter>);
+    struct ServerHalfRead(ArcLike<PingPongOuter>);
 
-    impl AsyncRead for ServerHalf {
+    impl AsyncRead for ServerHalfRead {
         fn poll_read(
             self: Pin<&mut Self>,
             cx: &mut Context<'_>,
@@ -634,7 +636,9 @@ mod tests {
         }
     }
 
-    impl AsyncWrite for ServerHalf {
+    struct ServerHalfWrite(ArcLike<PingPongOuter>);
+
+    impl AsyncWrite for ServerHalfWrite {
         fn poll_write(
             self: Pin<&mut Self>,
             cx: &mut Context<'_>,
@@ -737,36 +741,39 @@ mod tests {
             static CLIENT_MSG: &[u8] = b"Nyon from the client!\n";
             static SERVER_MSG: &[u8] = b"Nyon back from the server!\n";
 
-            let network = NetworkPingPongEmulator(|rt: Runtime, socket: ServerHalf| async move {
-                let mut socket = pin!(socket);
-                let mut timer = pin!(Timer::always_resolve(rt));
+            let network = NetworkPingPongEmulator(
+                |rt: Runtime, read: ServerHalfRead, write: ServerHalfWrite| async move {
+                    let mut read = pin!(read);
+                    let mut write = pin!(write);
+                    let mut timer = pin!(Timer::always_resolve(rt));
 
-                {
-                    info!("receiving client message");
-                    let mut buf = vec![0; CLIENT_MSG.len()];
+                    {
+                        info!("receiving client message");
+                        let mut buf = vec![0; CLIENT_MSG.len()];
+                        for _ in 0..10 {
+                            read.as_mut().read_exact(&mut buf).await.unwrap();
+                            assert_eq!(buf, CLIENT_MSG);
+                            timer.as_mut().set_duration(Duration::from_secs(454309));
+                            timer.as_mut().await;
+                        }
+                    }
+
+                    info!("sending server message");
                     for _ in 0..10 {
-                        socket.as_mut().read_exact(&mut buf).await.unwrap();
-                        assert_eq!(buf, CLIENT_MSG);
-                        timer.as_mut().set_duration(Duration::from_secs(454309));
+                        write.as_mut().write_all(SERVER_MSG).await.unwrap();
+                        timer.as_mut().set_duration(Duration::from_secs(539298));
                         timer.as_mut().await;
                     }
-                }
 
-                info!("sending server message");
-                for _ in 0..10 {
-                    socket.as_mut().write_all(SERVER_MSG).await.unwrap();
-                    timer.as_mut().set_duration(Duration::from_secs(539298));
-                    timer.as_mut().await;
-                }
+                    info!("closing server");
+                    write.as_mut().close().await.unwrap();
 
-                info!("closing server");
-                socket.as_mut().close().await.unwrap();
+                    info!("waiting for client to close");
+                    assert_eq!(read.read(&mut [0]).await.unwrap(), 0);
 
-                info!("waiting for client to close");
-                assert_eq!(socket.read(&mut [0]).await.unwrap(), 0);
-
-                info!("server done");
-            });
+                    info!("server done");
+                },
+            );
             let mut executor = Executor::builder().with_network(network).build();
             let rt = executor.runtime();
 

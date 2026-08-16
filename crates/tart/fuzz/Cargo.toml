@@ -40,3 +40,10 @@ path = "fuzz_targets/mpsc.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "socket"
+path = "fuzz_targets/socket.rs"
+test = false
+doc = false
+bench = false
