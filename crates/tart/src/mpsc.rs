@@ -580,9 +580,6 @@ impl<T: Sized> Sink<T> for Sender<T> {
             }
 
             // SAFETY: Pointer points to valid allocation.
-            unsafe { s.as_ref().lock.fetch_add(RECEIVER_FLAG, Relaxed) };
-
-            // SAFETY: Pointer points to valid allocation.
             let r = unsafe { p.as_ref() };
 
             let Ok(mut g) = r.try_lock() else {
@@ -593,6 +590,11 @@ impl<T: Sized> Sink<T> for Sender<T> {
 
                 return Poll::Ready(Err(SendError {}));
             };
+
+            // SAFETY: Pointer points to valid allocation.
+            let t = unsafe { s.as_ref().lock.fetch_add(RECEIVER_FLAG, Relaxed) };
+            assert!(t & RECEIVER_FLAG == 0, "Flag {t:02x} contains receiver flag. It's a double-free bug.");
+
             g.ready.push_back(s);
         }
 
