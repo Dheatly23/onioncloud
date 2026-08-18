@@ -481,7 +481,6 @@ impl AsyncWrite for ClientHalf {
 struct SharedData {
     client_data: Vec<u8>,
     server_data: Vec<u8>,
-    client_limiter: FuzzBidiSocketLimiter,
     server_limiter: FuzzBidiSocketLimiter,
 }
 
@@ -489,13 +488,15 @@ struct GlobalData {
     sockets: Vec<SharedData>,
 }
 
-async fn client_task(socket: Socket, shared: Arc<GlobalData>, ix: usize) {
+async fn client_task(
+    socket: Socket,
+    shared: Arc<GlobalData>,
+    ix: usize,
+    limiter: FuzzBidiSocketLimiter,
+) {
     let shared = &shared.sockets[ix];
     let mut buf = vec![0; shared.server_data.len()];
-    let mut socket = pin!(SocketLimiterWrapper::new(
-        socket,
-        FuzzBidiSocketLimiterShared::new(&shared.client_limiter)
-    ));
+    let mut socket = pin!(SocketLimiterWrapper::new(socket, limiter));
     let mut read = 0;
     let mut write = 0;
     let mut closed = false;
@@ -659,23 +660,34 @@ impl SocketHandler for Network {
     }
 }
 
-type ClientConnectorData = (usize, bool, Vec<(IpAddr, u16)>);
+type ClientConnectorData = (usize, bool, u16, Vec<(IpAddr, u16)>, FuzzBidiSocketLimiter);
 
-async fn client(rt: Runtime, shared: Arc<GlobalData>, (ix, addr_ty, other): ClientConnectorData) {
+async fn client(
+    rt: Runtime,
+    shared: Arc<GlobalData>,
+    (ix, addr_ty, mut port, other, limiter): ClientConnectorData,
+) {
     let mut addrs = other.into_iter().map(SocketAddr::from).collect::<Vec<_>>();
+
+    let l = shared.sockets.len();
+    let ip = if addr_ty {
+        IpAddr::from(IPV4_ADDR)
+    } else {
+        IpAddr::from(IPV6_ADDR)
+    };
+    if l > 0 {
+        port %= u16::from(l).unwrap_or(u16::MAX);
+    }
+    let socket = SocketAddr::from((ip, port));
     if addrs.len() > 0 {
-        let ip = if addr_ty {
-            IpAddr::from(IPV4_ADDR)
-        } else {
-            IpAddr::from(IPV6_ADDR)
-        };
         let ix = ix % addrs.len();
-        addrs[ix].set_ip(ip);
+        addrs[ix] = socket;
+    } else {
+        addrs.push(socket);
     }
 
     let r = rt.connect(&addrs).await;
 
-    let l = shared.sockets.len();
     let Some((ix, addr)) = addrs
         .into_iter()
         .flat_map(|a| {
@@ -699,7 +711,7 @@ async fn client(rt: Runtime, shared: Arc<GlobalData>, (ix, addr_ty, other): Clie
     let client = r.unwrap();
     assert_eq!(client.addr(), addr);
 
-    client_task(client, shared, ix).await;
+    client_task(client, shared, ix, limiter).await;
 }
 
 type Data = (Vec<SharedData>, Vec<ClientConnectorData>, FuzzSchedule);

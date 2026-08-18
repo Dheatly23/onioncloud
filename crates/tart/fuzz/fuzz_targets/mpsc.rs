@@ -7,14 +7,13 @@ use std::future::{Future, poll_fn};
 use std::num::NonZeroU16;
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll};
-use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use onioncloud_tart::mpsc::{Receiver, Sender, make_channel};
+use onioncloud_tart::rt::schedule::FuzzSchedule;
 use onioncloud_tart::rt::{Executor, Runtime};
-use onioncloud_tart::timer::Timer;
 use pin_project::pin_project;
 
 thread_local! {
@@ -67,7 +66,6 @@ enum TaskActionSend {
     WaitReady,
     WaitFlush,
     Close,
-    WaitDuration(u64),
 }
 
 #[pin_project]
@@ -115,9 +113,6 @@ impl SendTask {
                 this.send.close().await.unwrap();
                 *this.closed = true;
             }
-            TaskActionSend::WaitDuration(dur) => {
-                Timer::with_duration(self.rt.clone(), Duration::from_nanos(dur)).await
-            }
         }
     }
 }
@@ -126,7 +121,6 @@ impl SendTask {
 enum TaskActionRecv {
     PollReady,
     Recv,
-    WaitDuration(u64),
 }
 
 #[pin_project]
@@ -152,9 +146,6 @@ impl RecvTask {
                     (ret, this.recv.is_disconnected()),
                     (Some(_), _) | (None, true)
                 );
-            }
-            TaskActionRecv::WaitDuration(dur) => {
-                Timer::with_duration(self.rt.clone(), Duration::from_nanos(dur)).await
             }
         }
     }
@@ -211,10 +202,13 @@ impl TaskActionPair {
     }
 }
 
-fuzz_target!(|tasks_actions: Vec<TaskActionPair>| {
+type Data = (Vec<TaskActionPair>, FuzzSchedule);
+
+fuzz_target!(|data: Data| {
     reset();
 
-    let mut executor = Executor::builder().build();
+    let (tasks_actions, schedule) = data;
+    let mut executor = Executor::builder().with_schedule(schedule).build();
 
     let rt = executor.runtime();
     for task in tasks_actions {
