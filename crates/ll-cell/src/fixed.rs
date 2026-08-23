@@ -67,6 +67,12 @@ impl From<[u8; FIXED_CELL_SIZE]> for FixedCell {
     }
 }
 
+impl<'a> From<&'a [u8; FIXED_CELL_SIZE]> for FixedCell {
+    fn from(arr: &'a [u8; FIXED_CELL_SIZE]) -> Self {
+        Self::new(Box::new(*arr))
+    }
+}
+
 impl From<Box<[u8; FIXED_CELL_SIZE]>> for FixedCell {
     fn from(data: Box<[u8; FIXED_CELL_SIZE]>) -> Self {
         Self::new(data)
@@ -79,7 +85,7 @@ impl FixedCell {
     /// Argument:
     /// - `inner` : Cell data.
     #[inline]
-    const fn new(inner: Box<[u8; FIXED_CELL_SIZE]>) -> Self {
+    pub const fn new(inner: Box<[u8; FIXED_CELL_SIZE]>) -> Self {
         Self { inner }
     }
 
