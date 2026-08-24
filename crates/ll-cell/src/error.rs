@@ -43,3 +43,13 @@ pub enum CellReadError {
     Io(#[from] IoError),
     CellFormatError(#[from] CellFormatError),
 }
+
+/// Cell write error.
+#[derive(Error, Debug)]
+#[error(transparent)]
+#[non_exhaustive]
+pub enum CellWriteError {
+    /// IO error.
+    Io(#[from] IoError),
+    CellFormatError(#[from] CellFormatError),
+}

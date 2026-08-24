@@ -3,12 +3,12 @@
 use std::io::{Error as IoError, ErrorKind, Read};
 use std::mem::replace;
 
-use zerocopy::byteorder::big_endian::{U16, U32};
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+use zerocopy::{IntoBytes, transmute_mut};
 
 use crate::cell::{Cell, CellHeader};
 use crate::error::{CellFinished, CellFormatError, CellReadError, UnknownIoError};
 use crate::fixed::FixedCell;
+use crate::utils::{HeaderLargeVariable, HeaderSmallVariable, PrefixedFixedCell};
 use crate::variable::VariableCell;
 
 /// Configurator trait for [`Reader`].
@@ -64,6 +64,7 @@ pub struct Reader<C> {
     /// Reader configurator.
     pub config: C,
 
+    off: usize,
     state: State,
 }
 
@@ -73,41 +74,19 @@ enum State {
     Finished,
     Err,
     IoErr,
-    Header {
-        data: HeaderBuf,
-        off: usize,
-    },
-    Cell {
-        header: CellHeader,
-        data: CellBuf,
-        off: usize,
-    },
+    Header { data: HeaderBuf },
+    Cell { header: CellHeader, data: CellBuf },
 }
 
 #[derive(Debug)]
 enum HeaderBuf {
-    Small(HeaderSmall),
-    Large(HeaderLarge),
-}
-
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Debug, Default)]
-#[repr(C)]
-struct HeaderSmall {
-    circuit: U16,
-    command: u8,
-}
-
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Debug, Default)]
-#[repr(C)]
-struct HeaderLarge {
-    circuit: U32,
-    command: u8,
+    Small(HeaderSmallVariable),
+    Large(HeaderLargeVariable),
 }
 
 #[derive(Debug)]
 enum CellBuf {
     Fixed(FixedCell),
-    VariableHeader(U16),
     Variable(VariableCell),
 }
 
@@ -118,6 +97,7 @@ impl<C: ReadConfig> Reader<C> {
         Self {
             config,
             state: State::Init,
+            off: 0,
         }
     }
 
@@ -136,7 +116,7 @@ impl<C: ReadConfig> Reader<C> {
     /// **DO NOT** reuse [`Reader`] after it returns an error.
     pub fn read<R: Read>(&mut self, read: &mut R) -> Result<Option<Cell>, CellReadError> {
         loop {
-            let (buf, off) = match &mut self.state {
+            let buf = match &mut self.state {
                 State::Err => return Err(CellFormatError.into()),
                 State::IoErr => return Err(IoError::other(UnknownIoError).into()),
                 State::Finished => {
@@ -144,37 +124,36 @@ impl<C: ReadConfig> Reader<C> {
                 }
                 State::Init => {
                     self.state = State::Header {
-                        off: 0,
                         data: if self.config.is_circ_id_4bytes() {
                             HeaderBuf::Large(Default::default())
                         } else {
                             HeaderBuf::Small(Default::default())
                         },
                     };
+                    self.off = 0;
                     continue;
                 }
-                State::Header { data, off } => (
-                    match data {
-                        HeaderBuf::Small(v) => v.as_mut_bytes(),
-                        HeaderBuf::Large(v) => v.as_mut_bytes(),
-                    },
-                    off,
-                ),
-                State::Cell { data, off, .. } => (
-                    match data {
-                        CellBuf::Fixed(v) => v.data_mut(),
-                        CellBuf::Variable(v) => v.data_mut(),
-                        CellBuf::VariableHeader(v) => v.as_mut_bytes(),
-                    },
-                    off,
-                ),
+                State::Header {
+                    data: HeaderBuf::Small(v),
+                } => v.as_mut_bytes(),
+                State::Header {
+                    data: HeaderBuf::Large(v),
+                } => v.as_mut_bytes(),
+                State::Cell {
+                    data: CellBuf::Fixed(v),
+                    ..
+                } => v.data_mut(),
+                State::Cell {
+                    data: CellBuf::Variable(v),
+                    ..
+                } => v.data_mut(),
             };
 
-            let buf = &mut buf[*off..];
+            let buf = &mut buf[self.off..];
             if !buf.is_empty() {
                 let n = match read.read(buf) {
                     Ok(0) => {
-                        if matches!(self.state, State::Header { off: 0, .. }) {
+                        if self.off == 0 {
                             // Not reading anything yet.
                             self.state = State::Finished;
                             return Err(IoError::new(ErrorKind::UnexpectedEof, CellFinished).into());
@@ -191,50 +170,53 @@ impl<C: ReadConfig> Reader<C> {
                     }
                 };
 
-                *off += n;
+                self.off += n;
                 if n < buf.len() {
                     continue;
                 }
             }
 
-            match &mut self.state {
-                State::Header { data, .. } => {
-                    let header = match data {
-                        HeaderBuf::Small(v) => CellHeader {
-                            circuit: v.circuit.get().into(),
-                            command: v.command,
-                        },
-                        HeaderBuf::Large(v) => CellHeader {
-                            circuit: v.circuit.get(),
-                            command: v.command,
-                        },
+            match replace(&mut self.state, State::Err) {
+                State::Header { data } => {
+                    let (header, len) = match data {
+                        HeaderBuf::Small(v) => (
+                            CellHeader {
+                                circuit: v.header.circuit.get().into(),
+                                command: v.header.command,
+                            },
+                            v.len,
+                        ),
+                        HeaderBuf::Large(v) => (
+                            CellHeader {
+                                circuit: v.header.circuit.get(),
+                                command: v.header.command,
+                            },
+                            v.len,
+                        ),
                     };
-                    let Some(ty) = self.config.cell_type(&header) else {
-                        self.state = State::Err;
-                        return Err(CellFormatError.into());
-                    };
+                    let ty = self.config.cell_type(&header).ok_or(CellFormatError)?;
 
-                    self.state = State::Cell {
-                        header,
-                        data: match ty {
-                            CellType::Fixed => CellBuf::Fixed(self.config.get_fixed_cell()),
-                            CellType::Variable => CellBuf::VariableHeader(Default::default()),
-                        },
-                        off: 0,
+                    let data = match ty {
+                        CellType::Fixed => {
+                            let mut cell = self.config.get_fixed_cell();
+                            let PrefixedFixedCell { v, .. } = transmute_mut!(cell.data_mut());
+                            *v = len;
+                            CellBuf::Fixed(cell)
+                        }
+                        CellType::Variable => {
+                            CellBuf::Variable(VariableCell::new(vec![0; len.get() as usize].into()))
+                        }
                     };
+                    self.state = State::Cell { header, data };
+                    self.off = 0;
                 }
                 State::Cell { header, data, .. } => {
-                    let ret = match replace(data, CellBuf::VariableHeader(Default::default())) {
-                        CellBuf::VariableHeader(len) => {
-                            *data = CellBuf::Variable(VariableCell::new(
-                                vec![0; len.get() as usize].into(),
-                            ));
-                            continue;
-                        }
-                        CellBuf::Fixed(data) => Cell::new(*header, data),
-                        CellBuf::Variable(data) => Cell::new(*header, data),
+                    let ret = match data {
+                        CellBuf::Fixed(data) => Cell::new(header, data),
+                        CellBuf::Variable(data) => Cell::new(header, data),
                     };
                     self.state = State::Init;
+                    self.off = 0;
                     return Ok(Some(ret));
                 }
                 _ => unreachable!(),
