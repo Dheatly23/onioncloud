@@ -124,7 +124,7 @@ impl<C: WriteConfig> Writer<C> {
     /// # Usage note
     ///
     /// **DO NOT** reuse [`Writer`] after it returns an error.
-    pub fn read<W: Write>(&mut self, write: &mut W) -> Result<bool, CellWriteError> {
+    pub fn write<W: Write>(&mut self, write: &mut W) -> Result<bool, CellWriteError> {
         loop {
             let buf = match &self.state {
                 State::Err => return Err(CellFormatError.into()),

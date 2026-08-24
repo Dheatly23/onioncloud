@@ -336,6 +336,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "onioncloud-ll-cell-fuzz"
+version = "0.0.0"
+dependencies = [
+ "arbitrary",
+ "futures-util",
+ "libfuzzer-sys",
+ "onioncloud-ll-cell",
+ "onioncloud-tart",
+ "pin-project",
+ "tracing",
+]
+
+[[package]]
 name = "onioncloud-tart"
 version = "0.1.0"
 dependencies = [

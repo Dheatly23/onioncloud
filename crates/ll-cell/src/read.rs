@@ -196,19 +196,22 @@ impl<C: ReadConfig> Reader<C> {
                     };
                     let ty = self.config.cell_type(&header).ok_or(CellFormatError)?;
 
-                    let data = match ty {
+                    let (data, off) = match ty {
                         CellType::Fixed => {
                             let mut cell = self.config.get_fixed_cell();
                             let PrefixedFixedCell { v, .. } = transmute_mut!(cell.data_mut());
                             *v = len;
-                            CellBuf::Fixed(cell)
+                            (CellBuf::Fixed(cell), 2)
                         }
-                        CellType::Variable => {
-                            CellBuf::Variable(VariableCell::new(vec![0; len.get() as usize].into()))
-                        }
+                        CellType::Variable => (
+                            CellBuf::Variable(VariableCell::new(
+                                vec![0; len.get() as usize].into(),
+                            )),
+                            0,
+                        ),
                     };
                     self.state = State::Cell { header, data };
-                    self.off = 0;
+                    self.off = off;
                 }
                 State::Cell { header, data, .. } => {
                     let ret = match data {
