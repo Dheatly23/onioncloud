@@ -15,7 +15,7 @@ cfg_select! {
         struct InnerWaker {
             a: atomic::AtomicU64,
         }
-    },
+    }
     _ => {
         struct InnerWaker {
             a: atomic::AtomicU32,
@@ -33,7 +33,7 @@ impl InnerWaker {
             _ => Self {
                 a: atomic::AtomicU32::new(0),
                 b: atomic::AtomicU32::new(0),
-            }
+            },
         }
     }
 
@@ -41,7 +41,7 @@ impl InnerWaker {
         cfg_select! {
             target_has_atomic = "64" => {
                 self.a.fetch_or(1u64.wrapping_shl(i.into()), Relaxed);
-            },
+            }
             _ => {
                 let p = if i < 32 { &self.a } else { &self.b };
                 p.fetch_or(1u32.wrapping_shl(i.into()), Relaxed);
@@ -51,9 +51,7 @@ impl InnerWaker {
 
     fn take_all(&self) -> u64 {
         cfg_select! {
-            target_has_atomic = "64" => {
-                self.a.swap(0, Relaxed)
-            },
+            target_has_atomic = "64" => self.a.swap(0, Relaxed),
             _ => {
                 let a = self.a.swap(0, Relaxed);
                 let b = self.b.swap(0, Relaxed);
