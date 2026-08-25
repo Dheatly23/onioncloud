@@ -200,19 +200,18 @@ fuzz_target!(|data: Data| {
             })
             .await;
 
-            let c = match r {
-                Err(CellReadError::Io(e)) if e.kind() == ErrorKind::UnexpectedEof => {
-                    assert_eq!(
-                        reader.is_finished(),
-                        e.get_ref()
-                            .and_then(|v| v.downcast_ref::<CellFinished>())
-                            .is_some()
-                    );
-                    break;
-                }
-                v => v.unwrap(),
-            };
-            cells.push_back(c);
+            if let Err(CellReadError::Io(e)) = &r
+                && e.kind() == ErrorKind::UnexpectedEof
+            {
+                assert_eq!(
+                    reader.is_finished(),
+                    e.get_ref()
+                        .and_then(|v| v.downcast_ref::<CellFinished>())
+                        .is_some()
+                );
+                break;
+            }
+            cells.push_back(r.unwrap());
             pos = read.socket_mut().inner.position() as usize;
             reader.config.off = reader.config.off.saturating_add(1);
         }
