@@ -24,8 +24,8 @@ path = ".."
 path = "../../tart"
 
 [[bin]]
-name = "cell_read_write"
-path = "fuzz_targets/cell_read_write.rs"
+name = "read_write"
+path = "fuzz_targets/read_write.rs"
 test = false
 doc = false
 bench = false
