@@ -1,5 +1,9 @@
 //! Defines [`Cell`].
 
+use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::mem::ManuallyDrop;
+
+use crate::error::{CellIsFixed, CellIsVariable};
 use crate::fixed::FixedCell;
 use crate::variable::VariableCell;
 
@@ -207,5 +211,206 @@ impl Cell {
     #[inline]
     pub fn as_variable_mut(&mut self) -> Option<&mut VariableCell> {
         self.data.as_variable_mut()
+    }
+}
+
+/// Trait for casting from [`Cell`].
+///
+/// # Implementer's Note
+///
+/// **[`Self::try_from_cell`] should not mutate nor drop the cell.**
+/// If the cell does not match, it should return the cell back.
+/// This allows user to match for multiple types.
+///
+/// It should return `Ok(None)` if and only if the [`command`](`CellHeader::command`) ID does not match.
+/// If the command ID matches but the cell format is incorrect, it should return an error instead.
+pub trait TryFromCell: Sized {
+    type Error;
+
+    fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, Self::Error>;
+}
+
+/// Automatically returns [`Cell`] when dropped.
+///
+/// Useful to help implement [`TryFromCell`].
+pub struct AutoReturnFixed<'a> {
+    p: &'a mut Option<Cell>,
+    h: CellHeader,
+    c: ManuallyDrop<FixedCell>,
+}
+
+impl Drop for AutoReturnFixed<'_> {
+    fn drop(&mut self) {
+        // SAFETY: Cell is not dropped and there is no way of accessing it post-drop.
+        unsafe {
+            *self.p = Some(Cell::from_fixed(
+                self.h.clone(),
+                ManuallyDrop::take(&mut self.c),
+            ))
+        }
+    }
+}
+
+impl Debug for AutoReturnFixed<'_> {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        f.debug_struct("AutoReturnFixed")
+            .field("header", &self.h)
+            .field("data", &*self.c)
+            .finish()
+    }
+}
+
+impl<'a> AutoReturnFixed<'a> {
+    /// Create new [`AutoReturnFixed`].
+    ///
+    /// If `ptr` is [`None`], it will return `Ok(None)`.
+    #[inline]
+    pub fn new(ptr: &'a mut Option<Cell>) -> Result<Option<Self>, CellIsVariable> {
+        match ptr.take() {
+            Some(Cell {
+                header: h,
+                data: CellTy::Fixed(c),
+            }) => Ok(Some(Self {
+                p: ptr,
+                h,
+                c: ManuallyDrop::new(c),
+            })),
+            c @ Some(_) => {
+                *ptr = c;
+                Err(CellIsVariable)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Gets reference to header.
+    #[inline]
+    pub fn header(&self) -> &CellHeader {
+        &self.h
+    }
+
+    /// Gets reference to [`FixedCell`].
+    #[inline]
+    pub fn data(&self) -> &FixedCell {
+        &self.c
+    }
+
+    /// Unwraps into inner.
+    #[inline]
+    pub fn into_inner(self) -> (CellHeader, FixedCell) {
+        let h = self.h;
+        let mut this = ManuallyDrop::new(self);
+        // SAFETY: Cell is not dropped and self will not be dropped.
+        (h, unsafe { ManuallyDrop::take(&mut this.c) })
+    }
+}
+
+/// Automatically returns [`Cell`] when dropped.
+///
+/// Useful to help implement [`TryFromCell`].
+pub struct AutoReturnVariable<'a> {
+    p: &'a mut Option<Cell>,
+    h: CellHeader,
+    c: ManuallyDrop<VariableCell>,
+}
+
+impl Drop for AutoReturnVariable<'_> {
+    fn drop(&mut self) {
+        // SAFETY: Cell is not dropped and there is no way of accessing it post-drop.
+        unsafe {
+            *self.p = Some(Cell::from_variable(
+                self.h.clone(),
+                ManuallyDrop::take(&mut self.c),
+            ))
+        }
+    }
+}
+
+impl Debug for AutoReturnVariable<'_> {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        f.debug_struct("AutoReturnVariable")
+            .field("header", &self.h)
+            .field("data", &*self.c)
+            .finish()
+    }
+}
+
+impl<'a> AutoReturnVariable<'a> {
+    /// Create new [`AutoReturnVariable`].
+    ///
+    /// If `ptr` is [`None`], it will return `Ok(None)`.
+    #[inline]
+    pub fn new(ptr: &'a mut Option<Cell>) -> Result<Option<Self>, CellIsFixed> {
+        match ptr.take() {
+            Some(Cell {
+                header: h,
+                data: CellTy::Variable(c),
+            }) => Ok(Some(Self {
+                p: ptr,
+                h,
+                c: ManuallyDrop::new(c),
+            })),
+            c @ Some(_) => {
+                *ptr = c;
+                Err(CellIsFixed)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Gets reference to header.
+    #[inline]
+    pub fn header(&self) -> &CellHeader {
+        &self.h
+    }
+
+    /// Gets reference to [`VariableCell`].
+    #[inline]
+    pub fn data(&self) -> &VariableCell {
+        &self.c
+    }
+
+    /// Unwraps into inner.
+    #[inline]
+    pub fn into_inner(self) -> (CellHeader, VariableCell) {
+        let h = self.h;
+        let mut this = ManuallyDrop::new(self);
+        // SAFETY: Cell is not dropped and self will not be dropped.
+        (h, unsafe { ManuallyDrop::take(&mut this.c) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::assert_matches;
+    use std::hint::black_box;
+
+    #[test]
+    fn test_auto_return_drop() {
+        let mut cell = black_box(Some(Cell::empty_fixed()));
+        let ar = black_box(AutoReturnFixed::new(&mut cell)).unwrap();
+        drop(ar);
+        assert_matches!(cell, Some(_));
+    }
+
+    #[test]
+    fn test_auto_return_none() {
+        let mut cell = black_box(None::<Cell>);
+        let ar = black_box(AutoReturnFixed::new(&mut cell));
+        assert_matches!(ar, None);
+        drop(ar);
+        assert_matches!(cell, None);
+    }
+
+    #[test]
+    fn test_auto_return_take() {
+        let mut cell = black_box(Some(Cell::default()));
+        let ar = black_box(AutoReturnFixed::new(&mut cell)).unwrap();
+        drop(ar.into_inner());
+        assert_matches!(cell, None);
     }
 }

@@ -26,6 +26,30 @@ pub(crate) struct UnknownIoError;
 #[non_exhaustive]
 pub struct CellFormatError;
 
+/// Circuit ID is not zero.
+#[derive(Error, Debug)]
+#[error("circuit ID is not zero")]
+#[non_exhaustive]
+pub struct NonZeroCircID;
+
+/// Circuit ID is zero.
+#[derive(Error, Debug)]
+#[error("circuit ID is zero")]
+#[non_exhaustive]
+pub struct ZeroCircID;
+
+/// Cell is fixed-sized.
+#[derive(Error, Debug)]
+#[error("cell is fixed-sized")]
+#[non_exhaustive]
+pub struct CellIsFixed;
+
+/// Cell is variable-sized.
+#[derive(Error, Debug)]
+#[error("cell is variable-sized")]
+#[non_exhaustive]
+pub struct CellIsVariable;
+
 /// Cell reading is finished.
 ///
 /// Will be the error source of [`CellReadError::Io`] if cell reading is finished.
@@ -52,4 +76,16 @@ pub enum CellWriteError {
     /// IO error.
     Io(#[from] IoError),
     CellFormatError(#[from] CellFormatError),
+}
+
+/// Cell cast error.
+#[derive(Error, Debug)]
+#[error(transparent)]
+#[non_exhaustive]
+pub enum CellCastError {
+    CellFormatError(#[from] CellFormatError),
+    NonZeroCircID(#[from] NonZeroCircID),
+    ZeroCircID(#[from] ZeroCircID),
+    CellIsFixed(#[from] CellIsFixed),
+    CellIsVariable(#[from] CellIsVariable),
 }
