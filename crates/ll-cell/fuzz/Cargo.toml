@@ -12,6 +12,11 @@ arbitrary.workspace = true
 futures-util.workspace = true
 libfuzzer-sys.workspace = true
 pin-project.workspace = true
+zerocopy.workspace = true
+
+[dependencies.base64ct]
+workspace = true
+features = ["alloc"]
 
 [dependencies.tracing]
 workspace = true
@@ -24,8 +29,43 @@ path = ".."
 path = "../../tart"
 
 [[bin]]
+name = "create2_cell"
+path = "fuzz_targets/create2_cell.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "create2_new"
+path = "fuzz_targets/create2_new.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "padding"
+path = "fuzz_targets/padding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "print_cell"
+path = "fuzz_targets/print_cell.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "read_write"
 path = "fuzz_targets/read_write.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vpadding"
+path = "fuzz_targets/vpadding.rs"
 test = false
 doc = false
 bench = false

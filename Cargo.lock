@@ -340,12 +340,14 @@ name = "onioncloud-ll-cell-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
+ "base64ct",
  "futures-util",
  "libfuzzer-sys",
  "onioncloud-ll-cell",
  "onioncloud-tart",
  "pin-project",
  "tracing",
+ "zerocopy",
 ]
 
 [[package]]
