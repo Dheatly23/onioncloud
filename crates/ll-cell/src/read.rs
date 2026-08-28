@@ -152,15 +152,14 @@ impl<C: ReadConfig> Reader<C> {
             let buf = &mut buf[self.off..];
             if !buf.is_empty() {
                 let n = match read.read(buf) {
+                    Ok(0) if self.off == 0 => {
+                        // Not reading anything yet.
+                        self.state = State::Finished;
+                        return Err(IoError::new(ErrorKind::UnexpectedEof, CellFinished).into());
+                    }
                     Ok(0) => {
-                        if self.off == 0 {
-                            // Not reading anything yet.
-                            self.state = State::Finished;
-                            return Err(IoError::new(ErrorKind::UnexpectedEof, CellFinished).into());
-                        } else {
-                            self.state = State::IoErr;
-                            return Err(IoError::from(ErrorKind::UnexpectedEof).into());
-                        }
+                        self.state = State::IoErr;
+                        return Err(IoError::from(ErrorKind::UnexpectedEof).into());
                     }
                     Ok(n) => n,
                     Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(None),

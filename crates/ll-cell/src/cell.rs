@@ -31,22 +31,25 @@ impl From<VariableCell> for CellTy {
 impl CellTy {
     /// Returns [`true`] if cell is fixed-sized.
     #[inline]
+    #[must_use]
     pub const fn is_fixed(&self) -> bool {
         matches!(self, Self::Fixed(_))
     }
 
     /// Returns [`true`] if cell is variable-sized.
     #[inline]
+    #[must_use]
     pub const fn is_variable(&self) -> bool {
         matches!(self, Self::Variable(_))
     }
 
     /// Try to get [`FixedCell`] reference.
     #[inline]
+    #[must_use]
     pub const fn as_fixed(&self) -> Option<&FixedCell> {
         match self {
             Self::Fixed(v) => Some(v),
-            _ => None,
+            Self::Variable(_) => None,
         }
     }
 
@@ -55,16 +58,17 @@ impl CellTy {
     pub const fn as_fixed_mut(&mut self) -> Option<&mut FixedCell> {
         match self {
             Self::Fixed(v) => Some(v),
-            _ => None,
+            Self::Variable(_) => None,
         }
     }
 
     /// Try to get [`VariableCell`] reference.
     #[inline]
+    #[must_use]
     pub const fn as_variable(&self) -> Option<&VariableCell> {
         match self {
             Self::Variable(v) => Some(v),
-            _ => None,
+            Self::Fixed(_) => None,
         }
     }
 
@@ -73,12 +77,13 @@ impl CellTy {
     pub const fn as_variable_mut(&mut self) -> Option<&mut VariableCell> {
         match self {
             Self::Variable(v) => Some(v),
-            _ => None,
+            Self::Fixed(_) => None,
         }
     }
 
     /// Gets reference into cell data.
     #[inline]
+    #[must_use]
     pub fn data(&self) -> &[u8] {
         match self {
             Self::Fixed(v) => v.as_ref(),
@@ -143,12 +148,14 @@ impl Cell {
     }
 
     /// Creates empty fixed-sized cell.
+    #[must_use]
     pub fn empty_fixed() -> Self {
         Self::from_fixed(CellHeader::default(), FixedCell::default())
     }
 
     /// Creates fixed-sized cell.
     #[inline]
+    #[must_use]
     pub const fn from_fixed(header: CellHeader, data: FixedCell) -> Self {
         Self {
             header,
@@ -158,6 +165,7 @@ impl Cell {
 
     /// Creates variable-sized cell.
     #[inline]
+    #[must_use]
     pub const fn from_variable(header: CellHeader, data: VariableCell) -> Self {
         Self {
             header,
@@ -167,6 +175,7 @@ impl Cell {
 
     /// Gets reference into cell data.
     #[inline]
+    #[must_use]
     pub fn data(&self) -> &[u8] {
         self.data.data()
     }
@@ -179,18 +188,21 @@ impl Cell {
 
     /// Returns [`true`] if cell is fixed-sized.
     #[inline]
+    #[must_use]
     pub fn is_fixed(&self) -> bool {
         self.data.is_fixed()
     }
 
     /// Returns [`true`] if cell is variable-sized.
     #[inline]
+    #[must_use]
     pub fn is_variable(&self) -> bool {
         self.data.is_variable()
     }
 
     /// Try to get [`FixedCell`] reference.
     #[inline]
+    #[must_use]
     pub fn as_fixed(&self) -> Option<&FixedCell> {
         self.data.as_fixed()
     }
@@ -203,6 +215,7 @@ impl Cell {
 
     /// Try to get [`VariableCell`] reference.
     #[inline]
+    #[must_use]
     pub fn as_variable(&self) -> Option<&VariableCell> {
         self.data.as_variable()
     }
@@ -222,8 +235,10 @@ impl Cell {
 /// If the cell does not match, it should return the cell back.
 /// This allows user to match for multiple types.
 ///
-/// It should return `Ok(None)` if and only if the [`command`](`CellHeader::command`) ID does not match.
-/// If the command ID matches but the cell format is incorrect, it should return an error instead.
+/// # Errors
+///
+/// It **should not** return error if the [`command`](`CellHeader::command`) ID does not match.
+/// If the command ID does not match, return `Ok(None)` instead.
 pub trait TryFromCell: Sized {
     type Error;
 
@@ -242,12 +257,7 @@ pub struct AutoReturnFixed<'a> {
 impl Drop for AutoReturnFixed<'_> {
     fn drop(&mut self) {
         // SAFETY: Cell is not dropped and there is no way of accessing it post-drop.
-        unsafe {
-            *self.p = Some(Cell::from_fixed(
-                self.h.clone(),
-                ManuallyDrop::take(&mut self.c),
-            ))
-        }
+        unsafe { *self.p = Some(Cell::from_fixed(self.h, ManuallyDrop::take(&mut self.c))) }
     }
 }
 
@@ -265,6 +275,10 @@ impl<'a> AutoReturnFixed<'a> {
     /// Create new [`AutoReturnFixed`].
     ///
     /// If `ptr` is [`None`], it will return `Ok(None)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if cell is variable-length.
     #[inline]
     pub fn new(ptr: &'a mut Option<Cell>) -> Result<Option<Self>, CellIsVariable> {
         match ptr.take() {
@@ -276,7 +290,10 @@ impl<'a> AutoReturnFixed<'a> {
                 h,
                 c: ManuallyDrop::new(c),
             })),
-            c @ Some(_) => {
+            c @ Some(Cell {
+                data: CellTy::Variable(_),
+                ..
+            }) => {
                 *ptr = c;
                 Err(CellIsVariable)
             }
@@ -286,18 +303,21 @@ impl<'a> AutoReturnFixed<'a> {
 
     /// Gets reference to header.
     #[inline]
+    #[must_use]
     pub fn header(&self) -> &CellHeader {
         &self.h
     }
 
     /// Gets reference to [`FixedCell`].
     #[inline]
+    #[must_use]
     pub fn data(&self) -> &FixedCell {
         &self.c
     }
 
     /// Unwraps into inner.
     #[inline]
+    #[must_use]
     pub fn into_inner(self) -> (CellHeader, FixedCell) {
         let h = self.h;
         let mut this = ManuallyDrop::new(self);
@@ -318,12 +338,7 @@ pub struct AutoReturnVariable<'a> {
 impl Drop for AutoReturnVariable<'_> {
     fn drop(&mut self) {
         // SAFETY: Cell is not dropped and there is no way of accessing it post-drop.
-        unsafe {
-            *self.p = Some(Cell::from_variable(
-                self.h.clone(),
-                ManuallyDrop::take(&mut self.c),
-            ))
-        }
+        unsafe { *self.p = Some(Cell::from_variable(self.h, ManuallyDrop::take(&mut self.c))) }
     }
 }
 
@@ -341,6 +356,10 @@ impl<'a> AutoReturnVariable<'a> {
     /// Create new [`AutoReturnVariable`].
     ///
     /// If `ptr` is [`None`], it will return `Ok(None)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if cell is fixed-length.
     #[inline]
     pub fn new(ptr: &'a mut Option<Cell>) -> Result<Option<Self>, CellIsFixed> {
         match ptr.take() {
@@ -352,7 +371,10 @@ impl<'a> AutoReturnVariable<'a> {
                 h,
                 c: ManuallyDrop::new(c),
             })),
-            c @ Some(_) => {
+            c @ Some(Cell {
+                data: CellTy::Fixed(_),
+                ..
+            }) => {
                 *ptr = c;
                 Err(CellIsFixed)
             }
@@ -362,18 +384,21 @@ impl<'a> AutoReturnVariable<'a> {
 
     /// Gets reference to header.
     #[inline]
+    #[must_use]
     pub fn header(&self) -> &CellHeader {
         &self.h
     }
 
     /// Gets reference to [`VariableCell`].
     #[inline]
+    #[must_use]
     pub fn data(&self) -> &VariableCell {
         &self.c
     }
 
     /// Unwraps into inner.
     #[inline]
+    #[must_use]
     pub fn into_inner(self) -> (CellHeader, VariableCell) {
         let h = self.h;
         let mut this = ManuallyDrop::new(self);

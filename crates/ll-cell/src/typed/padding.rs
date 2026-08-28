@@ -5,7 +5,7 @@ use crate::error::{CellCastError, NonZeroCircID};
 use crate::fixed::{FIXED_CELL_SIZE, FixedCell};
 use crate::variable::VariableCell;
 
-/// PADDING cell.
+/// `PADDING` cell.
 #[derive(Debug)]
 pub struct Padding {
     cell: FixedCell,
@@ -26,7 +26,7 @@ impl TryFromCell for Padding {
                 Err(NonZeroCircID.into())
             }
         } else {
-            return Ok(None);
+            Ok(None)
         }
     }
 }
@@ -86,19 +86,21 @@ impl AsMut<[u8]> for Padding {
 }
 
 impl Padding {
-    /// Cell ID of PADDING.
+    /// Cell ID of `PADDING`.
     pub const ID: u8 = 0;
 
     /// Creates new [`Padding`] cell.
     ///
     /// The content of `cell` does not matter, but user should fill it with padding bytes.
     #[inline]
+    #[must_use]
     pub const fn new(cell: FixedCell) -> Self {
         Self { cell }
     }
 
     /// Gets reference to inner.
     #[inline]
+    #[must_use]
     pub fn inner(&self) -> &FixedCell {
         &self.cell
     }
@@ -111,12 +113,13 @@ impl Padding {
 
     /// Unwraps into inner.
     #[inline]
+    #[must_use]
     pub fn into_inner(self) -> FixedCell {
         self.cell
     }
 }
 
-/// VPADDING cell.
+/// `VPADDING` cell.
 #[derive(Debug)]
 pub struct VPadding {
     cell: VariableCell,
@@ -137,7 +140,7 @@ impl TryFromCell for VPadding {
                 Err(NonZeroCircID.into())
             }
         } else {
-            return Ok(None);
+            Ok(None)
         }
     }
 }
@@ -183,19 +186,21 @@ impl AsMut<[u8]> for VPadding {
 }
 
 impl VPadding {
-    /// Cell ID of VPADDING.
+    /// Cell ID of `VPADDING`.
     pub const ID: u8 = 128;
 
     /// Creates new [`VPadding`] cell.
     ///
     /// The content of `cell` does not matter, but user should fill it with padding bytes.
     #[inline]
+    #[must_use]
     pub const fn new(cell: VariableCell) -> Self {
         Self { cell }
     }
 
     /// Gets reference to inner.
     #[inline]
+    #[must_use]
     pub fn inner(&self) -> &VariableCell {
         &self.cell
     }
@@ -208,6 +213,7 @@ impl VPadding {
 
     /// Unwraps into inner.
     #[inline]
+    #[must_use]
     pub fn into_inner(self) -> VariableCell {
         self.cell
     }

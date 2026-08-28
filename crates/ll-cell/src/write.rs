@@ -162,15 +162,14 @@ impl<C: WriteConfig> Writer<C> {
             let buf = &buf[self.off..];
             if !buf.is_empty() {
                 let n = match write.write(buf) {
+                    Ok(0) if self.off == 0 => {
+                        // Not reading anything yet.
+                        self.state = State::Finished;
+                        return Err(IoError::new(ErrorKind::UnexpectedEof, CellFinished).into());
+                    }
                     Ok(0) => {
-                        if self.off == 0 {
-                            // Not reading anything yet.
-                            self.state = State::Finished;
-                            return Err(IoError::new(ErrorKind::UnexpectedEof, CellFinished).into());
-                        } else {
-                            self.state = State::IoErr;
-                            return Err(IoError::from(ErrorKind::UnexpectedEof).into());
-                        }
+                        self.state = State::IoErr;
+                        return Err(IoError::from(ErrorKind::UnexpectedEof).into());
                     }
                     Ok(n) => n,
                     Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(false),
@@ -262,14 +261,14 @@ impl<C: WriteConfig> Writer<C> {
         let header = if self.config.is_circ_id_4bytes() {
             Header::Large(HeaderLarge {
                 circuit: circuit.into(),
-                command: command,
+                command,
             })
         } else {
             Header::Small(HeaderSmall {
                 circuit: u16::try_from(circuit)
                     .expect("circuit ID must fit in u16")
                     .into(),
-                command: command,
+                command,
             })
         };
         self.state = match data {

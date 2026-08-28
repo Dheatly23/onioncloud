@@ -114,18 +114,21 @@ impl VariableCell {
     ///
     /// Panics if `inner` is longer than 65535.
     #[inline]
+    #[must_use]
     pub const fn new(inner: Box<[u8]>) -> Self {
         assert!(inner.len() < 65536);
         Self { inner }
     }
 
     /// Create an empty cell.
+    #[must_use]
     pub fn empty() -> Self {
         Self::new(Box::new([]))
     }
 
     /// Gets reference into cell data.
     #[inline]
+    #[must_use]
     pub fn data(&self) -> &[u8] {
         &self.inner
     }
@@ -138,18 +141,21 @@ impl VariableCell {
 
     /// Unwraps inner data.
     #[inline]
+    #[must_use]
     pub fn into_inner(self) -> Box<[u8]> {
         self.inner
     }
 
     /// Returns [`true`] if cell is empty.
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 
     /// Returns cell data length.
     #[inline]
+    #[must_use]
     pub fn len(&self) -> usize {
         self.inner.len()
     }

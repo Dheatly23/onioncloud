@@ -87,6 +87,7 @@ impl FixedCell {
     /// Argument:
     /// - `inner` : Cell data.
     #[inline]
+    #[must_use]
     pub const fn new(inner: Box<[u8; FIXED_CELL_SIZE]>) -> Self {
         Self { inner }
     }
@@ -95,7 +96,7 @@ impl FixedCell {
     ///
     /// If slice is smaller than [`FIXED_CELL_SIZE`], the rest of the bytes are set to 0.
     ///
-    /// # Panic
+    /// # Panics
     ///
     /// Panics if `data` is longer than [`FIXED_CELL_SIZE`].
     ///
@@ -112,6 +113,7 @@ impl FixedCell {
     /// // Data is too long
     /// let cell = FixedCell::from_slice(&[100; FIXED_CELL_SIZE + 1]);
     /// ```
+    #[must_use]
     pub fn from_slice(data: &[u8]) -> Self {
         assert!(
             data.len() <= FIXED_CELL_SIZE,
@@ -125,6 +127,7 @@ impl FixedCell {
 
     /// Get reference into cell data.
     #[inline]
+    #[must_use]
     pub fn data(&self) -> &[u8; FIXED_CELL_SIZE] {
         &self.inner
     }
@@ -137,6 +140,7 @@ impl FixedCell {
 
     /// Unwraps inner data.
     #[inline]
+    #[must_use]
     pub fn into_inner(self) -> Box<[u8; FIXED_CELL_SIZE]> {
         self.inner
     }

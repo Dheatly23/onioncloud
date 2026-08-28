@@ -14,7 +14,7 @@ use crate::error::{CellCastError, CellFormatError, ZeroCircID};
 use crate::fixed::{FIXED_CELL_SIZE, FixedCell};
 use crate::utils::encoded_len;
 
-/// CREATE2 cell data.
+/// `CREATE2` cell data.
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned)]
 #[repr(C)]
 struct Create2Data {
@@ -23,7 +23,7 @@ struct Create2Data {
     data: [u8; const { FIXED_CELL_SIZE - 4 }],
 }
 
-/// CREATE2 cell.
+/// `CREATE2` cell.
 pub struct Create2 {
     /// Circuit ID.
     pub circuit: NonZeroU32,
@@ -94,12 +94,13 @@ impl AsRef<FixedCell> for Create2 {
 }
 
 impl Create2 {
-    /// Cell ID of CREATE2.
+    /// Cell ID of `CREATE2`.
     pub const ID: u8 = 10;
 
     /// Creates new [`Create2`].
     ///
     /// Returns [`None`] if payload does not fit the cell.
+    #[must_use]
     pub fn new(circuit: NonZeroU32, mut cell: FixedCell, ty: u16, data: &[u8]) -> Option<Self> {
         if data.len() > FIXED_CELL_SIZE - 4 {
             return None;
@@ -117,6 +118,7 @@ impl Create2 {
 
     /// Gets reference to inner.
     #[inline]
+    #[must_use]
     pub fn inner(&self) -> &FixedCell {
         &self.cell
     }
@@ -133,6 +135,7 @@ impl Create2 {
 
     /// Gets handshake type.
     #[inline]
+    #[must_use]
     pub fn handshake_ty(&self) -> u16 {
         self.get_ref().ty.get()
     }
@@ -145,6 +148,7 @@ impl Create2 {
 
     /// Gets reference to payload.
     #[inline]
+    #[must_use]
     pub fn payload(&self) -> &[u8] {
         let cell = self.get_ref();
         // SAFETY: Length field is validated.
@@ -163,18 +167,20 @@ impl Create2 {
     ///
     /// Guaranteed to be <= [`FIXED_CELL_SIZE`] - 4 and equals to returned [`Self::payload`] slice length.
     #[inline]
+    #[must_use]
     pub fn payload_len(&self) -> usize {
         self.get_ref().len.get().into()
     }
 
     /// Unwraps into inner.
     #[inline]
+    #[must_use]
     pub fn into_inner(self) -> FixedCell {
         self.cell
     }
 }
 
-/// CREATED2 cell data.
+/// `CREATED2` cell data.
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned)]
 #[repr(C)]
 struct Created2Data {
@@ -182,7 +188,7 @@ struct Created2Data {
     data: [u8; const { FIXED_CELL_SIZE - 2 }],
 }
 
-/// CREATED2 cell.
+/// `CREATED2` cell.
 pub struct Created2 {
     /// Circuit ID.
     pub circuit: NonZeroU32,
@@ -252,12 +258,13 @@ impl AsRef<FixedCell> for Created2 {
 }
 
 impl Created2 {
-    /// Cell ID of CREATED2.
+    /// Cell ID of `CREATED2`.
     pub const ID: u8 = 11;
 
     /// Creates new [`Created2`].
     ///
     /// Returns [`None`] if payload does not fit the cell.
+    #[must_use]
     pub fn new(circuit: NonZeroU32, mut cell: FixedCell, data: &[u8]) -> Option<Self> {
         if data.len() > FIXED_CELL_SIZE - 2 {
             return None;
@@ -274,6 +281,7 @@ impl Created2 {
 
     /// Gets reference to inner.
     #[inline]
+    #[must_use]
     pub fn inner(&self) -> &FixedCell {
         &self.cell
     }
@@ -290,6 +298,7 @@ impl Created2 {
 
     /// Gets reference to payload.
     #[inline]
+    #[must_use]
     pub fn payload(&self) -> &[u8] {
         let cell = self.get_ref();
         // SAFETY: Length field is validated.
@@ -308,18 +317,20 @@ impl Created2 {
     ///
     /// Guaranteed to be <= [`FIXED_CELL_SIZE`] - 2 and equals to returned [`Self::payload`] slice length.
     #[inline]
+    #[must_use]
     pub fn payload_len(&self) -> usize {
         self.get_ref().len.get().into()
     }
 
     /// Unwraps into inner.
     #[inline]
+    #[must_use]
     pub fn into_inner(self) -> FixedCell {
         self.cell
     }
 }
 
-/// CREATE_FAST cell data.
+/// `CREATE_FAST` cell data.
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned)]
 #[repr(C)]
 struct CreateFastData {
@@ -327,7 +338,7 @@ struct CreateFastData {
     padding: [u8; const { FIXED_CELL_SIZE - 20 }],
 }
 
-/// CREATE_FAST cell.
+/// `CREATE_FAST` cell.
 pub struct CreateFast {
     /// Circuit ID.
     pub circuit: NonZeroU32,
@@ -391,10 +402,11 @@ impl AsRef<FixedCell> for CreateFast {
 }
 
 impl CreateFast {
-    /// Cell ID of CREATE_FAST.
+    /// Cell ID of `CREATE_FAST`.
     pub const ID: u8 = 5;
 
     /// Creates new [`CreateFast`].
+    #[must_use]
     pub fn new(circuit: NonZeroU32, mut cell: FixedCell, x: [u8; 20]) -> Self {
         let p: &mut CreateFastData = transmute_mut!(cell.data_mut());
         p.x = x;
@@ -405,6 +417,7 @@ impl CreateFast {
 
     /// Gets reference to inner.
     #[inline]
+    #[must_use]
     pub fn inner(&self) -> &FixedCell {
         &self.cell
     }
@@ -421,6 +434,7 @@ impl CreateFast {
 
     /// Gets reference to key data.
     #[inline]
+    #[must_use]
     pub fn x(&self) -> &[u8; 20] {
         &self.get_ref().x
     }
@@ -433,12 +447,13 @@ impl CreateFast {
 
     /// Unwraps into inner.
     #[inline]
+    #[must_use]
     pub fn into_inner(self) -> FixedCell {
         self.cell
     }
 }
 
-/// CREATED_FAST cell data.
+/// `CREATED_FAST` cell data.
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned)]
 #[repr(C)]
 struct CreatedFastData {
@@ -447,7 +462,7 @@ struct CreatedFastData {
     padding: [u8; const { FIXED_CELL_SIZE - 20 * 2 }],
 }
 
-/// CREATED_FAST cell.
+/// `CREATED_FAST` cell.
 pub struct CreatedFast {
     /// Circuit ID.
     pub circuit: NonZeroU32,
@@ -521,10 +536,11 @@ impl AsRef<FixedCell> for CreatedFast {
 }
 
 impl CreatedFast {
-    /// Cell ID of CREATED_FAST.
+    /// Cell ID of `CREATED_FAST`.
     pub const ID: u8 = 6;
 
     /// Creates new [`CreatedFast`].
+    #[must_use]
     pub fn new(circuit: NonZeroU32, mut cell: FixedCell, y: [u8; 20], derived: [u8; 20]) -> Self {
         let p: &mut CreatedFastData = transmute_mut!(cell.data_mut());
         p.y = y;
@@ -536,6 +552,7 @@ impl CreatedFast {
 
     /// Gets reference to inner.
     #[inline]
+    #[must_use]
     pub fn inner(&self) -> &FixedCell {
         &self.cell
     }
@@ -552,6 +569,7 @@ impl CreatedFast {
 
     /// Gets reference to payload.
     #[inline]
+    #[must_use]
     pub fn y(&self) -> &[u8; 20] {
         &self.get_ref().y
     }
@@ -564,6 +582,7 @@ impl CreatedFast {
 
     /// Gets reference to derived key data.
     #[inline]
+    #[must_use]
     pub fn derived(&self) -> &[u8; 20] {
         &self.get_ref().derived
     }
@@ -576,6 +595,7 @@ impl CreatedFast {
 
     /// Unwraps into inner.
     #[inline]
+    #[must_use]
     pub fn into_inner(self) -> FixedCell {
         self.cell
     }
