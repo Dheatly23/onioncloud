@@ -43,6 +43,13 @@ impl From<Padding> for Cell {
     }
 }
 
+impl From<Padding> for FixedCell {
+    #[inline]
+    fn from(v: Padding) -> FixedCell {
+        v.into_inner()
+    }
+}
+
 impl AsRef<FixedCell> for Padding {
     #[inline]
     fn as_ref(&self) -> &FixedCell {
@@ -154,6 +161,13 @@ impl From<VPadding> for Cell {
             },
             cell.into_inner(),
         )
+    }
+}
+
+impl From<VPadding> for VariableCell {
+    #[inline]
+    fn from(v: VPadding) -> VariableCell {
+        v.into_inner()
     }
 }
 

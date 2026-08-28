@@ -86,6 +86,13 @@ impl From<Create2> for Cell {
     }
 }
 
+impl From<Create2> for FixedCell {
+    #[inline]
+    fn from(v: Create2) -> FixedCell {
+        v.into_inner()
+    }
+}
+
 impl AsRef<FixedCell> for Create2 {
     #[inline]
     fn as_ref(&self) -> &FixedCell {
@@ -250,6 +257,13 @@ impl From<Created2> for Cell {
     }
 }
 
+impl From<Created2> for FixedCell {
+    #[inline]
+    fn from(v: Created2) -> FixedCell {
+        v.into_inner()
+    }
+}
+
 impl AsRef<FixedCell> for Created2 {
     #[inline]
     fn as_ref(&self) -> &FixedCell {
@@ -394,6 +408,13 @@ impl From<CreateFast> for Cell {
     }
 }
 
+impl From<CreateFast> for FixedCell {
+    #[inline]
+    fn from(v: CreateFast) -> FixedCell {
+        v.into_inner()
+    }
+}
+
 impl AsRef<FixedCell> for CreateFast {
     #[inline]
     fn as_ref(&self) -> &FixedCell {
@@ -525,6 +546,13 @@ impl From<CreatedFast> for Cell {
             },
             cell.into_inner(),
         )
+    }
+}
+
+impl From<CreatedFast> for FixedCell {
+    #[inline]
+    fn from(v: CreatedFast) -> FixedCell {
+        v.into_inner()
     }
 }
 
