@@ -7,6 +7,7 @@ use base64ct::{Base64Unpadded, Encoding};
 
 use crate::error::VariableCellTooLong;
 use crate::fixed::{FIXED_CELL_SIZE, FixedCell};
+use crate::utils::encoded_len;
 
 /// A variable-sized cell.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -28,7 +29,7 @@ impl Display for VariableCell {
 
         for v in self.data().chunks(CHUNK_LEN) {
             let len = v.len();
-            let len = ((len * 4) / 3) + ((len * 4) % 3 != 0) as usize;
+            let len = encoded_len(len);
             let out = Base64Unpadded::encode(v, &mut a[..len]).expect("conversion must never fail");
             f.write_str(out)?;
         }

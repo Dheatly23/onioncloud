@@ -4,6 +4,8 @@ use std::fmt::{Debug, Display, Formatter, Result as FmtResult, from_fn};
 
 use base64ct::{Base64Unpadded, Encoding};
 
+use crate::utils::encoded_len;
+
 /// Size of [`FixedCell`] content.
 pub const FIXED_CELL_SIZE: usize = 509;
 
@@ -22,7 +24,7 @@ impl Default for FixedCell {
 impl Display for FixedCell {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         // Encode as base64
-        const LEN: usize = ((FIXED_CELL_SIZE * 4) / 3) + ((FIXED_CELL_SIZE * 4) % 3 != 0) as usize;
+        const LEN: usize = encoded_len(FIXED_CELL_SIZE);
         let mut a = [0u8; LEN];
         let out = Base64Unpadded::encode(self.data(), &mut a).expect("conversion must never fail");
         f.write_str(out)

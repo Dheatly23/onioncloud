@@ -1,7 +1,9 @@
 //! Create cell types.
 
+use std::fmt::{Debug, Formatter, Result as FmtResult, from_fn};
 use std::num::NonZeroU32;
 
+use base64ct::{Base64Unpadded, Encoding};
 use zerocopy::byteorder::big_endian::U16;
 use zerocopy::{
     FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned, transmute_mut, transmute_ref,
@@ -10,6 +12,7 @@ use zerocopy::{
 use crate::cell::{AutoReturnFixed, Cell, CellHeader, TryFromCell};
 use crate::error::{CellCastError, CellFormatError, ZeroCircID};
 use crate::fixed::{FIXED_CELL_SIZE, FixedCell};
+use crate::utils::encoded_len;
 
 /// CREATE2 cell data.
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned)]
@@ -21,11 +24,30 @@ struct Create2Data {
 }
 
 /// CREATE2 cell.
-#[derive(Debug)]
 pub struct Create2 {
     /// Circuit ID.
     pub circuit: NonZeroU32,
     cell: FixedCell,
+}
+
+impl Debug for Create2 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("Create2")
+            .field("circuit", &self.circuit)
+            .field("handshake_ty", &self.handshake_ty())
+            .field(
+                "payload",
+                &from_fn(|f| {
+                    const LEN: usize = encoded_len(FIXED_CELL_SIZE - 4);
+                    let mut a = [0u8; LEN];
+                    let s = self.payload();
+                    let o = &mut a[..encoded_len(s.len())];
+                    let out = Base64Unpadded::encode(s, o).expect("conversion must never fail");
+                    f.write_str(out)
+                }),
+            )
+            .finish()
+    }
 }
 
 impl TryFromCell for Create2 {
@@ -161,11 +183,29 @@ struct Created2Data {
 }
 
 /// CREATED2 cell.
-#[derive(Debug)]
 pub struct Created2 {
     /// Circuit ID.
     pub circuit: NonZeroU32,
     cell: FixedCell,
+}
+
+impl Debug for Created2 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("Created2")
+            .field("circuit", &self.circuit)
+            .field(
+                "payload",
+                &from_fn(|f| {
+                    const LEN: usize = encoded_len(FIXED_CELL_SIZE - 2);
+                    let mut a = [0u8; LEN];
+                    let s = self.payload();
+                    let o = &mut a[..encoded_len(s.len())];
+                    let out = Base64Unpadded::encode(s, o).expect("conversion must never fail");
+                    f.write_str(out)
+                }),
+            )
+            .finish()
+    }
 }
 
 impl TryFromCell for Created2 {
@@ -288,11 +328,28 @@ struct CreateFastData {
 }
 
 /// CREATE_FAST cell.
-#[derive(Debug)]
 pub struct CreateFast {
     /// Circuit ID.
     pub circuit: NonZeroU32,
     cell: FixedCell,
+}
+
+impl Debug for CreateFast {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("CreateFast")
+            .field("circuit", &self.circuit)
+            .field(
+                "x",
+                &from_fn(|f| {
+                    const LEN: usize = encoded_len(20);
+                    let mut a = [0u8; LEN];
+                    let out = Base64Unpadded::encode(self.x(), &mut a)
+                        .expect("conversion must never fail");
+                    f.write_str(out)
+                }),
+            )
+            .finish()
+    }
 }
 
 impl TryFromCell for CreateFast {
@@ -391,11 +448,38 @@ struct CreatedFastData {
 }
 
 /// CREATED_FAST cell.
-#[derive(Debug)]
 pub struct CreatedFast {
     /// Circuit ID.
     pub circuit: NonZeroU32,
     cell: FixedCell,
+}
+
+impl Debug for CreatedFast {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("CreatedFast")
+            .field("circuit", &self.circuit)
+            .field(
+                "y",
+                &from_fn(|f| {
+                    const LEN: usize = encoded_len(20);
+                    let mut a = [0u8; LEN];
+                    let out = Base64Unpadded::encode(self.y(), &mut a)
+                        .expect("conversion must never fail");
+                    f.write_str(out)
+                }),
+            )
+            .field(
+                "derived",
+                &from_fn(|f| {
+                    const LEN: usize = encoded_len(20);
+                    let mut a = [0u8; LEN];
+                    let out = Base64Unpadded::encode(self.derived(), &mut a)
+                        .expect("conversion must never fail");
+                    f.write_str(out)
+                }),
+            )
+            .finish()
+    }
 }
 
 impl TryFromCell for CreatedFast {

@@ -39,3 +39,7 @@ pub(crate) struct PrefixedFixedCell {
     pub(crate) v: U16,
     pub(crate) rest: [u8; const { FIXED_CELL_SIZE - 2 }],
 }
+
+pub(crate) const fn encoded_len(l: usize) -> usize {
+    ((l * 4) / 3) + !(l * 4).is_multiple_of(3) as usize
+}
