@@ -11,10 +11,27 @@ use onioncloud_ll_cell::typed::VPadding;
 
 use crate::common::VariableCellData;
 
-fuzz_target!(|data: VariableCellData| {
-    let cell = Cell::from(data);
+macro_rules! dispatch {
+    (($data:ident, $cell:ident) {
+        $($v:ident => $f:ident),* $(,)?
+    }) => {
+        $(
+            if ($cell.header.command != $v::ID) {
+                let mut cell = Some($cell);
+                assert_matches!($v::try_from_cell(&mut cell), Ok(None));
+                $cell = cell.expect("cell must not be taken");
+            }
+        )*
 
-    if cell.header.circuit == 0 && cell.header.command == VPadding::ID {
+        match $cell.header.command {
+            $($v::ID => $f($data, $cell),)*
+            _ => (),
+        }
+    }
+}
+
+fn cast_vpadding(data: VariableCellData, cell: Cell) {
+    if cell.header.circuit == 0 {
         let mut cell = Some(cell);
 
         let t = VPadding::try_from_cell(&mut cell).unwrap().unwrap();
@@ -28,7 +45,7 @@ fuzz_target!(|data: VariableCellData| {
         assert_eq!(cell.header.command, VPadding::ID);
         assert!(cell.is_variable(), "cell is not variable");
         assert_eq!(&cell.data()[..s.len()], s);
-    } else if cell.header.command == VPadding::ID {
+    } else {
         let mut cell = Some(cell);
 
         assert_matches!(
@@ -36,10 +53,15 @@ fuzz_target!(|data: VariableCellData| {
             Err(CellCastError::NonZeroCircID(_))
         );
         assert_matches!(cell, Some(_));
-    } else {
-        let mut cell = Some(cell);
+    }
+}
 
-        assert_matches!(VPadding::try_from_cell(&mut cell), Ok(None));
-        assert_matches!(cell, Some(_));
+fuzz_target!(|data: VariableCellData| {
+    let mut cell = Cell::from(data);
+
+    dispatch! {
+        (data, cell) {
+            VPadding => cast_vpadding,
+        }
     }
 });

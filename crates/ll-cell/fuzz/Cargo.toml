@@ -29,13 +29,6 @@ path = ".."
 path = "../../tart"
 
 [[bin]]
-name = "create2_cell"
-path = "fuzz_targets/create2_cell.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "create2_new"
 path = "fuzz_targets/create2_new.rs"
 test = false
@@ -43,8 +36,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "padding"
-path = "fuzz_targets/padding.rs"
+name = "cast_fixed"
+path = "fuzz_targets/cast_fixed.rs"
 test = false
 doc = false
 bench = false
@@ -64,8 +57,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "vpadding"
-path = "fuzz_targets/vpadding.rs"
+name = "cast_variable"
+path = "fuzz_targets/cast_variable.rs"
 test = false
 doc = false
 bench = false
