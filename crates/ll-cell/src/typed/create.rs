@@ -46,7 +46,7 @@ impl TryFromCell for Create2 {
                 Err(CellFormatError.into())
             }
         } else {
-            return Ok(None);
+            Ok(None)
         }
     }
 }
@@ -139,10 +139,355 @@ impl Create2 {
 
     /// Gets payload length.
     ///
-    /// Guaranteed to be < 65536 and equals to returned [`Self::payload`] slice length.
+    /// Guaranteed to be <= [`FIXED_CELL_SIZE`] - 4 and equals to returned [`Self::payload`] slice length.
     #[inline]
     pub fn payload_len(&self) -> usize {
         self.get_ref().len.get().into()
+    }
+
+    /// Unwraps into inner.
+    #[inline]
+    pub fn into_inner(self) -> FixedCell {
+        self.cell
+    }
+}
+
+/// CREATED2 cell data.
+#[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned)]
+#[repr(C)]
+struct Created2Data {
+    len: U16,
+    data: [u8; const { FIXED_CELL_SIZE - 2 }],
+}
+
+/// CREATED2 cell.
+#[derive(Debug)]
+pub struct Created2 {
+    /// Circuit ID.
+    pub circuit: NonZeroU32,
+    cell: FixedCell,
+}
+
+impl TryFromCell for Created2 {
+    type Error = CellCastError;
+
+    fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, Self::Error> {
+        if let Some(cell) = AutoReturnFixed::new(cell)?
+            && cell.header().command == Self::ID
+        {
+            let circuit = NonZeroU32::new(cell.header().circuit).ok_or(ZeroCircID)?;
+            let data: &Created2Data = transmute_ref!(cell.data().data());
+            if data.len.get() as usize <= FIXED_CELL_SIZE - 2 {
+                Ok(Some(Self {
+                    circuit,
+                    cell: cell.into_inner().1,
+                }))
+            } else {
+                Err(CellFormatError.into())
+            }
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl From<Created2> for Cell {
+    #[inline]
+    fn from(cell: Created2) -> Self {
+        Self::from_fixed(
+            CellHeader {
+                command: Created2::ID,
+                circuit: cell.circuit.into(),
+            },
+            cell.into_inner(),
+        )
+    }
+}
+
+impl AsRef<FixedCell> for Created2 {
+    #[inline]
+    fn as_ref(&self) -> &FixedCell {
+        self.inner()
+    }
+}
+
+impl Created2 {
+    /// Cell ID of CREATED2.
+    pub const ID: u8 = 11;
+
+    /// Creates new [`Created2`].
+    ///
+    /// Returns [`None`] if payload does not fit the cell.
+    pub fn new(circuit: NonZeroU32, mut cell: FixedCell, data: &[u8]) -> Option<Self> {
+        if data.len() > FIXED_CELL_SIZE - 2 {
+            return None;
+        }
+
+        let p: &mut Created2Data = transmute_mut!(cell.data_mut());
+        p.len.set(data.len() as u16);
+        let (a, b) = p.data.split_at_mut(data.len());
+        a.copy_from_slice(data);
+        b.fill(0);
+
+        Some(Self { circuit, cell })
+    }
+
+    /// Gets reference to inner.
+    #[inline]
+    pub fn inner(&self) -> &FixedCell {
+        &self.cell
+    }
+
+    #[inline]
+    fn get_ref(&self) -> &Created2Data {
+        transmute_ref!(self.cell.data())
+    }
+
+    #[inline]
+    fn get_mut(&mut self) -> &mut Created2Data {
+        transmute_mut!(self.cell.data_mut())
+    }
+
+    /// Gets reference to payload.
+    #[inline]
+    pub fn payload(&self) -> &[u8] {
+        let cell = self.get_ref();
+        // SAFETY: Length field is validated.
+        unsafe { cell.data.get_unchecked(..cell.len.get() as usize) }
+    }
+
+    /// Gets mutable reference to payload.
+    #[inline]
+    pub fn payload_mut(&mut self) -> &mut [u8] {
+        let cell = self.get_mut();
+        // SAFETY: Length field is validated.
+        unsafe { cell.data.get_unchecked_mut(..cell.len.get() as usize) }
+    }
+
+    /// Gets payload length.
+    ///
+    /// Guaranteed to be <= [`FIXED_CELL_SIZE`] - 2 and equals to returned [`Self::payload`] slice length.
+    #[inline]
+    pub fn payload_len(&self) -> usize {
+        self.get_ref().len.get().into()
+    }
+
+    /// Unwraps into inner.
+    #[inline]
+    pub fn into_inner(self) -> FixedCell {
+        self.cell
+    }
+}
+
+/// CREATE_FAST cell data.
+#[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned)]
+#[repr(C)]
+struct CreateFastData {
+    x: [u8; 20],
+    padding: [u8; const { FIXED_CELL_SIZE - 20 }],
+}
+
+/// CREATE_FAST cell.
+#[derive(Debug)]
+pub struct CreateFast {
+    /// Circuit ID.
+    pub circuit: NonZeroU32,
+    cell: FixedCell,
+}
+
+impl TryFromCell for CreateFast {
+    type Error = CellCastError;
+
+    fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, Self::Error> {
+        if let Some(cell) = AutoReturnFixed::new(cell)?
+            && cell.header().command == Self::ID
+        {
+            let circuit = NonZeroU32::new(cell.header().circuit).ok_or(ZeroCircID)?;
+            Ok(Some(Self {
+                circuit,
+                cell: cell.into_inner().1,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl From<CreateFast> for Cell {
+    #[inline]
+    fn from(cell: CreateFast) -> Self {
+        Self::from_fixed(
+            CellHeader {
+                command: CreateFast::ID,
+                circuit: cell.circuit.into(),
+            },
+            cell.into_inner(),
+        )
+    }
+}
+
+impl AsRef<FixedCell> for CreateFast {
+    #[inline]
+    fn as_ref(&self) -> &FixedCell {
+        self.inner()
+    }
+}
+
+impl CreateFast {
+    /// Cell ID of CREATE_FAST.
+    pub const ID: u8 = 5;
+
+    /// Creates new [`CreateFast`].
+    pub fn new(circuit: NonZeroU32, mut cell: FixedCell, x: [u8; 20]) -> Self {
+        let p: &mut CreateFastData = transmute_mut!(cell.data_mut());
+        p.x = x;
+        p.padding.fill(0);
+
+        Self { circuit, cell }
+    }
+
+    /// Gets reference to inner.
+    #[inline]
+    pub fn inner(&self) -> &FixedCell {
+        &self.cell
+    }
+
+    #[inline]
+    fn get_ref(&self) -> &CreateFastData {
+        transmute_ref!(self.cell.data())
+    }
+
+    #[inline]
+    fn get_mut(&mut self) -> &mut CreateFastData {
+        transmute_mut!(self.cell.data_mut())
+    }
+
+    /// Gets reference to key data.
+    #[inline]
+    pub fn x(&self) -> &[u8; 20] {
+        &self.get_ref().x
+    }
+
+    /// Gets mutable reference to key data.
+    #[inline]
+    pub fn x_mut(&mut self) -> &mut [u8; 20] {
+        &mut self.get_mut().x
+    }
+
+    /// Unwraps into inner.
+    #[inline]
+    pub fn into_inner(self) -> FixedCell {
+        self.cell
+    }
+}
+
+/// CREATED_FAST cell data.
+#[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned)]
+#[repr(C)]
+struct CreatedFastData {
+    y: [u8; 20],
+    derived: [u8; 20],
+    padding: [u8; const { FIXED_CELL_SIZE - 20 * 2 }],
+}
+
+/// CREATED_FAST cell.
+#[derive(Debug)]
+pub struct CreatedFast {
+    /// Circuit ID.
+    pub circuit: NonZeroU32,
+    cell: FixedCell,
+}
+
+impl TryFromCell for CreatedFast {
+    type Error = CellCastError;
+
+    fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, Self::Error> {
+        if let Some(cell) = AutoReturnFixed::new(cell)?
+            && cell.header().command == Self::ID
+        {
+            let circuit = NonZeroU32::new(cell.header().circuit).ok_or(ZeroCircID)?;
+            Ok(Some(Self {
+                circuit,
+                cell: cell.into_inner().1,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl From<CreatedFast> for Cell {
+    #[inline]
+    fn from(cell: CreatedFast) -> Self {
+        Self::from_fixed(
+            CellHeader {
+                command: CreatedFast::ID,
+                circuit: cell.circuit.into(),
+            },
+            cell.into_inner(),
+        )
+    }
+}
+
+impl AsRef<FixedCell> for CreatedFast {
+    #[inline]
+    fn as_ref(&self) -> &FixedCell {
+        self.inner()
+    }
+}
+
+impl CreatedFast {
+    /// Cell ID of CREATED_FAST.
+    pub const ID: u8 = 6;
+
+    /// Creates new [`CreatedFast`].
+    pub fn new(circuit: NonZeroU32, mut cell: FixedCell, y: [u8; 20], derived: [u8; 20]) -> Self {
+        let p: &mut CreatedFastData = transmute_mut!(cell.data_mut());
+        p.y = y;
+        p.derived = derived;
+        p.padding.fill(0);
+
+        Self { circuit, cell }
+    }
+
+    /// Gets reference to inner.
+    #[inline]
+    pub fn inner(&self) -> &FixedCell {
+        &self.cell
+    }
+
+    #[inline]
+    fn get_ref(&self) -> &CreatedFastData {
+        transmute_ref!(self.cell.data())
+    }
+
+    #[inline]
+    fn get_mut(&mut self) -> &mut CreatedFastData {
+        transmute_mut!(self.cell.data_mut())
+    }
+
+    /// Gets reference to payload.
+    #[inline]
+    pub fn y(&self) -> &[u8; 20] {
+        &self.get_ref().y
+    }
+
+    /// Gets mutable reference to payload.
+    #[inline]
+    pub fn y_mut(&mut self) -> &mut [u8; 20] {
+        &mut self.get_mut().y
+    }
+
+    /// Gets reference to derived key data.
+    #[inline]
+    pub fn derived(&self) -> &[u8; 20] {
+        &self.get_ref().derived
+    }
+
+    /// Gets mutable reference to derived key data.
+    #[inline]
+    pub fn derived_mut(&mut self) -> &mut [u8; 20] {
+        &mut self.get_mut().derived
     }
 
     /// Unwraps into inner.
