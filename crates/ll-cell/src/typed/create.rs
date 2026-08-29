@@ -24,6 +24,8 @@ struct Create2Data {
 }
 
 /// `CREATE2` cell.
+///
+/// See also: [spec](https://spec.torproject.org/tor-spec/create-created-cells.html#CREATE).
 pub struct Create2 {
     /// Circuit ID.
     pub circuit: NonZeroU32,
@@ -196,6 +198,8 @@ struct Created2Data {
 }
 
 /// `CREATED2` cell.
+///
+/// See also: [spec](https://spec.torproject.org/tor-spec/create-created-cells.html#CREATE).
 pub struct Created2 {
     /// Circuit ID.
     pub circuit: NonZeroU32,
@@ -353,6 +357,8 @@ struct CreateFastData {
 }
 
 /// `CREATE_FAST` cell.
+///
+/// See also: [spec](https://spec.torproject.org/tor-spec/create-created-cells.html#create_fast).
 pub struct CreateFast {
     /// Circuit ID.
     pub circuit: NonZeroU32,
@@ -484,6 +490,8 @@ struct CreatedFastData {
 }
 
 /// `CREATED_FAST` cell.
+///
+/// See also: [spec](https://spec.torproject.org/tor-spec/create-created-cells.html#create_fast).
 pub struct CreatedFast {
     /// Circuit ID.
     pub circuit: NonZeroU32,

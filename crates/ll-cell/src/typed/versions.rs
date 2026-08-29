@@ -1,6 +1,4 @@
 //! `VERSIONS` cell types.
-//!
-//! See also: [spec](https://spec.torproject.org/tor-spec/negotiating-channels.html#VERSIONS-cells).
 
 use std::num::NonZeroUsize;
 use std::ptr::{from_mut, from_ref};
@@ -14,6 +12,8 @@ use crate::error::{CellCastError, CellFormatError, NonZeroCircID, VariableCellTo
 use crate::variable::VariableCell;
 
 /// `VERSIONS` cell.
+///
+/// See also: [spec](https://spec.torproject.org/tor-spec/negotiating-channels.html#VERSIONS-cells).
 ///
 /// # A Note on [`Versions`] Content.
 ///
