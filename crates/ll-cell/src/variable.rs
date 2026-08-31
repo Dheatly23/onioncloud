@@ -3,11 +3,9 @@
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult, from_fn};
 use std::num::NonZeroUsize;
 
-use base64ct::{Base64Unpadded, Encoding};
-
 use crate::error::VariableCellTooLong;
 use crate::fixed::{FIXED_CELL_SIZE, FixedCell};
-use crate::utils::encoded_len;
+use crate::utils::base64u_encode;
 
 /// A variable-sized cell.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -23,18 +21,7 @@ impl Default for VariableCell {
 
 impl Display for VariableCell {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        // Encode as base64 in chunks
-        const CHUNK_LEN: usize = 3 * 32;
-        let mut a = [0u8; const { (CHUNK_LEN * 4) / 3 }];
-
-        for v in self.data().chunks(CHUNK_LEN) {
-            let len = v.len();
-            let len = encoded_len(len);
-            let out = Base64Unpadded::encode(v, &mut a[..len]).expect("conversion must never fail");
-            f.write_str(out)?;
-        }
-
-        Ok(())
+        base64u_encode(self.data()).fmt(f)
     }
 }
 
