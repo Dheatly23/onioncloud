@@ -377,6 +377,33 @@ pub enum MaybeAddr<'a> {
     Unknown { ty: u8, payload: &'a [u8] },
 }
 
+impl From<IpAddr> for MaybeAddr<'_> {
+    #[inline]
+    fn from(v: IpAddr) -> Self {
+        Self::Ip(v)
+    }
+}
+
+impl PartialEq<IpAddr> for MaybeAddr<'_> {
+    #[inline]
+    fn eq(&self, o: &IpAddr) -> bool {
+        match self {
+            Self::Ip(v) => *v == *o,
+            _ => false,
+        }
+    }
+}
+
+impl<'a> From<MaybeAddr<'a>> for Option<IpAddr> {
+    #[inline]
+    fn from(v: MaybeAddr<'a>) -> Self {
+        match v {
+            MaybeAddr::Ip(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
 /// My IP addresses iterator for [`Netinfo`].
 #[derive(Clone)]
 #[must_use = "iterator does nothing if not used"]

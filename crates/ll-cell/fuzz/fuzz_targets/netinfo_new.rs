@@ -6,7 +6,6 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use onioncloud_ll_cell::fixed::{FIXED_CELL_SIZE, FixedCell};
 use onioncloud_ll_cell::typed::Netinfo;
-use onioncloud_ll_cell::typed::netinfo::MaybeAddr;
 
 #[derive(Debug, Arbitrary)]
 struct Data {
@@ -36,11 +35,11 @@ fuzz_target!(|data: Data| {
     if is_valid {
         let cell = r.unwrap();
         assert_eq!(cell.timestamp(), data.timestamp);
-        assert_eq!(cell.other_addr(), MaybeAddr::Ip(data.other_addr));
+        assert_eq!(cell.other_addr(), data.other_addr);
         let it = cell.my_addrs();
         assert_eq!(it.len(), data.my_addrs.len());
         for (i, a) in it.enumerate() {
-            assert_eq!(a, MaybeAddr::Ip(data.my_addrs[i]), "mismatch at index {i}");
+            assert_eq!(a, data.my_addrs[i], "mismatch at index {i}");
         }
     } else {
         r.unwrap_err();
