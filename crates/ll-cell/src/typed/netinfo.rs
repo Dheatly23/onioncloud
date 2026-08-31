@@ -227,7 +227,7 @@ impl Netinfo {
             t.data.rest_mut()
         }
 
-        fn append_addr<'a, 'b>(n: &'a mut u8, s: &'b mut [u8], a: IpAddr) -> Option<&'b mut [u8]> {
+        fn append_addr<'b>(n: &mut u8, s: &'b mut [u8], a: IpAddr) -> Option<&'b mut [u8]> {
             *n = (*n).checked_add(1)?;
             let mut t = AddrData::mut_from_bytes(s).ok()?;
 
@@ -312,9 +312,8 @@ impl Netinfo {
 
     /// Sets timestamp.
     #[inline]
-    #[must_use]
     pub fn set_timestamp(&mut self, value: u32) {
-        self.get_mut().header.timestamp.set(value)
+        self.get_mut().header.timestamp.set(value);
     }
 
     /// Gets other IP address.
@@ -342,7 +341,7 @@ impl Netinfo {
 
     /// Iterates through my IP addresses.
     #[inline]
-    pub fn my_addrs<'a>(&'a self) -> MyAddrsIter<'a> {
+    pub fn my_addrs(&self) -> MyAddrsIter<'_> {
         let (&n, s) = self.get_ref().data.rest();
         MyAddrsIter { s, n }
     }
@@ -447,7 +446,7 @@ impl<'a> Iterator for MyAddrsIter<'a> {
     }
 }
 
-impl<'a> ExactSizeIterator for MyAddrsIter<'a> {
+impl ExactSizeIterator for MyAddrsIter<'_> {
     #[inline]
     fn len(&self) -> usize {
         self.n as _

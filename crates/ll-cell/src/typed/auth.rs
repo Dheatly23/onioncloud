@@ -342,13 +342,12 @@ impl Authenticate {
 
     /// Sets authentication method.
     #[inline]
-    #[must_use]
     pub fn set_auth_ty(&mut self, value: u16) {
         // SAFETY: Cell format has been validated.
         unsafe {
             (*from_mut(self.cell.data_mut()).cast::<AuthenticateHeader>())
                 .ty
-                .set(value)
+                .set(value);
         }
     }
 

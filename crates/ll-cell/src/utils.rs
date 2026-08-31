@@ -47,7 +47,7 @@ pub(crate) const fn encoded_len(l: usize) -> usize {
     ((l * 4) / 3) + !(l * 4).is_multiple_of(3) as usize
 }
 
-pub(crate) const fn base64u_encode<'a>(s: &'a [u8]) -> impl 'a + Debug {
+pub(crate) const fn base64u_encode(s: &[u8]) -> impl '_ + Debug {
     struct S<'a>(&'a [u8]);
 
     impl Debug for S<'_> {

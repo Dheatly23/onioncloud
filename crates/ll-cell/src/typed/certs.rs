@@ -162,7 +162,7 @@ impl Certs {
 
     /// Iterates through [`Cert`]s.
     #[inline]
-    pub fn iter<'a>(&'a self) -> CertsIter<'a> {
+    pub fn iter(&self) -> CertsIter<'_> {
         self.into_iter()
     }
 
@@ -218,7 +218,7 @@ impl<'a> IntoIterator for &'a Certs {
         // SAFETY: Cell content has been validated before.
         let (n, s) = unsafe { (*s.get_unchecked(0), s.get_unchecked(1..)) };
 
-        Self::IntoIter { n, s }
+        Self::IntoIter { s, n }
     }
 }
 
@@ -254,7 +254,7 @@ impl<'a> Iterator for CertsIter<'a> {
     }
 }
 
-impl<'a> ExactSizeIterator for CertsIter<'a> {
+impl ExactSizeIterator for CertsIter<'_> {
     #[inline]
     fn len(&self) -> usize {
         self.n as _
