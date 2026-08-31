@@ -207,49 +207,55 @@ impl Netinfo {
         other_addr: IpAddr,
         my_addrs: impl IntoIterator<Item = IpAddr>,
     ) -> Result<Self, FixedCell> {
-        let t: &mut NetinfoData = transmute_mut!(cell.data_mut());
+        fn set_header(
+            t: &mut NetinfoData,
+            timestamp: u32,
+            other_addr: IpAddr,
+        ) -> (&mut u8, &mut [u8]) {
+            t.header.timestamp.set(timestamp);
+            match other_addr {
+                IpAddr::V4(a) => {
+                    t.header.ty = 4;
+                    t.data = NetinfoPayload::L4(a.octets(), [0; _]);
+                }
+                IpAddr::V6(a) => {
+                    t.header.ty = 6;
+                    t.data = NetinfoPayload::L16(a.octets(), [0; _]);
+                }
+            }
 
-        t.header.timestamp.set(timestamp);
-        match other_addr {
-            IpAddr::V4(a) => {
-                t.header.ty = 4;
-                t.data = NetinfoPayload::L4(a.octets(), [0; _]);
-            }
-            IpAddr::V6(a) => {
-                t.header.ty = 6;
-                t.data = NetinfoPayload::L16(a.octets(), [0; _]);
-            }
+            t.data.rest_mut()
         }
 
-        let (n, mut s) = t.data.rest_mut();
-        for a in my_addrs {
-            let Some(t) = (*n).checked_add(1) else {
-                return Err(cell);
-            };
-            *n = t;
-            let Ok(mut t) = AddrData::mut_from_bytes(s) else {
-                return Err(cell);
-            };
+        fn append_addr<'a, 'b>(n: &'a mut u8, s: &'b mut [u8], a: IpAddr) -> Option<&'b mut [u8]> {
+            *n = (*n).checked_add(1)?;
+            let mut t = AddrData::mut_from_bytes(s).ok()?;
+
+            let r;
             match a {
                 IpAddr::V4(a) => {
-                    let Some(v) = t.split_at_mut(4) else {
-                        return Err(cell);
-                    };
-                    (t, s) = v.via_into_bytes();
+                    (t, r) = t.split_at_mut(4)?.via_into_bytes();
                     t.header.ty = 4;
                     t.header.len = 4;
                     t.data.copy_from_slice(&a.octets());
                 }
                 IpAddr::V6(a) => {
-                    let Some(v) = t.split_at_mut(16) else {
-                        return Err(cell);
-                    };
-                    (t, s) = v.via_into_bytes();
+                    (t, r) = t.split_at_mut(16)?.via_into_bytes();
                     t.header.ty = 6;
                     t.header.len = 16;
                     t.data.copy_from_slice(&a.octets());
                 }
             }
+
+            Some(r)
+        }
+
+        let (n, mut s) = set_header(transmute_mut!(cell.data_mut()), timestamp, other_addr);
+        for a in my_addrs {
+            s = match append_addr(n, s, a) {
+                Some(v) => v,
+                None => return Err(cell),
+            };
         }
         s.fill(0);
 
