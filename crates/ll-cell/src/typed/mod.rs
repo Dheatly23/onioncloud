@@ -9,6 +9,7 @@ pub mod destroy;
 pub mod netinfo;
 pub mod padding;
 pub mod padding_negotiate;
+pub mod relay;
 pub mod versions;
 
 #[doc(no_inline)]
@@ -25,5 +26,7 @@ pub use netinfo::Netinfo;
 pub use padding::{Padding, VPadding};
 #[doc(no_inline)]
 pub use padding_negotiate::PaddingNegotiate;
+#[doc(no_inline)]
+pub use relay::{Relay, RelayEarly};
 #[doc(no_inline)]
 pub use versions::Versions;
