@@ -9,7 +9,9 @@ use onioncloud_ll_cell::cell::{Cell, TryFromCell};
 use onioncloud_ll_cell::error::CellCastError;
 use onioncloud_ll_cell::fixed::FIXED_CELL_SIZE;
 use onioncloud_ll_cell::typed::netinfo::MaybeAddr;
-use onioncloud_ll_cell::typed::{Create2, Created2, Netinfo, Padding};
+use onioncloud_ll_cell::typed::{
+    Create2, CreateFast, Created2, CreatedFast, Destroy, Netinfo, Padding,
+};
 
 use crate::common::FixedCellData;
 
@@ -75,6 +77,7 @@ fn cast_create2(data: FixedCellData, cell: Cell) {
         let t = Create2::try_from_cell(&mut cell).unwrap().unwrap();
         assert_matches!(cell, None);
 
+        assert_eq!(t.circuit.get(), data.0.circuit.get());
         let s = &data.0.data;
         assert_eq!(
             t.handshake_ty(),
@@ -115,6 +118,7 @@ fn cast_created2(data: FixedCellData, cell: Cell) {
         let t = Created2::try_from_cell(&mut cell).unwrap().unwrap();
         assert_matches!(cell, None);
 
+        assert_eq!(t.circuit.get(), data.0.circuit.get());
         let s = &data.0.data;
         assert_eq!(t.payload(), &s[2..2 + len as usize]);
 
@@ -131,6 +135,97 @@ fn cast_created2(data: FixedCellData, cell: Cell) {
             Err(CellCastError::CellFormatError(_))
         );
         assert_matches!(cell, Some(_));
+    }
+}
+
+fn cast_create_fast(data: FixedCellData, cell: Cell) {
+    if cell.header.circuit == 0 {
+        let mut cell = Some(cell);
+
+        assert_matches!(
+            CreateFast::try_from_cell(&mut cell),
+            Err(CellCastError::ZeroCircID(_))
+        );
+        assert_matches!(cell, Some(_));
+    } else {
+        let mut cell = Some(cell);
+
+        let t = CreateFast::try_from_cell(&mut cell).unwrap().unwrap();
+        assert_matches!(cell, None);
+
+        assert_eq!(t.circuit.get(), data.0.circuit.get());
+        let s = &data.0.data;
+        let mut x = [0; 20];
+        let l = s.len().min(x.len());
+        x[..l].copy_from_slice(&s[..l]);
+        assert_eq!(*t.x(), x);
+
+        let cell = Cell::from(t);
+        assert_eq!(cell.header.circuit, data.0.circuit.get());
+        assert_eq!(cell.header.command, CreateFast::ID);
+        assert!(cell.is_fixed(), "cell is not fixed");
+        assert_eq!(cell.data(), s);
+    }
+}
+
+fn cast_created_fast(data: FixedCellData, cell: Cell) {
+    if cell.header.circuit == 0 {
+        let mut cell = Some(cell);
+
+        assert_matches!(
+            CreatedFast::try_from_cell(&mut cell),
+            Err(CellCastError::ZeroCircID(_))
+        );
+        assert_matches!(cell, Some(_));
+    } else {
+        let mut cell = Some(cell);
+
+        let t = CreatedFast::try_from_cell(&mut cell).unwrap().unwrap();
+        assert_matches!(cell, None);
+
+        assert_eq!(t.circuit.get(), data.0.circuit.get());
+        let s = &data.0.data;
+        let mut x = [0; 20];
+        let l = s.len().min(x.len());
+        x[..l].copy_from_slice(&s[..l]);
+        assert_eq!(*t.y(), x);
+        let u = s.get(20..).unwrap_or(&[]);
+        let l = u.len().min(x.len());
+        x[..l].copy_from_slice(&u[..l]);
+        assert_eq!(*t.derived(), x);
+
+        let cell = Cell::from(t);
+        assert_eq!(cell.header.circuit, data.0.circuit.get());
+        assert_eq!(cell.header.command, CreatedFast::ID);
+        assert!(cell.is_fixed(), "cell is not fixed");
+        assert_eq!(cell.data(), s);
+    }
+}
+
+fn cast_destroy(data: FixedCellData, cell: Cell) {
+    if cell.header.circuit == 0 {
+        let mut cell = Some(cell);
+
+        assert_matches!(
+            Destroy::try_from_cell(&mut cell),
+            Err(CellCastError::ZeroCircID(_))
+        );
+        assert_matches!(cell, Some(_));
+    } else {
+        let mut cell = Some(cell);
+
+        let t = Destroy::try_from_cell(&mut cell).unwrap().unwrap();
+        assert_matches!(cell, None);
+
+        assert_eq!(t.circuit.get(), data.0.circuit.get());
+        let s = &data.0.data;
+        assert_eq!(t.reason(), s[0]);
+
+        let cell = Cell::from(t);
+        assert_eq!(cell.header.circuit, data.0.circuit.get());
+        assert_eq!(cell.header.command, Destroy::ID);
+        assert!(cell.is_fixed(), "cell is not fixed");
+        assert_eq!(cell.data(), s);
     }
 }
 
@@ -249,6 +344,9 @@ fuzz_target!(|data: FixedCellData| {
             Padding => cast_padding,
             Create2 => cast_create2,
             Created2 => cast_created2,
+            CreateFast => cast_create_fast,
+            CreatedFast => cast_created_fast,
+            Destroy => cast_destroy,
             Netinfo => cast_netinfo,
         }
     }
