@@ -90,6 +90,7 @@ impl Destroy {
     pub const ID: u8 = 4;
 
     /// Creates new [`Destroy`].
+    #[must_use]
     pub fn new(circuit: NonZeroU32, mut cell: FixedCell, reason: u8) -> Self {
         let p: &mut DestroyData = transmute_mut!(cell.data_mut());
         p.reason = reason;
@@ -185,6 +186,7 @@ impl TryFrom<u8> for DestroyReason {
 
 impl DestroyReason {
     #[inline]
+    #[must_use]
     pub const fn from_reason(reason: u8) -> Option<Self> {
         match reason {
             0 => Some(Self::None),
@@ -205,6 +207,7 @@ impl DestroyReason {
     }
 
     #[inline]
+    #[must_use]
     pub const fn into_u8(self) -> u8 {
         match self {
             Self::None => 0,
