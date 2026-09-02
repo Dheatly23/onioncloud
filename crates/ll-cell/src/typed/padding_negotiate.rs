@@ -225,7 +225,7 @@ impl PaddingNegotiate {
 }
 
 /// Padding negotiation command version 0.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PaddingNegotiateV0 {
     /// Stop padding.
@@ -235,7 +235,7 @@ pub enum PaddingNegotiateV0 {
 }
 
 /// Padding negotiation command.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PaddingNegotiateData {
     V0(PaddingNegotiateV0),
