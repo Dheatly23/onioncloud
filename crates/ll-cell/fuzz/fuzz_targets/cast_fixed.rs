@@ -11,7 +11,8 @@ use onioncloud_ll_cell::fixed::FIXED_CELL_SIZE;
 use onioncloud_ll_cell::typed::netinfo::MaybeAddr;
 use onioncloud_ll_cell::typed::padding_negotiate::{PaddingNegotiateData, PaddingNegotiateV0};
 use onioncloud_ll_cell::typed::{
-    Create2, CreateFast, Created2, CreatedFast, Destroy, Netinfo, Padding, PaddingNegotiate,
+    Create2, CreateFast, Created2, CreatedFast, Destroy, Netinfo, Padding, PaddingNegotiate, Relay,
+    RelayEarly,
 };
 
 use crate::common::FixedCellData;
@@ -378,6 +379,58 @@ fn cast_padding_negotiate(data: FixedCellData, cell: Cell) {
     }
 }
 
+fn cast_relay(data: FixedCellData, cell: Cell) {
+    if cell.header.circuit != 0 {
+        let mut cell = Some(cell);
+
+        let t = Relay::try_from_cell(&mut cell).unwrap().unwrap();
+        assert_matches!(cell, None);
+
+        let s = data.0.data;
+        assert_eq!(t.as_ref(), s);
+
+        let cell = Cell::from(t);
+        assert_eq!(cell.header.circuit, 0);
+        assert_eq!(cell.header.command, Relay::ID);
+        assert!(cell.is_fixed(), "cell is not fixed");
+        assert_eq!(cell.data(), s);
+    } else {
+        let mut cell = Some(cell);
+
+        assert_matches!(
+            Relay::try_from_cell(&mut cell),
+            Err(CellCastError::ZeroCircID(_))
+        );
+        assert_matches!(cell, Some(_));
+    }
+}
+
+fn cast_relay_early(data: FixedCellData, cell: Cell) {
+    if cell.header.circuit != 0 {
+        let mut cell = Some(cell);
+
+        let t = RelayEarly::try_from_cell(&mut cell).unwrap().unwrap();
+        assert_matches!(cell, None);
+
+        let s = data.0.data;
+        assert_eq!(t.as_ref(), s);
+
+        let cell = Cell::from(t);
+        assert_eq!(cell.header.circuit, 0);
+        assert_eq!(cell.header.command, RelayEarly::ID);
+        assert!(cell.is_fixed(), "cell is not fixed");
+        assert_eq!(cell.data(), s);
+    } else {
+        let mut cell = Some(cell);
+
+        assert_matches!(
+            RelayEarly::try_from_cell(&mut cell),
+            Err(CellCastError::ZeroCircID(_))
+        );
+        assert_matches!(cell, Some(_));
+    }
+}
+
 fuzz_target!(|data: FixedCellData| {
     let mut cell = Cell::from(data);
 
@@ -391,6 +444,8 @@ fuzz_target!(|data: FixedCellData| {
             Destroy => cast_destroy,
             Netinfo => cast_netinfo,
             PaddingNegotiate => cast_padding_negotiate,
+            Relay => cast_relay,
+            RelayEarly => cast_relay_early,
         }
     }
 });
