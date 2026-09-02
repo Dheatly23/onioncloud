@@ -8,6 +8,7 @@ pub mod create;
 pub mod destroy;
 pub mod netinfo;
 pub mod padding;
+pub mod padding_negotiate;
 pub mod versions;
 
 #[doc(no_inline)]
@@ -22,5 +23,7 @@ pub use destroy::Destroy;
 pub use netinfo::Netinfo;
 #[doc(no_inline)]
 pub use padding::{Padding, VPadding};
+#[doc(no_inline)]
+pub use padding_negotiate::PaddingNegotiate;
 #[doc(no_inline)]
 pub use versions::Versions;
