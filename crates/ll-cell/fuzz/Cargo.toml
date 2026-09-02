@@ -50,6 +50,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "certs_new"
+path = "fuzz_targets/certs_new.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "netinfo_new"
 path = "fuzz_targets/netinfo_new.rs"
 test = false
