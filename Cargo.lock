@@ -327,11 +327,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64ct",
- "futures-util",
  "test-log",
  "thiserror",
  "tracing",
- "tracing-subscriber",
  "zerocopy",
 ]
 
