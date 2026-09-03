@@ -1,7 +1,11 @@
 [workspace]
 resolver = "3"
 members = [
-  "crates/*",
+  "crates/ll-cell",
+  "crates/ll-cell/fuzz",
+  "crates/ll-relay-cell",
+  "crates/tart",
+  "crates/tart/fuzz",
 ]
 
 [workspace.package]
@@ -27,7 +31,9 @@ futures-core = "0.3"
 futures-io = "0.3"
 futures-sink = "0.3"
 http-body-util = "0.1"
+humantime = "2"
 hyper = "1"
+libfuzzer-sys = "0.4"
 loom = "0.7"
 memchr = "2"
 num-traits = "0.2"
@@ -42,6 +48,7 @@ scopeguard = "1"
 sha1 = "0.10"
 sha2 = "0.10"
 sha3 = "0.10"
+slab = "0.4"
 subtle = "2"
 test-log = "0.2"
 thiserror = "2"
@@ -53,6 +60,12 @@ zerocopy = "0.8"
 version = "1"
 features = [
   "backtrace",
+]
+
+[workspace.dependencies.arbitrary]
+version = "1"
+features = [
+  "derive",
 ]
 
 [workspace.dependencies.chrono]

@@ -1,0 +1,28 @@
+[package]
+name = "onioncloud-ll-cell"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64ct.workspace = true
+thiserror.workspace = true
+
+[dependencies.zerocopy]
+workspace = true
+features = [
+  "derive",
+  "std",
+]
+
+[dev-dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies.test-log]
+workspace = true
+features = [
+  "trace",
+]
