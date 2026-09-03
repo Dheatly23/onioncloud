@@ -144,6 +144,32 @@ impl V0Wrapper {
     fn get_mut(&mut self) -> &mut Data {
         transmute_mut!(self.0.data_mut())
     }
+
+    /// Gets digest field.
+    #[inline]
+    #[must_use]
+    pub fn digest(&self) -> [u8; 4] {
+        self.get_ref().digest
+    }
+
+    /// Sets digest field.
+    #[inline]
+    pub fn set_digest(&mut self, digest: [u8; 4]) {
+        self.get_mut().digest = digest;
+    }
+
+    /// Gets recognized field.
+    #[inline]
+    #[must_use]
+    pub fn recognized(&self) -> [u8; 2] {
+        self.get_ref().recognized
+    }
+
+    /// Sets recognized field.
+    #[inline]
+    pub fn set_recognized(&mut self, value: [u8; 2]) {
+        self.get_mut().recognized = value;
+    }
 }
 
 /// V0 relay type.

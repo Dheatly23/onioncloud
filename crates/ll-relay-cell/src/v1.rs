@@ -147,6 +147,20 @@ impl V1Wrapper {
     fn get_mut(&mut self) -> &mut Data {
         transmute_mut!(self.0.data_mut())
     }
+
+    /// Gets reference to tag field.
+    #[inline]
+    #[must_use]
+    pub fn tag(&self) -> &[u8; 16] {
+        &self.get_ref().tag
+    }
+
+    /// Gets mutable reference to tag field.
+    #[inline]
+    #[must_use]
+    pub fn tag_mut(&mut self) -> &mut [u8; 16] {
+        &mut self.get_mut().tag
+    }
 }
 
 /// V1 relay type.
