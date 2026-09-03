@@ -127,7 +127,7 @@ impl RelayWrapper for V0Wrapper {
     }
 
     fn set_len(&mut self, len: u16) {
-        assert!((len as usize) < DATA_SIZE, "{len} >= {DATA_SIZE}");
+        assert!((len as usize) <= DATA_SIZE, "{len} > {DATA_SIZE}");
         self.get_mut().len.set(len);
     }
 
