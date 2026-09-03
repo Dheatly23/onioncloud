@@ -167,6 +167,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "data is longer than FIXED_CELL_SIZE")]
     fn test_fixed_cell_from_slice_too_long() {
-        FixedCell::from_slice(&[100; FIXED_CELL_SIZE + 1]);
+        let _ = FixedCell::from_slice(&[100; FIXED_CELL_SIZE + 1]);
     }
 }

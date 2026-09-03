@@ -417,7 +417,8 @@ mod tests {
     #[test]
     fn test_auto_return_drop() {
         let mut cell = black_box(Some(Cell::empty_fixed()));
-        let ar = black_box(AutoReturnFixed::new(&mut cell)).unwrap();
+        let ar = black_box(AutoReturnFixed::new(&mut cell));
+        assert_matches!(ar, Ok(Some(_)));
         drop(ar);
         assert_matches!(cell, Some(_));
     }
@@ -426,7 +427,7 @@ mod tests {
     fn test_auto_return_none() {
         let mut cell = black_box(None::<Cell>);
         let ar = black_box(AutoReturnFixed::new(&mut cell));
-        assert_matches!(ar, None);
+        assert_matches!(ar, Ok(None));
         drop(ar);
         assert_matches!(cell, None);
     }
@@ -434,8 +435,9 @@ mod tests {
     #[test]
     fn test_auto_return_take() {
         let mut cell = black_box(Some(Cell::default()));
-        let ar = black_box(AutoReturnFixed::new(&mut cell)).unwrap();
-        drop(ar.into_inner());
+        let ar = black_box(AutoReturnFixed::new(&mut cell));
+        assert_matches!(ar, Ok(Some(_)));
+        drop(ar.unwrap().unwrap().into_inner());
         assert_matches!(cell, None);
     }
 }

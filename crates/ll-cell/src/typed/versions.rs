@@ -26,7 +26,7 @@ use crate::variable::VariableCell;
 /// ```
 /// # use onioncloud_ll_cell::typed::Versions;
 /// // Unsorted and contains duplicate
-/// let mut cell = Versions::try_from_slice(&[1, 2, 3, 1, 4, 3]);
+/// let mut cell = Versions::try_from_slice(&[1, 2, 3, 1, 4, 3]).unwrap();
 ///
 /// // Sort
 /// let data = cell.data_mut();
