@@ -349,6 +349,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "onioncloud-ll-relay-cell"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64ct",
+ "onioncloud-ll-cell",
+ "test-log",
+ "thiserror",
+ "tracing",
+ "zerocopy",
+]
+
+[[package]]
 name = "onioncloud-tart"
 version = "0.1.0"
 dependencies = [
