@@ -1,7 +1,5 @@
 //! Versioned relay wrapper.
 
-use std::ops::{Deref, DerefMut};
-
 use onioncloud_ll_cell::fixed::FixedCell;
 
 use crate::traits::{DynRelayWrapper, DynRelayWrapperRef, IntoRelayWrapper};
