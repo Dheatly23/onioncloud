@@ -177,7 +177,9 @@ impl V0Wrapper {
 pub struct V0;
 
 impl IntoRelayWrapper for V0 {
+    type RefWrapperTarget<'a> = V0Wrapper;
     type RefWrapper<'a> = &'a V0Wrapper;
+    type MutWrapperTarget<'a> = V0Wrapper;
     type MutWrapper<'a> = &'a mut V0Wrapper;
 
     fn wrap<'a>(&self, cell: &'a FixedCell) -> Self::RefWrapper<'a> {

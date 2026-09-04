@@ -2,6 +2,7 @@
 
 use std::borrow::{Borrow, BorrowMut};
 use std::hash::Hash;
+use std::ops::{Deref, DerefMut};
 
 use onioncloud_ll_cell::fixed::FixedCell;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
@@ -40,17 +41,36 @@ pub trait ArrayLike:
 impl<const N: usize> ArrayLike for [u8; N] {}
 
 pub trait IntoRelayWrapper {
+    /// Reference type target.
+    type RefWrapperTarget<'a>: ?Sized + DynRelayWrapperRef;
     /// Reference type.
-    type RefWrapper<'a>: DynRelayWrapperRef;
+    type RefWrapper<'a>: 'a + Deref<Target = Self::RefWrapperTarget<'a>>;
 
+    /// Mutable reference type target.
+    type MutWrapperTarget<'a>: ?Sized + DynRelayWrapper;
     /// Mutable reference type.
-    type MutWrapper<'a>: DynRelayWrapper;
+    type MutWrapper<'a>: 'a + DerefMut<Target = Self::MutWrapperTarget<'a>>;
 
     /// Wraps relay cell content.
     fn wrap<'a>(&self, cell: &'a FixedCell) -> Self::RefWrapper<'a>;
 
     /// Wraps relay cell content mutably.
     fn wrap_mut<'a>(&self, cell: &'a mut FixedCell) -> Self::MutWrapper<'a>;
+}
+
+impl<T: IntoRelayWrapper> IntoRelayWrapper for &T {
+    type RefWrapperTarget<'a> = T::RefWrapperTarget<'a>;
+    type RefWrapper<'a> = T::RefWrapper<'a>;
+    type MutWrapperTarget<'a> = T::MutWrapperTarget<'a>;
+    type MutWrapper<'a> = T::MutWrapper<'a>;
+
+    fn wrap<'a>(&self, cell: &'a FixedCell) -> Self::RefWrapper<'a> {
+        <T as IntoRelayWrapper>::wrap(*self, cell)
+    }
+
+    fn wrap_mut<'a>(&self, cell: &'a mut FixedCell) -> Self::MutWrapper<'a> {
+        <T as IntoRelayWrapper>::wrap_mut(*self, cell)
+    }
 }
 
 /// Trait for immutably wrapping relay cell (`dyn`-safe).
