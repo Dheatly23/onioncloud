@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "crates/ll-cell",
   "crates/ll-cell/fuzz",
+  "crates/ll-cell-cache",
   "crates/ll-relay-cell",
   "crates/tart",
   "crates/tart/fuzz",
@@ -145,3 +146,7 @@ features = [
   "precomputed-tables",
   "static_secrets",
 ]
+
+[workspace.dependencies.onioncloud-ll-cell]
+version = "0.1.0"
+path = "crates/ll-cell"

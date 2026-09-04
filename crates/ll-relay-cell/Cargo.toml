@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 base64ct.workspace = true
+onioncloud-ll-cell.workspace = true
 thiserror.workspace = true
 
 [dependencies.zerocopy]
@@ -17,12 +18,7 @@ features = [
   "std",
 ]
 
-[dependencies.onioncloud-ll-cell]
-version = "0.1.0"
-path = "../ll-cell"
-
 [dev-dependencies]
-anyhow.workspace = true
 tracing.workspace = true
 
 [dev-dependencies.test-log]

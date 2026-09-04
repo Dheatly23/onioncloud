@@ -62,12 +62,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -325,12 +319,20 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 name = "onioncloud-ll-cell"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "base64ct",
  "test-log",
  "thiserror",
  "tracing",
  "zerocopy",
+]
+
+[[package]]
+name = "onioncloud-ll-cell-cache"
+version = "0.1.0"
+dependencies = [
+ "onioncloud-ll-cell",
+ "test-log",
+ "tracing",
 ]
 
 [[package]]
@@ -352,7 +354,6 @@ dependencies = [
 name = "onioncloud-ll-relay-cell"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "base64ct",
  "onioncloud-ll-cell",
  "test-log",

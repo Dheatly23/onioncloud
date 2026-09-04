@@ -18,7 +18,6 @@ features = [
 ]
 
 [dev-dependencies]
-anyhow.workspace = true
 tracing.workspace = true
 
 [dev-dependencies.test-log]
