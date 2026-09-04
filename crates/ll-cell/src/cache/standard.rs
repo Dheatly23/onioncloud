@@ -27,6 +27,11 @@ impl Drop for Inner {
     }
 }
 
+/// Standard cell cache.
+///
+/// [`Clone`] is a cheap refcount increase. User should not wrap it in another [`Arc`].
+///
+/// User **should not** rely on internal implementation details.
 #[derive(Clone)]
 pub struct StandardCellCache(Arc<Inner>);
 
