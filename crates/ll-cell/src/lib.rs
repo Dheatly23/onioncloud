@@ -1,5 +1,6 @@
 //! Lowlevel onioncloud crate defining cells and cell parsing.
 
+pub mod cache;
 pub mod cell;
 pub mod error;
 pub mod fixed;

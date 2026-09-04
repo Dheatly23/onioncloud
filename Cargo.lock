@@ -327,15 +327,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "onioncloud-ll-cell-cache"
-version = "0.1.0"
-dependencies = [
- "onioncloud-ll-cell",
- "test-log",
- "tracing",
-]
-
-[[package]]
 name = "onioncloud-ll-cell-fuzz"
 version = "0.0.0"
 dependencies = [

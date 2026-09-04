@@ -3,7 +3,6 @@ resolver = "3"
 members = [
   "crates/ll-cell",
   "crates/ll-cell/fuzz",
-  "crates/ll-cell-cache",
   "crates/ll-relay-cell",
   "crates/tart",
   "crates/tart/fuzz",
