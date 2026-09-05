@@ -11,9 +11,35 @@ use std::hash::{Hash, Hasher};
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 
+use crate::cell::{Cell, CellTy};
 use crate::fixed::FixedCell;
+use crate::typed::*;
 
 pub use standard::StandardCellCache;
+
+macro_rules! impl_cachable {
+    ($($t:ty,)*) => {$(
+        impl Cachable for $t {
+            #[inline]
+            fn cache<C: ?Sized + CellCache>(self, c: &C) {
+                c.cache_cell(self.into());
+            }
+        }
+    )*};
+}
+
+impl_cachable![
+    Create2,
+    CreateFast,
+    Created2,
+    CreatedFast,
+    Destroy,
+    Netinfo,
+    Padding,
+    PaddingNegotiate,
+    Relay,
+    RelayEarly,
+];
 
 /// Trait for cachable values.
 pub trait Cachable {
@@ -55,6 +81,7 @@ pub trait CellCacheExt: CellCache {
     /// let cache = StandardCellCache::default();
     /// let cell = cache.cache(FixedCell::default());
     /// ```
+    #[inline]
     fn cache<T>(&self, cell: T) -> Cached<T, Self>
     where
         T: Cachable,
@@ -77,6 +104,7 @@ pub trait CellCacheExt: CellCache {
     /// let cache = StandardCellCache::default();
     /// let cell = cache.cache_b(FixedCell::default());
     /// ```
+    #[inline]
     fn cache_b<T>(&self, cell: T) -> Cached<T, &Self>
     where
         T: Cachable,
@@ -87,6 +115,7 @@ pub trait CellCacheExt: CellCache {
     /// Discard any value that implements [`Cachable`].
     ///
     /// Unlike [`Cached`], this do not allocate anything.
+    #[inline]
     fn discard<T>(&self, cell: T)
     where
         T: Cachable,
@@ -123,6 +152,7 @@ impl Cachable for () {
 
 /// Auto-impl for [`Option`].
 impl<T: Cachable> Cachable for Option<T> {
+    #[inline]
     fn cache<C: ?Sized + CellCache>(self, c: &C) {
         if let Some(t) = self {
             t.cache(c);
@@ -148,15 +178,40 @@ impl<const N: usize, T: Cachable> Cachable for [T; N] {
     }
 }
 
+impl Cachable for FixedCell {
+    #[inline]
+    fn cache<C: ?Sized + CellCache>(self, c: &C) {
+        c.cache_cell(self);
+    }
+}
+
+impl Cachable for CellTy {
+    #[inline]
+    fn cache<C: ?Sized + CellCache>(self, c: &C) {
+        if let Self::Fixed(t) = self {
+            t.cache(c);
+        }
+    }
+}
+
+impl Cachable for Cell {
+    #[inline]
+    fn cache<C: ?Sized + CellCache>(self, c: &C) {
+        self.data.cache(c);
+    }
+}
+
 impl<T> CellCache for T
 where
     T: Deref,
     T::Target: CellCache,
 {
+    #[inline]
     fn cache_cell(&self, cell: FixedCell) {
         <T::Target as CellCache>::cache_cell(&**self, cell);
     }
 
+    #[inline]
     fn get_cached(&self) -> FixedCell {
         <T::Target as CellCache>::get_cached(&**self)
     }
@@ -389,8 +444,9 @@ where
     /// # Example
     ///
     /// ```
-    /// use onioncloud_ll_cell::cell::{Cell, FixedCell};
-    /// use onioncloud_ll_cell::cell::padding::Padding;
+    /// use onioncloud_ll_cell::cell::Cell;
+    /// use onioncloud_ll_cell::fixed::FixedCell;
+    /// use onioncloud_ll_cell::typed::Padding;
     /// use onioncloud_ll_cell::cache::{Cached, StandardCellCache};
     ///
     /// let cell = Cached::new(StandardCellCache::default(), Some(Cell::from(Padding::new(FixedCell::default()))));
