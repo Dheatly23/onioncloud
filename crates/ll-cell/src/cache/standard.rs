@@ -3,7 +3,7 @@
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::ptr::null_mut;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering::*};
+use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering::*, fence};
 
 use crate::cache::CellCache;
 use crate::fixed::{FIXED_CELL_SIZE, FixedCell};
@@ -57,11 +57,18 @@ impl CellCache for StandardCellCache {
         let inner = &*self.0;
 
         for _ in 0..4 {
+            // Using relaxed because we only care about atomicity.
             let i = inner.end.fetch_add(1, Relaxed).rotate_left(4);
+
+            // Unfortunately, there isn't compare not equal and swap.
+            // So use relaxed here and acquire if we actually get the pointer.
             let p = inner.arr[i as usize].swap(null_mut(), Relaxed);
             if p.is_null() {
                 continue;
             }
+
+            // Using acquire to synchronize with cache_cell.
+            fence(Acquire);
 
             // SAFETY: Pointer comes from FixedCell.
             let mut r = unsafe { FixedCell::from(Box::from_raw(p)) };
@@ -88,9 +95,13 @@ impl CellCache for StandardCellCache {
         let mut p = S(Box::into_raw(cell.into_inner()));
 
         for _ in 0..4 {
+            // Using relaxed because we only care about atomicity.
             let i = inner.start.fetch_add(1, Relaxed).rotate_left(4);
+
+            // Using release to synchronize with get_cached.
+            // Previous usage/writes is fenced here.
             if inner.arr[i as usize]
-                .compare_exchange(null_mut(), p.0, Relaxed, Relaxed)
+                .compare_exchange(null_mut(), p.0, Release, Relaxed)
                 .is_ok()
             {
                 p.0 = null_mut();
