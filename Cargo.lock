@@ -320,6 +320,7 @@ name = "onioncloud-ll-cell"
 version = "0.1.0"
 dependencies = [
  "base64ct",
+ "loom",
  "test-log",
  "thiserror",
  "tracing",

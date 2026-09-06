@@ -10,6 +10,10 @@ publish.workspace = true
 base64ct.workspace = true
 thiserror.workspace = true
 
+[dependencies.loom]
+workspace = true
+optional = true
+
 [dependencies.zerocopy]
 workspace = true
 features = [
@@ -25,3 +29,6 @@ workspace = true
 features = [
   "trace",
 ]
+
+[features]
+loom = ["dep:loom"]
