@@ -318,3 +318,33 @@ impl<T: RelayVersion> DynRelayVersion for T {
         <T as RelayVersion>::data_mut_checked(self, cell)
     }
 }
+
+/// Trait for casting from [`Relay`] cell.
+///
+/// # Implementer's Note
+///
+/// **[`Self::try_from_relay_versioned`] should not mutate nor drop the cell.**
+/// If the cell does not match, it should return the cell back.
+/// This allows user to match for multiple types.
+///
+/// # Errors
+///
+/// It **should not** return error if the [`command`](`CellHeader::command`) ID does not match.
+/// If the command ID does not match, return `Ok(None)` instead.
+pub trait TryFromRelay<V: DynRelayVersion>: Sized {
+    type Error;
+
+    fn try_from_relay_versioned(
+        version: V,
+        cell: &mut Option<FixedCell>,
+    ) -> Result<Option<Self>, Self::Error>;
+
+    /// Convenience method when version is [`Default`].
+    #[inline]
+    fn try_from_relay(cell: &mut Option<FixedCell>) -> Result<Option<Self>, Self::Error>
+    where
+        V: Default,
+    {
+        Self::try_from_relay_versioned(V::default(), cell)
+    }
+}
