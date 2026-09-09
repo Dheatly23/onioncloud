@@ -2,7 +2,7 @@
 
 use std::borrow::{Borrow, BorrowMut};
 use std::hash::Hash;
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 
 use onioncloud_ll_cell::fixed::FixedCell;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
@@ -40,385 +40,281 @@ pub trait ArrayLike:
 
 impl<const N: usize> ArrayLike for [u8; N] {}
 
-pub trait IntoRelayWrapper {
-    /// Reference type target.
-    type RefWrapperTarget<'a>: ?Sized + DynRelayWrapperRef;
-    /// Reference type.
-    type RefWrapper<'a>: 'a + Deref<Target = Self::RefWrapperTarget<'a>>;
-
-    /// Mutable reference type target.
-    type MutWrapperTarget<'a>: ?Sized + DynRelayWrapper;
-    /// Mutable reference type.
-    type MutWrapper<'a>: 'a + DerefMut<Target = Self::MutWrapperTarget<'a>>;
-
-    /// Wraps relay cell content.
-    fn wrap<'a>(&self, cell: &'a FixedCell) -> Self::RefWrapper<'a>;
-
-    /// Wraps relay cell content mutably.
-    fn wrap_mut<'a>(&self, cell: &'a mut FixedCell) -> Self::MutWrapper<'a>;
-}
-
-impl<T: IntoRelayWrapper> IntoRelayWrapper for &T {
-    type RefWrapperTarget<'a> = T::RefWrapperTarget<'a>;
-    type RefWrapper<'a> = T::RefWrapper<'a>;
-    type MutWrapperTarget<'a> = T::MutWrapperTarget<'a>;
-    type MutWrapper<'a> = T::MutWrapper<'a>;
-
-    fn wrap<'a>(&self, cell: &'a FixedCell) -> Self::RefWrapper<'a> {
-        <T as IntoRelayWrapper>::wrap(*self, cell)
-    }
-
-    fn wrap_mut<'a>(&self, cell: &'a mut FixedCell) -> Self::MutWrapper<'a> {
-        <T as IntoRelayWrapper>::wrap_mut(*self, cell)
-    }
-}
-
-/// Trait for immutably wrapping relay cell (`dyn`-safe).
-#[expect(clippy::len_without_is_empty)]
-pub trait RelayWrapperRef {
+/// Trait for relay versioning.
+pub trait RelayVersion {
     /// Type of payload.
     ///
     /// Should be an array.
     ///
     /// NOTE: (Workaround due to associated constant limitations).
-    type Data: ArrayLike;
-
-    /// Gets underlying [`FixedCell`]
-    fn as_fixed_cell(&self) -> &FixedCell;
+    type Data: 'static + ArrayLike;
 
     /// Gets relay command.
-    fn command(&self) -> u8;
-
-    /// Gets stream ID.
-    fn stream_id(&self) -> u16;
-
-    /// Gets payload length.
-    fn len(&self) -> u16;
-
-    /// Gets reference to payload and padding.
-    fn data_padding(&self) -> &Self::Data;
-
-    /// Gets reference to payload.
-    ///
-    /// # Panics
-    ///
-    /// Panics if [`len`] is invalid.
-    fn data(&self) -> &[u8] {
-        let len = self.len() as usize;
-        &self.data_padding().borrow()[..len]
-    }
-
-    /// Gets reference to payload.
-    ///
-    /// Returns [`None`] if [`len`] is invalid.
-    fn data_checked(&self) -> Option<&[u8]> {
-        let len = self.len() as usize;
-        self.data_padding().borrow().get(..len)
-    }
-}
-
-impl<T: RelayWrapperRef> RelayWrapperRef for &T {
-    type Data = T::Data;
-
-    #[inline]
-    fn as_fixed_cell(&self) -> &FixedCell {
-        <T as RelayWrapperRef>::as_fixed_cell(*self)
-    }
-
-    #[inline]
-    fn command(&self) -> u8 {
-        <T as RelayWrapperRef>::command(*self)
-    }
-
-    #[inline]
-    fn stream_id(&self) -> u16 {
-        <T as RelayWrapperRef>::stream_id(*self)
-    }
-
-    #[inline]
-    fn len(&self) -> u16 {
-        <T as RelayWrapperRef>::len(*self)
-    }
-
-    #[inline]
-    fn data_padding(&self) -> &Self::Data {
-        <T as RelayWrapperRef>::data_padding(*self)
-    }
-
-    #[inline]
-    fn data(&self) -> &[u8] {
-        <T as RelayWrapperRef>::data(*self)
-    }
-
-    #[inline]
-    fn data_checked(&self) -> Option<&[u8]> {
-        <T as RelayWrapperRef>::data_checked(*self)
-    }
-}
-
-impl<T: RelayWrapperRef> RelayWrapperRef for &mut T {
-    type Data = T::Data;
-
-    #[inline]
-    fn as_fixed_cell(&self) -> &FixedCell {
-        <T as RelayWrapperRef>::as_fixed_cell(*self)
-    }
-
-    #[inline]
-    fn command(&self) -> u8 {
-        <T as RelayWrapperRef>::command(*self)
-    }
-
-    #[inline]
-    fn stream_id(&self) -> u16 {
-        <T as RelayWrapperRef>::stream_id(*self)
-    }
-
-    #[inline]
-    fn len(&self) -> u16 {
-        <T as RelayWrapperRef>::len(*self)
-    }
-
-    #[inline]
-    fn data_padding(&self) -> &Self::Data {
-        <T as RelayWrapperRef>::data_padding(*self)
-    }
-
-    #[inline]
-    fn data(&self) -> &[u8] {
-        <T as RelayWrapperRef>::data(*self)
-    }
-
-    #[inline]
-    fn data_checked(&self) -> Option<&[u8]> {
-        <T as RelayWrapperRef>::data_checked(*self)
-    }
-}
-
-/// Trait for wrapping relay cell (`dyn`-safe).
-pub trait RelayWrapper: RelayWrapperRef {
-    /// Gets underlying [`FixedCell`]
-    fn as_fixed_cell_mut(&mut self) -> &mut FixedCell;
+    fn command(&self, cell: &FixedCell) -> u8;
 
     /// Sets relay command.
-    fn set_command(&mut self, command: u8);
+    fn set_command(&self, cell: &mut FixedCell, command: u8);
+
+    /// Gets stream ID.
+    fn stream_id(&self, cell: &FixedCell) -> u16;
 
     /// Sets stream ID.
-    fn set_stream_id(&mut self, stream_id: u16);
+    fn set_stream_id(&self, cell: &mut FixedCell, stream_id: u16);
+
+    /// Gets payload length.
+    fn len(&self, cell: &FixedCell) -> u16;
 
     /// Sets payload length.
     ///
     /// # Panics
     ///
     /// Panics if length is greater than `size_of::<Self::Data>`.
-    fn set_len(&mut self, len: u16);
-
-    /// Gets mutable reference to payload and padding.
-    fn data_padding_mut(&mut self) -> &mut Self::Data;
-
-    /// Gets mutable reference to payload.
-    ///
-    /// # Panics
-    ///
-    /// Panics if [`len`] is invalid.
-    fn data_mut(&mut self) -> &mut [u8] {
-        let len = self.len() as usize;
-        &mut self.data_padding_mut().borrow_mut()[..len]
-    }
-
-    /// Gets mutable reference to payload.
-    ///
-    /// Returns [`None`] if [`len`] is invalid.
-    fn data_mut_checked(&mut self) -> Option<&mut [u8]> {
-        let len = self.len() as usize;
-        self.data_padding_mut().borrow_mut().get_mut(..len)
-    }
-}
-
-impl<T: RelayWrapper> RelayWrapper for &mut T {
-    #[inline]
-    fn as_fixed_cell_mut(&mut self) -> &mut FixedCell {
-        <T as RelayWrapper>::as_fixed_cell_mut(*self)
-    }
-
-    #[inline]
-    fn set_command(&mut self, command: u8) {
-        <T as RelayWrapper>::set_command(*self, command);
-    }
-
-    #[inline]
-    fn set_stream_id(&mut self, stream_id: u16) {
-        <T as RelayWrapper>::set_stream_id(*self, stream_id);
-    }
-
-    #[inline]
-    fn set_len(&mut self, len: u16) {
-        <T as RelayWrapper>::set_len(*self, len);
-    }
-
-    #[inline]
-    fn data_padding_mut(&mut self) -> &mut Self::Data {
-        <T as RelayWrapper>::data_padding_mut(*self)
-    }
-
-    #[inline]
-    fn data_mut(&mut self) -> &mut [u8] {
-        <T as RelayWrapper>::data_mut(*self)
-    }
-
-    #[inline]
-    fn data_mut_checked(&mut self) -> Option<&mut [u8]> {
-        <T as RelayWrapper>::data_mut_checked(*self)
-    }
-}
-
-/// Trait for immutably wrapping relay cell (`dyn`-safe).
-#[expect(clippy::len_without_is_empty)]
-pub trait DynRelayWrapperRef {
-    /// Gets underlying [`FixedCell`]
-    fn as_fixed_cell(&self) -> &FixedCell;
-
-    /// Gets relay command.
-    fn command(&self) -> u8;
-
-    /// Gets stream ID.
-    fn stream_id(&self) -> u16;
-
-    /// Gets payload length.
-    fn len(&self) -> u16;
+    fn set_len(&self, cell: &mut FixedCell, len: u16);
 
     /// Gets reference to payload and padding.
-    fn data_padding(&self) -> &[u8];
+    fn data_padding<'a>(&self, cell: &'a FixedCell) -> &'a Self::Data;
+
+    /// Gets mutable reference to payload and padding.
+    fn data_padding_mut<'a>(&self, cell: &'a mut FixedCell) -> &'a mut Self::Data;
 
     /// Gets reference to payload.
     ///
     /// # Panics
     ///
     /// Panics if [`len`] is invalid.
-    fn data(&self) -> &[u8] {
-        let len = self.len() as usize;
-        &self.data_padding()[..len]
+    #[inline]
+    fn data<'a>(&self, cell: &'a FixedCell) -> &'a [u8] {
+        let len = self.len(cell) as usize;
+        &self.data_padding(cell).borrow()[..len]
     }
 
     /// Gets reference to payload.
     ///
     /// Returns [`None`] if [`len`] is invalid.
-    fn data_checked(&self) -> Option<&[u8]> {
-        let len = self.len() as usize;
-        self.data_padding().get(..len)
+    #[inline]
+    fn data_checked<'a>(&self, cell: &'a FixedCell) -> Option<&'a [u8]> {
+        let len = self.len(cell) as usize;
+        self.data_padding(cell).borrow().get(..len)
+    }
+
+    /// Gets mutable reference to payload.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`len`] is invalid.
+    #[inline]
+    fn data_mut<'a>(&self, cell: &'a mut FixedCell) -> &'a mut [u8] {
+        let len = self.len(cell) as usize;
+        &mut self.data_padding_mut(cell).borrow_mut()[..len]
+    }
+
+    /// Gets mutable reference to payload.
+    ///
+    /// Returns [`None`] if [`len`] is invalid.
+    #[inline]
+    fn data_mut_checked<'a>(&self, cell: &'a mut FixedCell) -> Option<&'a mut [u8]> {
+        let len = self.len(cell) as usize;
+        self.data_padding_mut(cell).borrow_mut().get_mut(..len)
     }
 }
 
-/// Trait for wrapping relay cell (`dyn`-safe).
-pub trait DynRelayWrapper: DynRelayWrapperRef {
-    /// Gets underlying [`FixedCell`]
-    fn as_fixed_cell_mut(&mut self) -> &mut FixedCell;
+impl<T> RelayVersion for T
+where
+    T: Deref,
+    T::Target: RelayVersion,
+{
+    type Data = <T::Target as RelayVersion>::Data;
+
+    #[inline]
+    fn command(&self, cell: &FixedCell) -> u8 {
+        <T::Target as RelayVersion>::command(&**self, cell)
+    }
+
+    #[inline]
+    fn set_command(&self, cell: &mut FixedCell, command: u8) {
+        <T::Target as RelayVersion>::set_command(&**self, cell, command);
+    }
+
+    #[inline]
+    fn stream_id(&self, cell: &FixedCell) -> u16 {
+        <T::Target as RelayVersion>::stream_id(&**self, cell)
+    }
+
+    #[inline]
+    fn set_stream_id(&self, cell: &mut FixedCell, stream_id: u16) {
+        <T::Target as RelayVersion>::set_stream_id(&**self, cell, stream_id);
+    }
+
+    #[inline]
+    fn len(&self, cell: &FixedCell) -> u16 {
+        <T::Target as RelayVersion>::len(&**self, cell)
+    }
+
+    #[inline]
+    fn set_len(&self, cell: &mut FixedCell, len: u16) {
+        <T::Target as RelayVersion>::set_len(&**self, cell, len);
+    }
+
+    #[inline]
+    fn data_padding<'a>(&self, cell: &'a FixedCell) -> &'a Self::Data {
+        <T::Target as RelayVersion>::data_padding(&**self, cell)
+    }
+
+    #[inline]
+    fn data_padding_mut<'a>(&self, cell: &'a mut FixedCell) -> &'a mut Self::Data {
+        <T::Target as RelayVersion>::data_padding_mut(&**self, cell)
+    }
+
+    #[inline]
+    fn data<'a>(&self, cell: &'a FixedCell) -> &'a [u8] {
+        <T::Target as RelayVersion>::data(&**self, cell)
+    }
+
+    #[inline]
+    fn data_checked<'a>(&self, cell: &'a FixedCell) -> Option<&'a [u8]> {
+        <T::Target as RelayVersion>::data_checked(&**self, cell)
+    }
+
+    #[inline]
+    fn data_mut<'a>(&self, cell: &'a mut FixedCell) -> &'a mut [u8] {
+        <T::Target as RelayVersion>::data_mut(&**self, cell)
+    }
+
+    #[inline]
+    fn data_mut_checked<'a>(&self, cell: &'a mut FixedCell) -> Option<&'a mut [u8]> {
+        <T::Target as RelayVersion>::data_mut_checked(&**self, cell)
+    }
+}
+
+/// Trait for relay versioning (dyn-safe).
+pub trait DynRelayVersion {
+    /// Gets relay command.
+    fn command(&self, cell: &FixedCell) -> u8;
 
     /// Sets relay command.
-    fn set_command(&mut self, command: u8);
+    fn set_command(&self, cell: &mut FixedCell, command: u8);
+
+    /// Gets stream ID.
+    fn stream_id(&self, cell: &FixedCell) -> u16;
 
     /// Sets stream ID.
-    fn set_stream_id(&mut self, stream_id: u16);
+    fn set_stream_id(&self, cell: &mut FixedCell, stream_id: u16);
+
+    /// Gets payload length.
+    fn len(&self, cell: &FixedCell) -> u16;
 
     /// Sets payload length.
     ///
     /// # Panics
     ///
-    /// Panics if length is invalid.
-    fn set_len(&mut self, len: u16);
+    /// Panics if length is greater than `size_of::<Self::Data>`.
+    fn set_len(&self, cell: &mut FixedCell, len: u16);
+
+    /// Gets reference to payload and padding.
+    fn data_padding<'a>(&self, cell: &'a FixedCell) -> &'a [u8];
 
     /// Gets mutable reference to payload and padding.
-    fn data_padding_mut(&mut self) -> &mut [u8];
+    fn data_padding_mut<'a>(&self, cell: &'a mut FixedCell) -> &'a mut [u8];
+
+    /// Gets reference to payload.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`len`] is invalid.
+    #[inline]
+    fn data<'a>(&self, cell: &'a FixedCell) -> &'a [u8] {
+        let len = self.len(cell) as usize;
+        &self.data_padding(cell)[..len]
+    }
+
+    /// Gets reference to payload.
+    ///
+    /// Returns [`None`] if [`len`] is invalid.
+    #[inline]
+    fn data_checked<'a>(&self, cell: &'a FixedCell) -> Option<&'a [u8]> {
+        let len = self.len(cell) as usize;
+        self.data_padding(cell).get(..len)
+    }
 
     /// Gets mutable reference to payload.
     ///
     /// # Panics
     ///
     /// Panics if [`len`] is invalid.
-    fn data_mut(&mut self) -> &mut [u8] {
-        let len = self.len() as usize;
-        &mut self.data_padding_mut()[..len]
+    #[inline]
+    fn data_mut<'a>(&self, cell: &'a mut FixedCell) -> &'a mut [u8] {
+        let len = self.len(cell) as usize;
+        &mut self.data_padding_mut(cell)[..len]
     }
 
     /// Gets mutable reference to payload.
     ///
     /// Returns [`None`] if [`len`] is invalid.
-    fn data_mut_checked(&mut self) -> Option<&mut [u8]> {
-        let len = self.len() as usize;
-        self.data_padding_mut().get_mut(..len)
+    #[inline]
+    fn data_mut_checked<'a>(&self, cell: &'a mut FixedCell) -> Option<&'a mut [u8]> {
+        let len = self.len(cell) as usize;
+        self.data_padding_mut(cell).get_mut(..len)
     }
 }
 
-impl<T: RelayWrapperRef> DynRelayWrapperRef for T {
+impl<T: RelayVersion> DynRelayVersion for T {
     #[inline]
-    fn as_fixed_cell(&self) -> &FixedCell {
-        <Self as RelayWrapperRef>::as_fixed_cell(self)
+    fn command(&self, cell: &FixedCell) -> u8 {
+        <T as RelayVersion>::command(self, cell)
     }
 
     #[inline]
-    fn command(&self) -> u8 {
-        <Self as RelayWrapperRef>::command(self)
+    fn set_command(&self, cell: &mut FixedCell, command: u8) {
+        <T as RelayVersion>::set_command(self, cell, command);
     }
 
     #[inline]
-    fn stream_id(&self) -> u16 {
-        <Self as RelayWrapperRef>::stream_id(self)
+    fn stream_id(&self, cell: &FixedCell) -> u16 {
+        <T as RelayVersion>::stream_id(self, cell)
     }
 
     #[inline]
-    fn len(&self) -> u16 {
-        <Self as RelayWrapperRef>::len(self)
+    fn set_stream_id(&self, cell: &mut FixedCell, stream_id: u16) {
+        <T as RelayVersion>::set_stream_id(self, cell, stream_id);
     }
 
     #[inline]
-    fn data_padding(&self) -> &[u8] {
-        <Self as RelayWrapperRef>::data_padding(self).borrow()
+    fn len(&self, cell: &FixedCell) -> u16 {
+        <T as RelayVersion>::len(self, cell)
     }
 
     #[inline]
-    fn data(&self) -> &[u8] {
-        <Self as RelayWrapperRef>::data(self)
+    fn set_len(&self, cell: &mut FixedCell, len: u16) {
+        <T as RelayVersion>::set_len(self, cell, len);
     }
 
     #[inline]
-    fn data_checked(&self) -> Option<&[u8]> {
-        <Self as RelayWrapperRef>::data_checked(self)
-    }
-}
-
-impl<T: RelayWrapper> DynRelayWrapper for T {
-    #[inline]
-    fn as_fixed_cell_mut(&mut self) -> &mut FixedCell {
-        <Self as RelayWrapper>::as_fixed_cell_mut(self)
+    fn data_padding<'a>(&self, cell: &'a FixedCell) -> &'a [u8] {
+        <T as RelayVersion>::data_padding(self, cell).borrow()
     }
 
     #[inline]
-    fn set_command(&mut self, command: u8) {
-        <Self as RelayWrapper>::set_command(self, command);
+    fn data_padding_mut<'a>(&self, cell: &'a mut FixedCell) -> &'a mut [u8] {
+        <T as RelayVersion>::data_padding_mut(self, cell).borrow_mut()
     }
 
     #[inline]
-    fn set_stream_id(&mut self, stream_id: u16) {
-        <Self as RelayWrapper>::set_stream_id(self, stream_id);
+    fn data<'a>(&self, cell: &'a FixedCell) -> &'a [u8] {
+        <T as RelayVersion>::data(self, cell)
     }
 
     #[inline]
-    fn set_len(&mut self, len: u16) {
-        <Self as RelayWrapper>::set_len(self, len);
+    fn data_checked<'a>(&self, cell: &'a FixedCell) -> Option<&'a [u8]> {
+        <T as RelayVersion>::data_checked(self, cell)
     }
 
     #[inline]
-    fn data_padding_mut(&mut self) -> &mut [u8] {
-        <Self as RelayWrapper>::data_padding_mut(self).borrow_mut()
+    fn data_mut<'a>(&self, cell: &'a mut FixedCell) -> &'a mut [u8] {
+        <T as RelayVersion>::data_mut(self, cell)
     }
 
     #[inline]
-    fn data_mut(&mut self) -> &mut [u8] {
-        <Self as RelayWrapper>::data_mut(self)
-    }
-
-    #[inline]
-    fn data_mut_checked(&mut self) -> Option<&mut [u8]> {
-        <Self as RelayWrapper>::data_mut_checked(self)
+    fn data_mut_checked<'a>(&self, cell: &'a mut FixedCell) -> Option<&'a mut [u8]> {
+        <T as RelayVersion>::data_mut_checked(self, cell)
     }
 }

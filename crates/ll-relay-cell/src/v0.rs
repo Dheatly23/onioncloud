@@ -1,14 +1,12 @@
 //! Version 0 relay format (default).
 
-use std::ptr::{from_mut, from_ref};
-
 use onioncloud_ll_cell::fixed::{FIXED_CELL_SIZE, FixedCell};
 use zerocopy::byteorder::big_endian::U16;
 use zerocopy::{
     FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned, transmute_mut, transmute_ref,
 };
 
-use crate::traits::{IntoRelayWrapper, RelayWrapper, RelayWrapperRef};
+use crate::traits::RelayVersion;
 
 const DATA_SIZE: usize = FIXED_CELL_SIZE - 11;
 
@@ -24,169 +22,87 @@ struct Data {
     data: [u8; DATA_SIZE],
 }
 
-/// Wrapper for relay cell.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct V0Wrapper(FixedCell);
+/// V0 relay type.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct V0;
 
-impl From<FixedCell> for V0Wrapper {
-    #[inline]
-    fn from(v: FixedCell) -> Self {
-        Self(v)
-    }
-}
-
-impl From<V0Wrapper> for FixedCell {
-    #[inline]
-    fn from(v: V0Wrapper) -> Self {
-        v.0
-    }
-}
-
-impl<'a> From<&'a FixedCell> for &'a V0Wrapper {
-    #[inline]
-    fn from(v: &'a FixedCell) -> Self {
-        // SAFETY: V0Wrapper is repr(transparent) to FixedCell.
-        unsafe { &*from_ref(v).cast() }
-    }
-}
-
-impl<'a> From<&'a V0Wrapper> for &'a FixedCell {
-    #[inline]
-    fn from(v: &'a V0Wrapper) -> Self {
-        // SAFETY: V0Wrapper is repr(transparent) to FixedCell.
-        unsafe { &*from_ref(v).cast() }
-    }
-}
-
-impl<'a> From<&'a mut FixedCell> for &'a mut V0Wrapper {
-    #[inline]
-    fn from(v: &'a mut FixedCell) -> Self {
-        // SAFETY: V0Wrapper is repr(transparent) to FixedCell.
-        unsafe { &mut *from_mut(v).cast() }
-    }
-}
-
-impl<'a> From<&'a mut V0Wrapper> for &'a mut FixedCell {
-    #[inline]
-    fn from(v: &'a mut V0Wrapper) -> Self {
-        // SAFETY: V0Wrapper is repr(transparent) to FixedCell.
-        unsafe { &mut *from_mut(v).cast() }
-    }
-}
-
-impl AsRef<FixedCell> for V0Wrapper {
-    #[inline]
-    fn as_ref(&self) -> &FixedCell {
-        self.into()
-    }
-}
-
-impl AsMut<FixedCell> for V0Wrapper {
-    #[inline]
-    fn as_mut(&mut self) -> &mut FixedCell {
-        self.into()
-    }
-}
-
-impl RelayWrapperRef for V0Wrapper {
+impl RelayVersion for V0 {
     type Data = [u8; DATA_SIZE];
 
-    fn as_fixed_cell(&self) -> &FixedCell {
-        self.into()
+    #[inline]
+    fn command(&self, cell: &FixedCell) -> u8 {
+        Self::get_ref(cell).command
     }
 
-    fn command(&self) -> u8 {
-        self.get_ref().command
+    #[inline]
+    fn stream_id(&self, cell: &FixedCell) -> u16 {
+        Self::get_ref(cell).stream_id.get()
     }
 
-    fn stream_id(&self) -> u16 {
-        self.get_ref().stream_id.get()
+    #[inline]
+    fn len(&self, cell: &FixedCell) -> u16 {
+        Self::get_ref(cell).len.get()
     }
 
-    fn len(&self) -> u16 {
-        self.get_ref().len.get()
+    #[inline]
+    fn data_padding<'a>(&self, cell: &'a FixedCell) -> &'a Self::Data {
+        &Self::get_ref(cell).data
     }
 
-    fn data_padding(&self) -> &Self::Data {
-        &self.get_ref().data
-    }
-}
-
-impl RelayWrapper for V0Wrapper {
-    fn as_fixed_cell_mut(&mut self) -> &mut FixedCell {
-        self.into()
+    #[inline]
+    fn set_command(&self, cell: &mut FixedCell, command: u8) {
+        Self::get_mut(cell).command = command;
     }
 
-    fn set_command(&mut self, command: u8) {
-        self.get_mut().command = command;
+    #[inline]
+    fn set_stream_id(&self, cell: &mut FixedCell, stream_id: u16) {
+        Self::get_mut(cell).stream_id.set(stream_id);
     }
 
-    fn set_stream_id(&mut self, stream_id: u16) {
-        self.get_mut().stream_id.set(stream_id);
-    }
-
-    fn set_len(&mut self, len: u16) {
+    #[inline]
+    fn set_len(&self, cell: &mut FixedCell, len: u16) {
         assert!((len as usize) <= DATA_SIZE, "{len} > {DATA_SIZE}");
-        self.get_mut().len.set(len);
+        Self::get_mut(cell).len.set(len);
     }
 
-    fn data_padding_mut(&mut self) -> &mut Self::Data {
-        &mut self.get_mut().data
+    #[inline]
+    fn data_padding_mut<'a>(&self, cell: &'a mut FixedCell) -> &'a mut Self::Data {
+        &mut Self::get_mut(cell).data
     }
 }
 
-impl V0Wrapper {
-    fn get_ref(&self) -> &Data {
-        transmute_ref!(self.0.data())
+impl V0 {
+    fn get_ref(cell: &FixedCell) -> &Data {
+        transmute_ref!(cell.data())
     }
 
-    fn get_mut(&mut self) -> &mut Data {
-        transmute_mut!(self.0.data_mut())
+    fn get_mut(cell: &mut FixedCell) -> &mut Data {
+        transmute_mut!(cell.data_mut())
     }
 
     /// Gets digest field.
     #[inline]
     #[must_use]
-    pub fn digest(&self) -> [u8; 4] {
-        self.get_ref().digest
+    pub fn digest(&self, cell: &FixedCell) -> [u8; 4] {
+        Self::get_ref(cell).digest
     }
 
     /// Sets digest field.
     #[inline]
-    pub fn set_digest(&mut self, digest: [u8; 4]) {
-        self.get_mut().digest = digest;
+    pub fn set_digest(&self, cell: &mut FixedCell, digest: [u8; 4]) {
+        Self::get_mut(cell).digest = digest;
     }
 
     /// Gets recognized field.
     #[inline]
     #[must_use]
-    pub fn recognized(&self) -> [u8; 2] {
-        self.get_ref().recognized
+    pub fn recognized(&self, cell: &FixedCell) -> [u8; 2] {
+        Self::get_ref(cell).recognized
     }
 
     /// Sets recognized field.
     #[inline]
-    pub fn set_recognized(&mut self, value: [u8; 2]) {
-        self.get_mut().recognized = value;
-    }
-}
-
-/// V0 relay type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct V0;
-
-impl IntoRelayWrapper for V0 {
-    type RefWrapperTarget<'a> = V0Wrapper;
-    type RefWrapper<'a> = &'a V0Wrapper;
-    type MutWrapperTarget<'a> = V0Wrapper;
-    type MutWrapper<'a> = &'a mut V0Wrapper;
-
-    fn wrap<'a>(&self, cell: &'a FixedCell) -> Self::RefWrapper<'a> {
-        cell.into()
-    }
-
-    fn wrap_mut<'a>(&self, cell: &'a mut FixedCell) -> Self::MutWrapper<'a> {
-        cell.into()
+    pub fn set_recognized(&self, cell: &mut FixedCell, value: [u8; 2]) {
+        Self::get_mut(cell).recognized = value;
     }
 }
