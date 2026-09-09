@@ -29,7 +29,7 @@ impl<V: DynRelayVersion> TryFromRelay<V> for Data<V> {
         let Some(cell) = AutoReturnCell(cell) else { return Ok(None) };
         let cell = cell.cell();
         if version.command(cell) != ID {
-            Ok(None)
+            return Ok(None);
         }
         let stream_id = NonZeroU16::new(version.stream_id(cell)).ok_or(ZeroStreamID)?;
         version.data_checked(cell).ok_or(CellFormatError)?;
@@ -87,6 +87,7 @@ impl<V: DynRelayVersion> Data<V> {
         let l = u16::try_from(data.len()).expect("data is too long");
         version.data_padding_mut(&mut cell).get_mut(..data.len()).expect("data is too long").copy_from_slice(data);
         version.set_len(&mut cell, l);
+        version.set_command(&mut cell, ID);
         version.set_stream_id(&mut cell, stream_id.into());
         Self { stream_id, cell, version }
     }
