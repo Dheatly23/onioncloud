@@ -27,12 +27,12 @@ impl<V: DynRelayVersion> TryFromRelay<V> for Data<V> {
 
     fn try_from_relay_versioned(version: V, cell: &mut Option<FixedCell>) -> Result<Option<Self>, Self::Error> {
         let Some(cell) = AutoReturnCell(cell) else { return Ok(None) };
-        let cell = cell.cell();
-        if version.command(cell) != ID {
+        let c = cell.cell();
+        if version.command(c) != ID {
             return Ok(None);
         }
-        let stream_id = NonZeroU16::new(version.stream_id(cell)).ok_or(ZeroStreamID)?;
-        version.data_checked(cell).ok_or(CellFormatError)?;
+        let stream_id = NonZeroU16::new(version.stream_id(c)).ok_or(ZeroStreamID)?;
+        version.data_checked(c).ok_or(CellFormatError)?;
         Ok(Some(Self {
             stream_id,
             cell: cell.into_inner(),
