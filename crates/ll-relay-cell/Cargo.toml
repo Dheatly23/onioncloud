@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 base64ct.workspace = true
 onioncloud-ll-cell.workspace = true
+rand.workspace = true
 thiserror.workspace = true
 
 [dependencies.zerocopy]

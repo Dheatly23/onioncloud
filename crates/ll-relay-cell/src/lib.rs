@@ -4,6 +4,7 @@ use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::mem::ManuallyDrop;
 
 use onioncloud_ll_cell::fixed::FixedCell;
+use rand::{CryptoRng, RngCore};
 
 pub mod error;
 mod traits;
@@ -56,5 +57,23 @@ impl<'a> AutoReturnCell<'a> {
         let mut this = ManuallyDrop::new(self);
         // SAFETY: cell will not be used again.
         unsafe { ManuallyDrop::take(&mut this.c) }
+    }
+}
+
+/// Fill padding with random bytes.
+#[inline]
+pub fn fill_padding(
+    cell: &mut FixedCell,
+    version: &impl DynRelayVersion,
+    rng: &mut (impl RngCore + CryptoRng),
+) {
+    let l = version.len(cell);
+    if let Some(s) = version.data_padding_mut(cell).get_mut(l as usize..) {
+        if let Some((s, r)) = s.split_first_chunk_mut::<4>() {
+            s.fill(0);
+            rng.fill_bytes(r);
+        } else {
+            s.fill(0);
+        }
     }
 }
