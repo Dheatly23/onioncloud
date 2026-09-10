@@ -257,6 +257,9 @@ pub enum EndReason {
     Notdirectory,
 }
 
+/// Cast end reason ID into [`EndReason`].
+///
+/// Passes through ID if it does not correspond to any known ID.
 impl TryFrom<u8> for EndReason {
     type Error = u8;
 
@@ -282,6 +285,9 @@ impl TryFrom<u8> for EndReason {
 }
 
 impl EndReason {
+    /// Gets end reason ID.
+    #[inline]
+    #[must_use]
     pub fn as_u8(&self) -> u8 {
         match self {
             Self::Misc           =>  1,
