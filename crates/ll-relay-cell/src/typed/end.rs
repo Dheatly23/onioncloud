@@ -1,19 +1,17 @@
 //! `END` relay cell.
 
-use std::ops::{Deref, DerefMut};
-use std::mem::size_of;
-use std::num::NonZeroU16;
 use std::net::IpAddr;
+use std::num::NonZeroU16;
 
 use onioncloud_ll_cell::fixed::FixedCell;
 use zerocopy::byteorder::big_endian::U32;
-use zerocopy::{transmute_ref, FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned, transmute_ref};
 
-use crate::traits::{RelayVersion, DynRelayVersion};
+use crate::AutoReturnCell;
+use crate::error::{CellCastError, CellFormatError, ZeroStreamID};
+use crate::traits::{DynRelayVersion, TryFromRelay};
 use crate::v0::V0;
 use crate::v1::V1;
-use crate::AutoReturnCell;
-use crate::error::{CellCastError, ZeroStreamID, CellFormatError};
 
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned)]
 #[repr(C)]
@@ -44,14 +42,21 @@ pub struct End<V = V0> {
 impl<V: DynRelayVersion> TryFromRelay<V> for End<V> {
     type Error = CellCastError;
 
-    fn try_from_relay_versioned(version: V, cell: &mut Option<FixedCell>) -> Result<Option<Self>, Self::Error> {
-        let Some(cell) = AutoReturnCell(cell) else { return Ok(None) };
+    fn try_from_relay_versioned(
+        version: V,
+        cell: &mut Option<FixedCell>,
+    ) -> Result<Option<Self>, Self::Error> {
+        let Some(cell) = AutoReturnCell::new(cell) else {
+            return Ok(None);
+        };
         let c = cell.cell();
         if version.command(c) != ID {
             return Ok(None);
         }
         let stream_id = NonZeroU16::new(version.stream_id(c)).ok_or(ZeroStreamID)?;
-        version.data_checked(c).ok_or(CellFormatError)?;
+        version
+            .data_checked(c)
+            .ok_or_else(CellFormatError::default)?;
         Ok(Some(Self {
             stream_id,
             cell: cell.into_inner(),
@@ -71,15 +76,15 @@ impl End<V0> {
     /// Create new [`End`] with relay version 0 and end reason.
     #[inline]
     #[must_use]
-    pub fn with_reason_v0(mut cell: FixedCell, stream_id: NonZeroU16, reason: EndReason) -> Self {
-        Self::with_reason(cell, V0, reason)
+    pub fn with_reason_v0(cell: FixedCell, stream_id: NonZeroU16, reason: EndReason) -> Self {
+        Self::with_reason(cell, V0, stream_id, reason)
     }
 
     /// Create new [`End`] with relay version 0.
     #[inline]
     #[must_use]
-    pub fn without_reason_v0(mut cell: FixedCell, stream_id: NonZeroU16) -> Self {
-        Self::without_reason(cell, V0)
+    pub fn without_reason_v0(cell: FixedCell, stream_id: NonZeroU16) -> Self {
+        Self::without_reason(cell, V0, stream_id)
     }
 }
 
@@ -87,14 +92,14 @@ impl End<V1> {
     /// Create new [`End`] with relay version 1 and end reason.
     #[inline]
     #[must_use]
-    pub fn with_reason_v1(mut cell: FixedCell, stream_id: NonZeroU16, reason: EndReason) -> Self {
+    pub fn with_reason_v1(cell: FixedCell, stream_id: NonZeroU16, reason: EndReason) -> Self {
         Self::with_reason(cell, V1, stream_id, reason)
     }
 
     /// Create new [`End`] with relay version 1.
     #[inline]
     #[must_use]
-    pub fn without_reason_v1(mut cell: FixedCell, stream_id: NonZeroU16) -> Self {
+    pub fn without_reason_v1(cell: FixedCell, stream_id: NonZeroU16) -> Self {
         Self::without_reason(cell, V1, stream_id)
     }
 }
@@ -102,23 +107,34 @@ impl End<V1> {
 impl<V: DynRelayVersion> End<V> {
     /// Create new [`End`] with end reason.
     #[must_use]
-    pub fn with_reason(mut cell: FixedCell, version: V, stream_id: NonZeroU16, reason: EndReason) -> Self {
+    pub fn with_reason(
+        mut cell: FixedCell,
+        version: V,
+        stream_id: NonZeroU16,
+        reason: EndReason,
+    ) -> Self {
         let data = version.data_padding_mut(&mut cell);
         match reason {
-            EndReason::Exitpolicy(Some(ExitPolicyData { ip: IpAddr::V4(ip), ttl })) => {
+            EndReason::Exitpolicy(Some(ExitPolicyData {
+                ip: IpAddr::V4(ip),
+                ttl,
+            })) => {
                 let s = EndReasonExitPolicyV4 {
                     reason: 4,
-                    ip: ip.into(),
+                    ip: ip.octets(),
                     ttl: U32::new(ttl),
                 };
                 let s = s.as_bytes();
                 data[..s.len()].copy_from_slice(s);
                 version.set_len(&mut cell, s.len().try_into().unwrap());
             }
-            EndReason::Exitpolicy(Some(ExitPolicyData { ip: IpAddr::V6(ip), ttl })) => {
+            EndReason::Exitpolicy(Some(ExitPolicyData {
+                ip: IpAddr::V6(ip),
+                ttl,
+            })) => {
                 let s = EndReasonExitPolicyV6 {
                     reason: 4,
-                    ip: ip.into(),
+                    ip: ip.octets(),
                     ttl: U32::new(ttl),
                 };
                 let s = s.as_bytes();
@@ -126,14 +142,18 @@ impl<V: DynRelayVersion> End<V> {
                 version.set_len(&mut cell, s.len().try_into().unwrap());
             }
             r => {
-                data[0] = r.into();
+                data[0] = r.as_u8();
                 version.set_len(&mut cell, 1);
             }
         }
 
         version.set_command(&mut cell, ID);
         version.set_stream_id(&mut cell, stream_id.into());
-        Self { stream_id, cell, version }
+        Self {
+            stream_id,
+            cell,
+            version,
+        }
     }
 
     /// Create new [`End`] without end reason.
@@ -142,7 +162,11 @@ impl<V: DynRelayVersion> End<V> {
         version.set_len(&mut cell, 0);
         version.set_command(&mut cell, ID);
         version.set_stream_id(&mut cell, stream_id.into());
-        Self { stream_id, cell, version }
+        Self {
+            stream_id,
+            cell,
+            version,
+        }
     }
 
     /// Gets end reason.
@@ -151,7 +175,10 @@ impl<V: DynRelayVersion> End<V> {
     #[inline]
     #[must_use]
     pub fn reason(&self) -> Option<EndReason> {
-        let [r, mut s @ ..] = self.version.data(&self.cell) else { return None };
+        let [r, s @ ..] = self.version.data(&self.cell) else {
+            return None;
+        };
+        let mut s = s;
         let mut reason = EndReason::try_from(*r).ok()?;
         if let EndReason::Exitpolicy(ref mut data) = reason {
             let ip = if let Some((a, r)) = s.split_first_chunk::<16>() {
@@ -188,22 +215,6 @@ impl<V: DynRelayVersion> End<V> {
     pub fn set_stream_id(&mut self, stream_id: NonZeroU16) {
         self.stream_id = stream_id;
         self.version.set_stream_id(&mut self.cell, stream_id.into());
-    }
-}
-
-impl<V: RelayVersion> End<V> {
-    /// Gets reference to data and padding.
-    #[inline]
-    #[must_use]
-    pub fn data_padding(&self) -> &V::End {
-        self.version.data_padding(&self.cell)
-    }
-
-    /// Gets mutable reference to data and padding.
-    #[inline]
-    #[must_use]
-    pub fn data_padding_mut(&mut self) -> &mut V::End {
-        self.version.data_padding_mut(&mut self.cell)
     }
 }
 
@@ -253,7 +264,7 @@ pub enum EndReason {
     Connreset,
     /// Sent when closing connection because of Tor protocol violations.
     Torprotocol,
-    /// Client sent RELAY_BEGIN_DIR to a non-directory relay.
+    /// Client sent `RELAY_BEGIN_DIR` to a non-directory relay.
     Notdirectory,
 }
 
@@ -265,15 +276,15 @@ impl TryFrom<u8> for EndReason {
 
     fn try_from(v: u8) -> Result<Self, u8> {
         match v {
-             1 => Ok(Self::Misc),
-             2 => Ok(Self::Resolvefailed),
-             3 => Ok(Self::Connectrefused),
-             4 => Ok(Self::Exitpolicy(None)),
-             5 => Ok(Self::Destroy),
-             6 => Ok(Self::Done),
-             7 => Ok(Self::Timeout),
-             8 => Ok(Self::Noroute),
-             9 => Ok(Self::Hibernating),
+            1 => Ok(Self::Misc),
+            2 => Ok(Self::Resolvefailed),
+            3 => Ok(Self::Connectrefused),
+            4 => Ok(Self::Exitpolicy(None)),
+            5 => Ok(Self::Destroy),
+            6 => Ok(Self::Done),
+            7 => Ok(Self::Timeout),
+            8 => Ok(Self::Noroute),
+            9 => Ok(Self::Hibernating),
             10 => Ok(Self::Internal),
             11 => Ok(Self::Resourcelimit),
             12 => Ok(Self::Connreset),
@@ -290,30 +301,55 @@ impl EndReason {
     #[must_use]
     pub fn as_u8(&self) -> u8 {
         match self {
-            Self::Misc           =>  1,
-            Self::Resolvefailed  =>  2,
-            Self::Connectrefused =>  3,
-            Self::Exitpolicy(_)  =>  4,
-            Self::Destroy        =>  5,
-            Self::Done           =>  6,
-            Self::Timeout        =>  7,
-            Self::Noroute        =>  8,
-            Self::Hibernating    =>  9,
-            Self::Internal       => 10,
-            Self::Resourcelimit  => 11,
-            Self::Connreset      => 12,
-            Self::Torprotocol    => 13,
-            Self::Notdirectory   => 14,
+            Self::Misc => 1,
+            Self::Resolvefailed => 2,
+            Self::Connectrefused => 3,
+            Self::Exitpolicy(_) => 4,
+            Self::Destroy => 5,
+            Self::Done => 6,
+            Self::Timeout => 7,
+            Self::Noroute => 8,
+            Self::Hibernating => 9,
+            Self::Internal => 10,
+            Self::Resourcelimit => 11,
+            Self::Connreset => 12,
+            Self::Torprotocol => 13,
+            Self::Notdirectory => 14,
         }
     }
 }
 
 /// Exit policy end data.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ExitPolicyData {
     /// IP Address.
     pub ip: IpAddr,
     /// Time-to-live.
     pub ttl: u32,
+}
+
+impl Default for ExitPolicyData {
+    fn default() -> Self {
+        Self {
+            ip: IpAddr::V4([0; 4].into()),
+            ttl: 0,
+        }
+    }
+}
+
+impl ExitPolicyData {
+    /// Sets IP address.
+    #[must_use]
+    pub fn with_ip(mut self, ip: IpAddr) -> Self {
+        self.ip = ip;
+        self
+    }
+
+    /// Sets TTL.
+    #[must_use]
+    pub fn with_ttl(mut self, ttl: u32) -> Self {
+        self.ttl = ttl;
+        self
+    }
 }

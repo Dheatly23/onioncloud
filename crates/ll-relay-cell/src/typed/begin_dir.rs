@@ -1,16 +1,14 @@
 //! `BEGIN_DIR` relay cell.
 
-use std::ops::{Deref, DerefMut};
-use std::mem::size_of;
 use std::num::NonZeroU16;
 
 use onioncloud_ll_cell::fixed::FixedCell;
 
-use crate::traits::{RelayVersion, DynRelayVersion};
+use crate::AutoReturnCell;
+use crate::error::{CellCastError, CellFormatError, ZeroStreamID};
+use crate::traits::{DynRelayVersion, TryFromRelay};
 use crate::v0::V0;
 use crate::v1::V1;
-use crate::AutoReturnCell;
-use crate::error::{CellCastError, ZeroStreamID, CellFormatError};
 
 /// `BEGIN_DIR` relay ID.
 pub const ID: u8 = 13;
@@ -25,14 +23,21 @@ pub struct BeginDir<V = V0> {
 impl<V: DynRelayVersion> TryFromRelay<V> for BeginDir<V> {
     type Error = CellCastError;
 
-    fn try_from_relay_versioned(version: V, cell: &mut Option<FixedCell>) -> Result<Option<Self>, Self::Error> {
-        let Some(cell) = AutoReturnCell(cell) else { return Ok(None) };
+    fn try_from_relay_versioned(
+        version: V,
+        cell: &mut Option<FixedCell>,
+    ) -> Result<Option<Self>, Self::Error> {
+        let Some(cell) = AutoReturnCell::new(cell) else {
+            return Ok(None);
+        };
         let c = cell.cell();
         if version.command(c) != ID {
             return Ok(None);
         }
-        let stream_id = NonZeroU16::new(version.stream_id(cell)).ok_or(ZeroStreamID)?;
-        version.data_checked(c).ok_or(CellFormatError)?;
+        let stream_id = NonZeroU16::new(version.stream_id(c)).ok_or(ZeroStreamID)?;
+        version
+            .data_checked(c)
+            .ok_or_else(CellFormatError::default)?;
         let mut cell = cell.into_inner();
         version.set_len(&mut cell, 0);
         Ok(Some(Self {
@@ -54,8 +59,7 @@ impl BeginDir<V0> {
     /// Create new [`BeginDir`] with relay version 0.
     #[inline]
     #[must_use]
-    pub fn new_v0(mut cell: FixedCell, stream_id: NonZeroU16) -> Self {
-        assert!(data.len() <= size_of::<<V0 as RelayVersion>::Data>(), "data is too long");
+    pub fn new_v0(cell: FixedCell, stream_id: NonZeroU16) -> Self {
         Self::new(cell, V0, stream_id)
     }
 }
@@ -64,8 +68,7 @@ impl BeginDir<V1> {
     /// Create new [`BeginDir`] with relay version 1.
     #[inline]
     #[must_use]
-    pub fn new_v1(mut cell: FixedCell, stream_id: NonZeroU16) -> Self {
-        assert!(data.len() <= size_of::<<V1 as RelayVersion>::Data>(), "data is too long");
+    pub fn new_v1(cell: FixedCell, stream_id: NonZeroU16) -> Self {
         Self::new(cell, V1, stream_id)
     }
 }
@@ -77,7 +80,11 @@ impl<V: DynRelayVersion> BeginDir<V> {
         version.set_len(&mut cell, 0);
         version.set_command(&mut cell, ID);
         version.set_stream_id(&mut cell, stream_id.into());
-        Self { stream_id, cell, version }
+        Self {
+            stream_id,
+            cell,
+            version,
+        }
     }
 
     /// Gets stream ID.

@@ -1,16 +1,15 @@
 //! `DATA` relay cell.
 
-use std::ops::{Deref, DerefMut};
 use std::mem::size_of;
 use std::num::NonZeroU16;
 
 use onioncloud_ll_cell::fixed::FixedCell;
 
-use crate::traits::{RelayVersion, DynRelayVersion};
+use crate::AutoReturnCell;
+use crate::error::{CellCastError, CellFormatError, ZeroStreamID};
+use crate::traits::{DynRelayVersion, RelayVersion, TryFromRelay};
 use crate::v0::V0;
 use crate::v1::V1;
-use crate::AutoReturnCell;
-use crate::error::{CellCastError, ZeroStreamID, CellFormatError};
 
 /// `DATA` relay ID.
 pub const ID: u8 = 2;
@@ -25,14 +24,21 @@ pub struct Data<V = V0> {
 impl<V: DynRelayVersion> TryFromRelay<V> for Data<V> {
     type Error = CellCastError;
 
-    fn try_from_relay_versioned(version: V, cell: &mut Option<FixedCell>) -> Result<Option<Self>, Self::Error> {
-        let Some(cell) = AutoReturnCell(cell) else { return Ok(None) };
+    fn try_from_relay_versioned(
+        version: V,
+        cell: &mut Option<FixedCell>,
+    ) -> Result<Option<Self>, Self::Error> {
+        let Some(cell) = AutoReturnCell::new(cell) else {
+            return Ok(None);
+        };
         let c = cell.cell();
         if version.command(c) != ID {
             return Ok(None);
         }
         let stream_id = NonZeroU16::new(version.stream_id(c)).ok_or(ZeroStreamID)?;
-        version.data_checked(c).ok_or(CellFormatError)?;
+        version
+            .data_checked(c)
+            .ok_or_else(CellFormatError::default)?;
         Ok(Some(Self {
             stream_id,
             cell: cell.into_inner(),
@@ -56,8 +62,11 @@ impl Data<V0> {
     /// Panics if data does not fit cell.
     #[inline]
     #[must_use]
-    pub fn new_v0(mut cell: FixedCell, stream_id: NonZeroU16, data: &[u8]) -> Self {
-        assert!(data.len() <= size_of::<<V0 as RelayVersion>::Data>(), "data is too long");
+    pub fn new_v0(cell: FixedCell, stream_id: NonZeroU16, data: &[u8]) -> Self {
+        assert!(
+            data.len() <= size_of::<<V0 as RelayVersion>::Data>(),
+            "data is too long"
+        );
         Self::new(cell, V0, stream_id, data)
     }
 }
@@ -70,8 +79,11 @@ impl Data<V1> {
     /// Panics if data does not fit cell.
     #[inline]
     #[must_use]
-    pub fn new_v1(mut cell: FixedCell, stream_id: NonZeroU16, data: &[u8]) -> Self {
-        assert!(data.len() <= size_of::<<V1 as RelayVersion>::Data>(), "data is too long");
+    pub fn new_v1(cell: FixedCell, stream_id: NonZeroU16, data: &[u8]) -> Self {
+        assert!(
+            data.len() <= size_of::<<V1 as RelayVersion>::Data>(),
+            "data is too long"
+        );
         Self::new(cell, V1, stream_id, data)
     }
 }
@@ -85,11 +97,19 @@ impl<V: DynRelayVersion> Data<V> {
     #[must_use]
     pub fn new(mut cell: FixedCell, version: V, stream_id: NonZeroU16, data: &[u8]) -> Self {
         let l = u16::try_from(data.len()).expect("data is too long");
-        version.data_padding_mut(&mut cell).get_mut(..data.len()).expect("data is too long").copy_from_slice(data);
+        version
+            .data_padding_mut(&mut cell)
+            .get_mut(..data.len())
+            .expect("data is too long")
+            .copy_from_slice(data);
         version.set_len(&mut cell, l);
         version.set_command(&mut cell, ID);
         version.set_stream_id(&mut cell, stream_id.into());
-        Self { stream_id, cell, version }
+        Self {
+            stream_id,
+            cell,
+            version,
+        }
     }
 
     /// Gets reference to data.

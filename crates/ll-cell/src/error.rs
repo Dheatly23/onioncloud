@@ -15,37 +15,45 @@ pub struct VariableCellTooLong {
     pub(crate) len: NonZeroUsize,
 }
 
-#[derive(Error, Debug)]
+impl Default for VariableCellTooLong {
+    fn default() -> Self {
+        Self {
+            len: NonZeroUsize::MAX,
+        }
+    }
+}
+
+#[derive(Error, Debug, Default)]
 #[error("unknown IO error")]
 #[non_exhaustive]
 pub(crate) struct UnknownIoError;
 
 /// Invalid cell format.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Default)]
 #[error("invalid cell format")]
 #[non_exhaustive]
 pub struct CellFormatError;
 
 /// Circuit ID is not zero.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Default)]
 #[error("circuit ID is not zero")]
 #[non_exhaustive]
 pub struct NonZeroCircID;
 
 /// Circuit ID is zero.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Default)]
 #[error("circuit ID is zero")]
 #[non_exhaustive]
 pub struct ZeroCircID;
 
 /// Cell is fixed-sized.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Default)]
 #[error("cell is fixed-sized")]
 #[non_exhaustive]
 pub struct CellIsFixed;
 
 /// Cell is variable-sized.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Default)]
 #[error("cell is variable-sized")]
 #[non_exhaustive]
 pub struct CellIsVariable;
@@ -53,7 +61,7 @@ pub struct CellIsVariable;
 /// Cell reading is finished.
 ///
 /// Will be the error source of [`CellReadError::Io`] if cell reading is finished.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Default)]
 #[error("finished reading cell")]
 #[non_exhaustive]
 pub struct CellFinished;
