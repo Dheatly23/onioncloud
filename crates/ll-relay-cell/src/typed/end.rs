@@ -68,30 +68,34 @@ impl<V> From<End<V>> for FixedCell {
 }
 
 impl End<V0> {
-    /// Create new [`End`] with relay version 0.
-    ///
-    /// # Panics
-    ///
-    /// Panics if data does not fit cell.
+    /// Create new [`End`] with relay version 0 and end reason.
     #[inline]
     #[must_use]
-    pub fn new_v0(mut cell: FixedCell, stream_id: NonZeroU16, data: &[u8]) -> Self {
-        assert!(data.len() <= size_of::<<V0 as RelayVersion>::End>(), "data is too long");
-        Self::new(cell, V0, stream_id, data)
+    pub fn with_reason_v0(mut cell: FixedCell, stream_id: NonZeroU16, reason: EndReason) -> Self {
+        Self::with_reason(cell, V0, reason)
+    }
+
+    /// Create new [`End`] with relay version 0.
+    #[inline]
+    #[must_use]
+    pub fn without_reason_v0(mut cell: FixedCell, stream_id: NonZeroU16) -> Self {
+        Self::without_reason(cell, V0)
     }
 }
 
 impl End<V1> {
-    /// Create new [`End`] with relay version 1.
-    ///
-    /// # Panics
-    ///
-    /// Panics if data does not fit cell.
+    /// Create new [`End`] with relay version 1 and end reason.
     #[inline]
     #[must_use]
-    pub fn new_v1(mut cell: FixedCell, stream_id: NonZeroU16, data: &[u8]) -> Self {
-        assert!(data.len() <= size_of::<<V1 as RelayVersion>::End>(), "data is too long");
-        Self::new(cell, V1, stream_id, data)
+    pub fn with_reason_v1(mut cell: FixedCell, stream_id: NonZeroU16, reason: EndReason) -> Self {
+        Self::with_reason(cell, V1, stream_id, reason)
+    }
+
+    /// Create new [`End`] with relay version 1.
+    #[inline]
+    #[must_use]
+    pub fn without_reason_v1(mut cell: FixedCell, stream_id: NonZeroU16) -> Self {
+        Self::without_reason(cell, V1, stream_id)
     }
 }
 
