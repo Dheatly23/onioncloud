@@ -48,11 +48,13 @@ impl<'a> AutoReturnCell<'a> {
     }
 
     #[inline]
+    #[must_use]
     pub fn cell(&self) -> &FixedCell {
         &self.c
     }
 
     #[inline]
+    #[must_use]
     pub fn into_inner(self) -> FixedCell {
         let mut this = ManuallyDrop::new(self);
         // SAFETY: cell will not be used again.
