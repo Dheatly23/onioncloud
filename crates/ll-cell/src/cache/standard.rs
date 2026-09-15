@@ -182,10 +182,12 @@ mod tests {
                 loom::model(|| {
                     let cache = StandardCellCache::default();
 
-                    let h = (0..2).map(|_| {
-                        let cache = cache.clone();
-                        spawn(move || run(cache, 3))
-                    }).collect::<Vec<_>>();
+                    let h = (0..2)
+                        .map(|_| {
+                            let cache = cache.clone();
+                            spawn(move || run(cache, 3))
+                        })
+                        .collect::<Vec<_>>();
 
                     run(cache, 3);
 
@@ -193,7 +195,9 @@ mod tests {
                         i.join().unwrap();
                     }
 
-                    if let n = CNT.fetch_add(1, Relaxed) && n % 1000 == 0 {
+                    if let n = CNT.fetch_add(1, Relaxed)
+                        && n % 1000 == 0
+                    {
                         println!("Iteration {n} done!");
                     }
                 });
@@ -202,10 +206,12 @@ mod tests {
                 info!("Start");
                 let cache = StandardCellCache::default();
 
-                let h = (0..8).map(|_| {
-                    let cache = cache.clone();
-                    spawn(move || run(cache, 256))
-                }).collect::<Vec<_>>();
+                let h = (0..8)
+                    .map(|_| {
+                        let cache = cache.clone();
+                        spawn(move || run(cache, 256))
+                    })
+                    .collect::<Vec<_>>();
 
                 for i in h {
                     i.join().unwrap();
