@@ -367,6 +367,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "onioncloud-ll-relay-cell-fuzz"
+version = "0.0.0"
+dependencies = [
+ "arbitrary",
+ "libfuzzer-sys",
+ "onioncloud-ll-relay-cell",
+ "tracing",
+]
+
+[[package]]
 name = "onioncloud-tart"
 version = "0.1.0"
 dependencies = [

@@ -4,6 +4,7 @@ members = [
   "crates/ll-cell",
   "crates/ll-cell/fuzz",
   "crates/ll-relay-cell",
+  "crates/ll-relay-cell/fuzz",
   "crates/tart",
   "crates/tart/fuzz",
 ]

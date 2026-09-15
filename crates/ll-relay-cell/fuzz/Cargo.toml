@@ -1,0 +1,26 @@
+[package]
+name = "onioncloud-ll-relay-cell-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary.workspace = true
+libfuzzer-sys.workspace = true
+
+[dependencies.tracing]
+workspace = true
+features = ["max_level_off"]
+
+[dependencies.onioncloud-ll-relay-cell]
+path = ".."
+
+[[bin]]
+name = "validate_addr"
+path = "fuzz_targets/validate_addr.rs"
+test = false
+doc = false
+bench = false

@@ -280,6 +280,19 @@ pub enum ValidAddr<'a> {
 }
 
 /// Checks if address is a valid address.
+///
+/// ```
+/// # use std::assert_matches;
+/// # use onioncloud_ll_relay_cell::typed::connected::{validate_addr, ValidAddr};
+///
+/// // Valid address.
+/// let addr = validate_addr("example.com:9001").unwrap();
+/// assert_eq!(addr.addr, ValidAddr::Host("example.com"));
+/// assert_eq!(addr.port, 9001);
+///
+/// // Invalid address.
+/// assert_matches!(validate_addr("abc..com:123"), None);
+/// ```
 #[inline]
 #[must_use]
 pub fn validate_addr(addr: &str) -> Option<ValidAddrPort<'_>> {
@@ -304,12 +317,16 @@ pub fn validate_addr(addr: &str) -> Option<ValidAddrPort<'_>> {
     };
     let i = (7 - i) as usize + s.len().saturating_sub(8);
 
-    let port = addr[i + 1..].parse::<u16>().ok()?;
+    let p = &addr[i + 1..];
+    if !matches!(p.as_bytes().get(0), Some(b'1'..=b'9')) {
+        return None;
+    }
+    let port = p.parse::<u16>().ok()?;
 
     let a = &addr[..i];
     let addr = if let Ok(v) = a.parse::<IpAddr>() {
         ValidAddr::Ip(v)
-    } else if !check_addr(a.as_bytes()) {
+    } else if a.is_empty() || a.ends_with(".") || a.starts_with(".") || !check_addr(a.as_bytes()) {
         return None;
     } else {
         ValidAddr::Host(a)
@@ -383,6 +400,7 @@ fn check_addr(s: &[u8]) -> bool {
             return false;
         }
         has_dot = has_dot || is_dot;
+        ends_dot = is_dot;
 
         if !matches!(v, b'.' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z') {
             return false;
