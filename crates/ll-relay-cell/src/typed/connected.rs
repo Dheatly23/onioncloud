@@ -1,5 +1,6 @@
 //! `CONNECTED` relay cell.
 
+use std::net::IpAddr;
 use std::num::NonZeroU16;
 use std::ops::{BitOr, BitOrAssign};
 use std::str::{from_utf8, from_utf8_unchecked};
@@ -112,11 +113,15 @@ impl<V: DynRelayVersion> Connected<V> {
         else {
             return None;
         };
-        let b: &mut U32 = transmute_mut!(r.first_chunk_mut::<4>()?);
-        let l = u16::try_from(a.len() + 5).ok()?;
+
+        let mut l = u16::try_from(a.len()).ok()?.checked_add(1)?;
+        if let Flags(f @ 1..) = data.flags {
+            let b: &mut U32 = transmute_mut!(r.first_chunk_mut::<4>()?);
+            l = l.checked_add(4)?;
+            b.set(f);
+        }
         a.copy_from_slice(data.addr.as_bytes());
         *n = 0;
-        b.set(data.flags.into());
 
         version.set_len(&mut cell, l);
         version.set_command(&mut cell, ID);
@@ -192,6 +197,8 @@ impl<V> Connected<V> {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ConnectedData<'a> {
     /// Address and port in format of `ADDR:PORT`.
+    ///
+    /// NOTE: Address format is not validated when creating cell. Manually check using [`validate_addr`].
     pub addr: &'a str,
     /// Flags.
     pub flags: Flags,
@@ -250,6 +257,139 @@ fn check_data(s: &[u8]) -> Option<u16> {
         return None;
     }
     Some(l)
+}
+
+/// Valid address and port.
+#[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ValidAddrPort<'a> {
+    /// Address.
+    pub addr: ValidAddr<'a>,
+    /// Port.
+    pub port: u16,
+}
+
+/// Valid address.
+#[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ValidAddr<'a> {
+    /// Parsed IP address.
+    Ip(IpAddr),
+    /// DNS hostname.
+    Host(&'a str),
+}
+
+/// Checks if address is a valid address.
+#[inline]
+#[must_use]
+pub fn validate_addr(addr: &str) -> Option<ValidAddrPort<'_>> {
+    let s = addr.as_bytes();
+    let a = if let Some(s) = s.last_chunk::<8>() {
+        *s
+    } else {
+        let mut v = [0u8; 8];
+        v[..s.len()].copy_from_slice(s);
+        v
+    };
+
+    // Use USIMD
+    let mut t = u64::from_le_bytes(a);
+    t ^= const { !bcast(b':') };
+    t &= t >> 4;
+    t &= t >> 2;
+    t &= t >> 1;
+    t &= 0x0101_0101_0101_0101;
+    let i @ 0..8 = t.leading_zeros() / 8 else {
+        return None;
+    };
+    let i = (7 - i) as usize + s.len().saturating_sub(8);
+
+    let port = addr[i + 1..].parse::<u16>().ok()?;
+
+    let a = &addr[..i];
+    let addr = if let Ok(v) = a.parse::<IpAddr>() {
+        ValidAddr::Ip(v)
+    } else if !check_addr(a.as_bytes()) {
+        return None;
+    } else {
+        ValidAddr::Host(a)
+    };
+
+    Some(ValidAddrPort { addr, port })
+}
+
+const fn bcast(v: u8) -> u64 {
+    let mut c = v as u64;
+    c |= c << 8;
+    c |= c << 16;
+    c |= c << 32;
+    c
+}
+
+#[expect(clippy::inline_always)]
+#[inline(always)]
+fn check_addr(s: &[u8]) -> bool {
+    let mut s = s;
+    let mut ends_dot = false;
+    let mut has_dot = false;
+    while let Some((a, r)) = s.split_first_chunk::<8>() {
+        s = r;
+        let v = u64::from_le_bytes(*a);
+
+        if v & 0x8080_8080_8080_8080 != 0 {
+            return false;
+        }
+
+        let mut t = v ^ const { !bcast(b'.') };
+        t &= t >> 4;
+        t &= t >> 2;
+        t &= t >> 1;
+        t &= 0x0101_0101_0101_0101;
+        let is_dot = t;
+
+        has_dot = has_dot || is_dot != 0;
+        if is_dot & ((is_dot << 8) | u64::from(ends_dot)) != 0 {
+            return false;
+        }
+        ends_dot = (is_dot >> 56) as u8 != 0;
+
+        t = const { bcast(128 - b'0') } + v;
+        t &= const { bcast(128 + b'9') } - v;
+        t >>= 7;
+        t &= 0x0101_0101_0101_0101;
+        let is_num = t;
+
+        t = const { bcast(128 - b'a') } + v;
+        t &= const { bcast(128 + b'z') } - v;
+        t >>= 7;
+        t &= 0x0101_0101_0101_0101;
+        let is_lower = t;
+
+        t = const { bcast(128 - b'A') } + v;
+        t &= const { bcast(128 + b'Z') } - v;
+        t >>= 7;
+        t &= 0x0101_0101_0101_0101;
+        let is_upper = t;
+
+        let is_invalid = !(is_dot | is_num | is_lower | is_upper) & 0x0101_0101_0101_0101;
+        if is_invalid != 0 {
+            return false;
+        }
+    }
+
+    for &v in s {
+        let is_dot = v == b'.';
+        if ends_dot && is_dot {
+            return false;
+        }
+        has_dot = has_dot || is_dot;
+
+        if !matches!(v, b'.' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z') {
+            return false;
+        }
+    }
+
+    has_dot
 }
 
 #[cfg(test)]
