@@ -9,7 +9,7 @@ use onioncloud_ll_relay_cell::typed::connected::{ValidAddr, validate_addr};
 fn check_addr(s: &str) -> Option<(ValidAddr<'_>, u16)> {
     let (a, p) = s.rsplit_once(':')?;
 
-    if !matches!(p.as_bytes().get(0), Some(b'1'..=b'9')) {
+    if !matches!(p.as_bytes(), [b'0'..=b'9'] | [b'1'..=b'9', _, ..]) {
         return None;
     }
     let port = p.parse::<u16>().ok()?;

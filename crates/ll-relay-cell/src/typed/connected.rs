@@ -306,22 +306,45 @@ pub fn validate_addr(addr: &str) -> Option<ValidAddrPort<'_>> {
     };
 
     // Use USIMD
-    let mut t = u64::from_le_bytes(a);
-    t ^= const { !bcast(b':') };
+    let v = u64::from_le_bytes(a);
+    let mut t = v ^ const { !bcast(b':') };
     t &= t >> 4;
     t &= t >> 2;
     t &= t >> 1;
     t &= 0x0101_0101_0101_0101;
-    let i @ 0..8 = t.leading_zeros() / 8 else {
+    let j @ 1..8 = t.leading_zeros() as u8 / 8 else {
         return None;
     };
-    let i = (7 - i) as usize + s.len().saturating_sub(8);
+    let i = (7 - j) as usize + s.len().saturating_sub(8);
 
-    let p = &addr[i + 1..];
-    if !matches!(p.as_bytes().get(0), Some(b'1'..=b'9')) {
+    if v & 0x8080_8080_8080_8080 != 0 {
         return None;
     }
-    let port = p.parse::<u16>().ok()?;
+    t = v >> ((8 - j) * 8);
+    if t as u8 == b'0' && t >> 8 != 0 {
+        return None;
+    }
+    let sh = 8 - s.len().min(8) as u8;
+    let m = match 8 - j + sh {
+        s @ 0..=7 => u64::MAX >> (s * 8),
+        _ => return None,
+    };
+    t = v.swap_bytes() >> (sh * 8);
+    t = const { bcast(128 - b'0') } + t;
+    if !t & m & 0x8080_8080_8080_8080 != 0 {
+        return None;
+    }
+    t &= m & 0x7f7f_7f7f_7f7f_7f7f;
+    let u = (t | 0x8080_8080_8080_8080) - const { bcast(10) };
+    if u & 0x8080_8080_8080_8080 != 0 {
+        return None;
+    }
+    t += (t * 10) >> 8;
+    t &= 0x00ff_00ff_00ff;
+    let mut port = t as u32 & 0xffff;
+    port = port.checked_add(((t >> 16) as u32 & 0xffff) * 100)?;
+    port = port.checked_add((t >> 32) as u32 * 10_000)?;
+    let port = u16::try_from(port).ok()?;
 
     let a = &addr[..i];
     let addr = if let Ok(v) = a.parse::<IpAddr>() {
