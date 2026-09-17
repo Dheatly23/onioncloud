@@ -1,0 +1,78 @@
+[package]
+name = "onioncloud-ll-cell-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary.workspace = true
+futures-util.workspace = true
+libfuzzer-sys.workspace = true
+pin-project.workspace = true
+zerocopy.workspace = true
+
+[dependencies.base64ct]
+workspace = true
+features = ["alloc"]
+
+[dependencies.tracing]
+workspace = true
+features = ["max_level_off"]
+
+[dependencies.onioncloud-ll-cell]
+path = ".."
+
+[dependencies.onioncloud-tart]
+path = "../../tart"
+
+[[bin]]
+name = "create2_new"
+path = "fuzz_targets/create2_new.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cast_fixed"
+path = "fuzz_targets/cast_fixed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cast_variable"
+path = "fuzz_targets/cast_variable.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "certs_new"
+path = "fuzz_targets/certs_new.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "netinfo_new"
+path = "fuzz_targets/netinfo_new.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "print_cell"
+path = "fuzz_targets/print_cell.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "read_write"
+path = "fuzz_targets/read_write.rs"
+test = false
+doc = false
+bench = false
