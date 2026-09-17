@@ -3,6 +3,7 @@
 use std::net::IpAddr;
 use std::num::NonZeroU16;
 use std::ops::{BitOr, BitOrAssign};
+use std::ptr::from_ref;
 use std::str::{from_utf8, from_utf8_unchecked};
 
 use onioncloud_ll_cell::fixed::FixedCell;
@@ -320,21 +321,20 @@ pub fn validate_addr(addr: &str) -> Option<ValidAddrPort<'_>> {
     if v & 0x8080_8080_8080_8080 != 0 {
         return None;
     }
-    t = v >> ((8 - j) * 8);
-    if t as u8 == b'0' && t >> 8 != 0 {
-        return None;
-    }
     let sh = 8 - s.len().min(8) as u8;
-    let m = match 8 - j + sh {
-        s @ 0..=7 => u64::MAX >> (s * 8),
-        _ => return None,
-    };
+    let s @ 3..8 = 8 - j + sh else { return None };
+    let m = u64::MAX >> (s * 8);
     t = v.swap_bytes() >> (sh * 8);
     t = const { bcast(128 - b'0') } + t;
     if !t & m & 0x8080_8080_8080_8080 != 0 {
         return None;
     }
     t &= m & 0x7f7f_7f7f_7f7f_7f7f;
+    if let Some(s) = 6u8.checked_sub(s)
+        && t >> (s * 8) < 0x0100
+    {
+        return None;
+    }
     let u = (t | 0x8080_8080_8080_8080) - const { bcast(10) };
     if u & 0x8080_8080_8080_8080 != 0 {
         return None;
@@ -369,12 +369,33 @@ const fn bcast(v: u8) -> u64 {
 #[expect(clippy::inline_always)]
 #[inline(always)]
 fn check_addr(s: &[u8]) -> bool {
-    let mut s = s;
     let mut ends_dot = false;
     let mut has_dot = false;
-    while let Some((a, r)) = s.split_first_chunk::<8>() {
-        s = r;
-        let v = u64::from_le_bytes(*a);
+
+    let mut i = 0;
+    while let Some(p) = s.get(i)
+        && !from_ref(p).cast::<u64>().is_aligned()
+    {
+        let v = *p;
+        i += 1;
+
+        let is_dot = v == b'.';
+        if ends_dot && is_dot {
+            return false;
+        }
+        has_dot = has_dot || is_dot;
+        ends_dot = is_dot;
+
+        if !matches!(v, b'.' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z') {
+            return false;
+        }
+    }
+
+    while let Some(p) = s.get(i..i + 8) {
+        let p = from_ref(p).cast::<u64>();
+        debug_assert!(p.is_aligned(), "pointer {p:?} is not aligned");
+        let v = unsafe { *p };
+        i += 8;
 
         if v & 0x8080_8080_8080_8080 != 0 {
             return false;
@@ -417,7 +438,9 @@ fn check_addr(s: &[u8]) -> bool {
         }
     }
 
-    for &v in s {
+    while let Some(&v) = s.get(i) {
+        i += 1;
+
         let is_dot = v == b'.';
         if ends_dot && is_dot {
             return false;
