@@ -294,7 +294,7 @@ pub enum ValidAddr<'a> {
 /// // Invalid address.
 /// assert_matches!(validate_addr("abc..com:123"), None);
 /// ```
-#[inline]
+//#[inline]
 #[must_use]
 pub fn validate_addr(addr: &str) -> Option<ValidAddrPort<'_>> {
     let s = addr.as_bytes();
@@ -308,11 +308,7 @@ pub fn validate_addr(addr: &str) -> Option<ValidAddrPort<'_>> {
 
     // Use USIMD
     let v = u64::from_le_bytes(a);
-    let mut t = v ^ const { !bcast(b':') };
-    t &= t >> 4;
-    t &= t >> 2;
-    t &= t >> 1;
-    t &= 0x0101_0101_0101_0101;
+    let mut t = eq::<b':'>(v);
     let j @ 1..8 = t.leading_zeros() as u8 / 8 else {
         return None;
     };
@@ -325,7 +321,7 @@ pub fn validate_addr(addr: &str) -> Option<ValidAddrPort<'_>> {
     let s @ 3..8 = 8 - j + sh else { return None };
     let m = u64::MAX >> (s * 8);
     t = v.swap_bytes() >> (sh * 8);
-    t = const { bcast(128 - b'0') } + t;
+    t += const { bcast(128 - b'0') };
     if !t & m & 0x8080_8080_8080_8080 != 0 {
         return None;
     }
@@ -349,7 +345,7 @@ pub fn validate_addr(addr: &str) -> Option<ValidAddrPort<'_>> {
     let a = &addr[..i];
     let addr = if let Ok(v) = a.parse::<IpAddr>() {
         ValidAddr::Ip(v)
-    } else if a.is_empty() || a.ends_with(".") || a.starts_with(".") || !check_addr(a.as_bytes()) {
+    } else if matches!(a.as_bytes(), [] | [b'.', ..] | [.., b'.']) || !check_addr(a.as_bytes()) {
         return None;
     } else {
         ValidAddr::Host(a)
@@ -358,12 +354,30 @@ pub fn validate_addr(addr: &str) -> Option<ValidAddrPort<'_>> {
     Some(ValidAddrPort { addr, port })
 }
 
+#[inline]
 const fn bcast(v: u8) -> u64 {
     let mut c = v as u64;
     c |= c << 8;
     c |= c << 16;
     c |= c << 32;
     c
+}
+
+#[inline]
+const fn eq<const C: u8>(v: u64) -> u64 {
+    let mut t = v ^ !bcast(C);
+    t &= t >> 4;
+    t &= t >> 2;
+    t &= t >> 1;
+    t & 0x0101_0101_0101_0101
+}
+
+#[inline]
+const fn between<const A: u8, const Z: u8>(v: u64) -> u64 {
+    let mut t = bcast(128 - A) + v;
+    t &= bcast(128 + Z) - v;
+    t >>= 7;
+    t & 0x0101_0101_0101_0101
 }
 
 #[expect(clippy::inline_always)]
@@ -374,7 +388,7 @@ fn check_addr(s: &[u8]) -> bool {
 
     let mut i = 0;
     while let Some(p) = s.get(i)
-        && !from_ref(p).cast::<u64>().is_aligned()
+        && !from_ref(p).cast::<u128>().is_aligned()
     {
         let v = *p;
         i += 1;
@@ -391,49 +405,41 @@ fn check_addr(s: &[u8]) -> bool {
         }
     }
 
-    while let Some(p) = s.get(i..i + 8) {
-        let p = from_ref(p).cast::<u64>();
+    while let Some(p) = s.get(i..i + 16) {
+        let p = from_ref(p).cast::<u128>();
         debug_assert!(p.is_aligned(), "pointer {p:?} is not aligned");
-        let v = unsafe { *p };
-        i += 8;
+        // SAFETY: Pointer is aligned.
+        let v = u128::from_le(unsafe { *p });
+        i += 16;
 
-        if v & 0x8080_8080_8080_8080 != 0 {
+        if v & 0x8080_8080_8080_8080_8080_8080_8080_8080 != 0 {
             return false;
         }
+        let v1 = v as u64;
+        let v2 = (v >> 64) as u64;
 
-        let mut t = v ^ const { !bcast(b'.') };
-        t &= t >> 4;
-        t &= t >> 2;
-        t &= t >> 1;
-        t &= 0x0101_0101_0101_0101;
-        let is_dot = t;
+        let is_dot1 = eq::<b'.'>(v1);
+        let is_dot2 = eq::<b'.'>(v2);
 
-        has_dot = has_dot || is_dot != 0;
-        if is_dot & ((is_dot << 8) | u64::from(ends_dot)) != 0 {
+        let t = u128::from(is_dot1) | (u128::from(is_dot2) << 64);
+        has_dot = has_dot || t != 0;
+        if t & ((t << 8) | u128::from(ends_dot)) != 0 {
             return false;
         }
-        ends_dot = (is_dot >> 56) as u8 != 0;
+        ends_dot = (is_dot2 >> 56) as u8 != 0;
 
-        t = const { bcast(128 - b'0') } + v;
-        t &= const { bcast(128 + b'9') } - v;
-        t >>= 7;
-        t &= 0x0101_0101_0101_0101;
-        let is_num = t;
+        let is_num1 = between::<b'0', b'9'>(v1);
+        let is_num2 = between::<b'0', b'9'>(v2);
 
-        t = const { bcast(128 - b'a') } + v;
-        t &= const { bcast(128 + b'z') } - v;
-        t >>= 7;
-        t &= 0x0101_0101_0101_0101;
-        let is_lower = t;
+        let is_lower1 = between::<b'a', b'z'>(v1);
+        let is_lower2 = between::<b'a', b'z'>(v2);
 
-        t = const { bcast(128 - b'A') } + v;
-        t &= const { bcast(128 + b'Z') } - v;
-        t >>= 7;
-        t &= 0x0101_0101_0101_0101;
-        let is_upper = t;
+        let is_upper1 = between::<b'A', b'Z'>(v1);
+        let is_upper2 = between::<b'A', b'Z'>(v2);
 
-        let is_invalid = !(is_dot | is_num | is_lower | is_upper) & 0x0101_0101_0101_0101;
-        if is_invalid != 0 {
+        let is_invalid1 = !(is_dot1 | is_num1 | is_lower1 | is_upper1) & 0x0101_0101_0101_0101;
+        let is_invalid2 = !(is_dot2 | is_num2 | is_lower2 | is_upper2) & 0x0101_0101_0101_0101;
+        if is_invalid1 != 0 || is_invalid2 != 0 {
             return false;
         }
     }
