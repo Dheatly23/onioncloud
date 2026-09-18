@@ -333,7 +333,7 @@ pub enum PaddingNegotiatedData {
 
         /// Machine ID.
         ///
-        /// Correlates to [`PaddingNegotiated`] response.
+        /// Correlates to [`PaddingNegotiate`] request.
         machine_ctr: u32,
     },
 }
