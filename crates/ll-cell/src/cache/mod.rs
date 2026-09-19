@@ -327,7 +327,7 @@ impl<T: Cachable + Display, C: CellCache> Display for Cached<T, C> {
 
 impl<T: Cachable + Hash, C: CellCache> Hash for Cached<T, C> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        (*self.cell).hash(state)
+        (*self.cell).hash(state);
     }
 }
 
