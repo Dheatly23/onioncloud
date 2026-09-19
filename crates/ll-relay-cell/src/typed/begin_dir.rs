@@ -38,11 +38,9 @@ impl<V: DynRelayVersion> TryFromRelay<V> for BeginDir<V> {
         version
             .data_checked(c)
             .ok_or_else(CellFormatError::default)?;
-        let mut cell = cell.into_inner();
-        version.set_len(&mut cell, 0);
         Ok(Some(Self {
             stream_id,
-            cell,
+            cell: cell.into_inner(),
             version,
         }))
     }

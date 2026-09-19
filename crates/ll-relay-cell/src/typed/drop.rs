@@ -37,9 +37,10 @@ impl<V: DynRelayVersion> TryFromRelay<V> for Drop<V> {
         version
             .data_checked(c)
             .ok_or_else(CellFormatError::default)?;
-        let mut cell = cell.into_inner();
-        version.set_len(&mut cell, 0);
-        Ok(Some(Self { cell, version }))
+        Ok(Some(Self {
+            cell: cell.into_inner(),
+            version,
+        }))
     }
 }
 
