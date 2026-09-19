@@ -10,9 +10,6 @@ use crate::traits::{DynRelayVersion, TryFromRelay};
 use crate::v0::V0;
 use crate::v1::V1;
 
-/// `BEGIN_DIR` relay ID.
-pub const ID: u8 = 13;
-
 /// `BEGIN_DIR` relay cell.
 pub struct BeginDir<V = V0> {
     stream_id: NonZeroU16,
@@ -31,7 +28,7 @@ impl<V: DynRelayVersion> TryFromRelay<V> for BeginDir<V> {
             return Ok(None);
         };
         let c = cell.cell();
-        if version.command(c) != ID {
+        if version.command(c) != Self::ID {
             return Ok(None);
         }
         let stream_id = NonZeroU16::new(version.stream_id(c)).ok_or(ZeroStreamID)?;
@@ -76,7 +73,7 @@ impl<V: DynRelayVersion> BeginDir<V> {
     #[must_use]
     pub fn new(mut cell: FixedCell, version: V, stream_id: NonZeroU16) -> Self {
         version.set_len(&mut cell, 0);
-        version.set_command(&mut cell, ID);
+        version.set_command(&mut cell, Self::ID);
         version.set_stream_id(&mut cell, stream_id.into());
         Self {
             stream_id,
@@ -101,6 +98,9 @@ impl<V: DynRelayVersion> BeginDir<V> {
 }
 
 impl<V> BeginDir<V> {
+    /// `BEGIN_DIR` relay ID.
+    pub const ID: u8 = 13;
+
     /// Gets reference to relay version.
     #[inline]
     #[must_use]

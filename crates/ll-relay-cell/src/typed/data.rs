@@ -11,9 +11,6 @@ use crate::traits::{DynRelayVersion, RelayVersion, TryFromRelay};
 use crate::v0::V0;
 use crate::v1::V1;
 
-/// `DATA` relay ID.
-pub const ID: u8 = 2;
-
 /// `DATA` relay cell.
 pub struct Data<V = V0> {
     stream_id: NonZeroU16,
@@ -32,7 +29,7 @@ impl<V: DynRelayVersion> TryFromRelay<V> for Data<V> {
             return Ok(None);
         };
         let c = cell.cell();
-        if version.command(c) != ID {
+        if version.command(c) != Self::ID {
             return Ok(None);
         }
         let stream_id = NonZeroU16::new(version.stream_id(c)).ok_or(ZeroStreamID)?;
@@ -103,7 +100,7 @@ impl<V: DynRelayVersion> Data<V> {
             .expect("data is too long")
             .copy_from_slice(data);
         version.set_len(&mut cell, l);
-        version.set_command(&mut cell, ID);
+        version.set_command(&mut cell, Self::ID);
         version.set_stream_id(&mut cell, stream_id.into());
         Self {
             stream_id,
@@ -172,6 +169,9 @@ impl<V: RelayVersion> Data<V> {
 }
 
 impl<V> Data<V> {
+    /// `DATA` relay ID.
+    pub const ID: u8 = 2;
+
     /// Gets reference to relay version.
     #[inline]
     #[must_use]

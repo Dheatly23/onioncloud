@@ -8,9 +8,6 @@ use crate::traits::{DynRelayVersion, TryFromRelay};
 use crate::v0::V0;
 use crate::v1::V1;
 
-/// `DROP` relay ID.
-pub const ID: u8 = 10;
-
 /// `DROP` relay cell.
 pub struct Drop<V = V0> {
     cell: FixedCell,
@@ -28,7 +25,7 @@ impl<V: DynRelayVersion> TryFromRelay<V> for Drop<V> {
             return Ok(None);
         };
         let c = cell.cell();
-        if version.command(c) != ID {
+        if version.command(c) != Self::ID {
             return Ok(None);
         }
         if version.stream_id(c) != 0 {
@@ -74,13 +71,16 @@ impl<V: DynRelayVersion> Drop<V> {
     #[must_use]
     pub fn new(mut cell: FixedCell, version: V) -> Self {
         version.set_len(&mut cell, 0);
-        version.set_command(&mut cell, ID);
+        version.set_command(&mut cell, Self::ID);
         version.set_stream_id(&mut cell, 0);
         Self { cell, version }
     }
 }
 
 impl<V> Drop<V> {
+    /// `DROP` relay ID.
+    pub const ID: u8 = 10;
+
     /// Gets reference to relay version.
     #[inline]
     #[must_use]

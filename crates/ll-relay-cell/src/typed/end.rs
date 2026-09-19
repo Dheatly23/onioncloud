@@ -29,9 +29,6 @@ struct EndReasonExitPolicyV6 {
     ttl: U32,
 }
 
-/// `END` relay ID.
-pub const ID: u8 = 3;
-
 /// `END` relay cell.
 pub struct End<V = V0> {
     stream_id: NonZeroU16,
@@ -50,7 +47,7 @@ impl<V: DynRelayVersion> TryFromRelay<V> for End<V> {
             return Ok(None);
         };
         let c = cell.cell();
-        if version.command(c) != ID {
+        if version.command(c) != Self::ID {
             return Ok(None);
         }
         let stream_id = NonZeroU16::new(version.stream_id(c)).ok_or(ZeroStreamID)?;
@@ -147,7 +144,7 @@ impl<V: DynRelayVersion> End<V> {
             }
         }
 
-        version.set_command(&mut cell, ID);
+        version.set_command(&mut cell, Self::ID);
         version.set_stream_id(&mut cell, stream_id.into());
         Self {
             stream_id,
@@ -160,7 +157,7 @@ impl<V: DynRelayVersion> End<V> {
     #[must_use]
     pub fn without_reason(mut cell: FixedCell, version: V, stream_id: NonZeroU16) -> Self {
         version.set_len(&mut cell, 0);
-        version.set_command(&mut cell, ID);
+        version.set_command(&mut cell, Self::ID);
         version.set_stream_id(&mut cell, stream_id.into());
         Self {
             stream_id,
@@ -219,6 +216,9 @@ impl<V: DynRelayVersion> End<V> {
 }
 
 impl<V> End<V> {
+    /// `END` relay ID.
+    pub const ID: u8 = 3;
+
     /// Gets reference to relay version.
     #[inline]
     #[must_use]

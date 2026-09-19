@@ -12,9 +12,6 @@ use crate::traits::{DynRelayVersion, RelayVersion, TryFromRelay};
 use crate::v0::V0;
 use crate::v1::V1;
 
-/// `SENDME` relay ID.
-pub const ID: u8 = 5;
-
 /// `SENDME` relay cell.
 pub struct Sendme<V = V0> {
     cell: FixedCell,
@@ -32,7 +29,7 @@ impl<V: DynRelayVersion> TryFromRelay<V> for Sendme<V> {
             return Ok(None);
         };
         let c = cell.cell();
-        if version.command(c) != ID {
+        if version.command(c) != Self::ID {
             return Ok(None);
         }
         let stream_id = NonZeroU16::new(version.stream_id(c));
@@ -113,7 +110,7 @@ impl<V: DynRelayVersion> Sendme<V> {
             }
         };
         version.set_len(&mut cell, l);
-        version.set_command(&mut cell, ID);
+        version.set_command(&mut cell, Self::ID);
         version.set_stream_id(&mut cell, 0);
         debug_assert!(check_data(version.data(&cell)), "invalid cell format");
         Self { cell, version }
@@ -123,7 +120,7 @@ impl<V: DynRelayVersion> Sendme<V> {
     #[must_use]
     pub fn new_stream(mut cell: FixedCell, version: V, stream_id: NonZeroU16) -> Self {
         version.set_len(&mut cell, 0);
-        version.set_command(&mut cell, ID);
+        version.set_command(&mut cell, Self::ID);
         version.set_stream_id(&mut cell, stream_id.into());
         debug_assert!(version.data(&cell).is_empty(), "invalid cell format");
         Self { cell, version }
@@ -192,6 +189,9 @@ impl<V: RelayVersion> Sendme<V> {
 }
 
 impl<V> Sendme<V> {
+    /// `SENDME` relay ID.
+    pub const ID: u8 = 5;
+
     /// Gets reference to relay version.
     #[inline]
     #[must_use]

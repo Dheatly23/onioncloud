@@ -14,9 +14,6 @@ use crate::traits::{DynRelayVersion, RelayVersion, TryFromRelay};
 use crate::v0::V0;
 use crate::v1::V1;
 
-/// `PADDING_NEGOTIATE` relay ID.
-pub const PADDING_NEGOTIATE_ID: u8 = 41;
-
 /// `PADDING_NEGOTIATE` relay cell.
 pub struct PaddingNegotiate<V = V0> {
     cell: FixedCell,
@@ -34,7 +31,7 @@ impl<V: DynRelayVersion> TryFromRelay<V> for PaddingNegotiate<V> {
             return Ok(None);
         };
         let c = cell.cell();
-        if version.command(c) != PADDING_NEGOTIATE_ID {
+        if version.command(c) != Self::ID {
             return Ok(None);
         }
         if version.stream_id(c) != 0 {
@@ -97,7 +94,7 @@ impl<V: DynRelayVersion> PaddingNegotiate<V> {
             }
         };
         version.set_len(&mut cell, l);
-        version.set_command(&mut cell, PADDING_NEGOTIATE_ID);
+        version.set_command(&mut cell, Self::ID);
         version.set_stream_id(&mut cell, 0);
         debug_assert!(
             check_padding_negotiate(version.data(&cell)),
@@ -144,6 +141,9 @@ impl<V: RelayVersion> PaddingNegotiate<V> {
 }
 
 impl<V> PaddingNegotiate<V> {
+    /// `PADDING_NEGOTIATE` relay ID.
+    pub const ID: u8 = 41;
+
     /// Gets reference to relay version.
     #[inline]
     #[must_use]
@@ -158,9 +158,6 @@ impl<V> PaddingNegotiate<V> {
         self.cell
     }
 }
-
-/// `PADDING_NEGOTIATED` relay ID.
-pub const PADDING_NEGOTIATED_ID: u8 = 42;
 
 /// `PADDING_NEGOTIATED` relay cell.
 pub struct PaddingNegotiated<V = V0> {
@@ -179,7 +176,7 @@ impl<V: DynRelayVersion> TryFromRelay<V> for PaddingNegotiated<V> {
             return Ok(None);
         };
         let c = cell.cell();
-        if version.command(c) != PADDING_NEGOTIATED_ID {
+        if version.command(c) != Self::ID {
             return Ok(None);
         }
         if version.stream_id(c) != 0 {
@@ -243,7 +240,7 @@ impl<V: DynRelayVersion> PaddingNegotiated<V> {
             }
         };
         version.set_len(&mut cell, l);
-        version.set_command(&mut cell, PADDING_NEGOTIATED_ID);
+        version.set_command(&mut cell, Self::ID);
         version.set_stream_id(&mut cell, 0);
         debug_assert!(
             check_padding_negotiated(version.data(&cell)),
@@ -290,6 +287,9 @@ impl<V: RelayVersion> PaddingNegotiated<V> {
 }
 
 impl<V> PaddingNegotiated<V> {
+    /// `PADDING_NEGOTIATED` relay ID.
+    pub const ID: u8 = 42;
+
     /// Gets reference to relay version.
     #[inline]
     #[must_use]

@@ -16,9 +16,6 @@ use crate::traits::{DynRelayVersion, TryFromRelay};
 use crate::v0::V0;
 use crate::v1::V1;
 
-/// `CONNECTED` relay ID.
-pub const ID: u8 = 4;
-
 /// `CONNECTED` relay cell.
 pub struct Connected<V = V0> {
     stream_id: NonZeroU16,
@@ -38,7 +35,7 @@ impl<V: DynRelayVersion> TryFromRelay<V> for Connected<V> {
             return Ok(None);
         };
         let c = cell.cell();
-        if version.command(c) != ID {
+        if version.command(c) != Self::ID {
             return Ok(None);
         }
         let stream_id = NonZeroU16::new(version.stream_id(c)).ok_or(ZeroStreamID)?;
@@ -125,7 +122,7 @@ impl<V: DynRelayVersion> Connected<V> {
         *n = 0;
 
         version.set_len(&mut cell, l);
-        version.set_command(&mut cell, ID);
+        version.set_command(&mut cell, Self::ID);
         version.set_stream_id(&mut cell, stream_id.into());
         debug_assert_eq!(
             check_data(version.data(&cell)).map(usize::from),
@@ -179,6 +176,9 @@ impl<V: DynRelayVersion> Connected<V> {
 }
 
 impl<V> Connected<V> {
+    /// `CONNECTED` relay ID.
+    pub const ID: u8 = 4;
+
     /// Gets reference to relay version.
     #[inline]
     #[must_use]
