@@ -11,12 +11,29 @@ cargo-fuzz = true
 arbitrary.workspace = true
 libfuzzer-sys.workspace = true
 
+[dependencies.onioncloud-ll-cell]
+workspace = true
+
+[dependencies.onioncloud-ll-relay-cell]
+workspace = true
+
 [dependencies.tracing]
 workspace = true
 features = ["max_level_off"]
 
-[dependencies.onioncloud-ll-relay-cell]
-path = ".."
+[dependencies.zerocopy]
+workspace = true
+features = [
+  "derive",
+  "std",
+]
+
+[[bin]]
+name = "cast_cell"
+path = "fuzz_targets/cast_cell.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "validate_addr"

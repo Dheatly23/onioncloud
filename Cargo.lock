@@ -372,8 +372,10 @@ version = "0.0.0"
 dependencies = [
  "arbitrary",
  "libfuzzer-sys",
+ "onioncloud-ll-cell",
  "onioncloud-ll-relay-cell",
  "tracing",
+ "zerocopy",
 ]
 
 [[package]]

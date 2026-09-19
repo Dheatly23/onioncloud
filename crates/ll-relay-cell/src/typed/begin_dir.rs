@@ -1,5 +1,6 @@
 //! `BEGIN_DIR` relay cell.
 
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::num::NonZeroU16;
 
 use onioncloud_ll_cell::fixed::FixedCell;
@@ -15,6 +16,15 @@ pub struct BeginDir<V = V0> {
     stream_id: NonZeroU16,
     cell: FixedCell,
     version: V,
+}
+
+impl<V: Debug> Debug for BeginDir<V> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("BeginDir")
+            .field("version", &self.version)
+            .field("stream_id", &self.stream_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<V: DynRelayVersion> TryFromRelay<V> for BeginDir<V> {
