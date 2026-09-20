@@ -18,7 +18,7 @@ pub struct BeginDir<V = V0> {
     version: V,
 }
 
-impl<V: Debug> Debug for BeginDir<V> {
+impl<V: Debug + DynRelayVersion> Debug for BeginDir<V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("BeginDir")
             .field("version", &self.version)

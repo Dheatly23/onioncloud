@@ -1,5 +1,6 @@
 //! `DATA` relay cell.
 
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::mem::size_of;
 use std::num::NonZeroU16;
 
@@ -8,6 +9,7 @@ use onioncloud_ll_cell::fixed::FixedCell;
 use crate::AutoReturnCell;
 use crate::error::{CellCastError, CellFormatError, ZeroStreamID};
 use crate::traits::{DynRelayVersion, RelayVersion, TryFromRelay};
+use crate::utils::base64u_encode;
 use crate::v0::V0;
 use crate::v1::V1;
 
@@ -16,6 +18,17 @@ pub struct Data<V = V0> {
     stream_id: NonZeroU16,
     cell: FixedCell,
     version: V,
+}
+
+impl<V: Debug + DynRelayVersion> Debug for Data<V> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let data = base64u_encode(self.data());
+        f.debug_struct("Data")
+            .field("version", &self.version)
+            .field("stream_id", &self.stream_id)
+            .field("data", &data)
+            .finish()
+    }
 }
 
 impl<V: DynRelayVersion> TryFromRelay<V> for Data<V> {

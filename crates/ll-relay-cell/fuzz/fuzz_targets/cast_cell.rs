@@ -114,20 +114,90 @@ fn cast_begin_dir(data: FixedCellData, cell: FixedCell, ver: Ver) {
     }
 }
 
+fn cast_drop(data: FixedCellData, cell: FixedCell, ver: Ver) {
+    if ver.stream_id(&cell) != 0 {
+        let mut cell = Some(cell);
+
+        assert_matches!(
+            Drop::try_from_relay_versioned(ver, &mut cell),
+            Err(CellCastError::NonZeroStreamID(_))
+        );
+        assert_matches!(cell, Some(_));
+    } else if ver.data_checked(&cell).is_none() {
+        let mut cell = Some(cell);
+
+        assert_matches!(
+            Drop::try_from_relay_versioned(ver, &mut cell),
+            Err(CellCastError::CellFormatError(_))
+        );
+        assert_matches!(cell, Some(_));
+    } else {
+        let mut cell = Some(cell);
+
+        let t = Drop::try_from_relay_versioned(ver, &mut cell)
+            .unwrap()
+            .unwrap();
+        assert_matches!(cell, None);
+
+        let cell = FixedCell::from(t);
+        assert_eq!(*cell.data(), data.0);
+    }
+}
+
+fn cast_data(data: FixedCellData, cell: FixedCell, ver: Ver) {
+    let Some(stream_id) = NonZeroU16::new(ver.stream_id(&cell)) else {
+        let mut cell = Some(cell);
+
+        assert_matches!(
+            Data::try_from_relay_versioned(ver, &mut cell),
+            Err(CellCastError::ZeroStreamID(_))
+        );
+        assert_matches!(cell, Some(_));
+        return;
+    };
+
+    let data = FixedCell::from(data);
+    let Some(s) = ver.data_checked(&data) else {
+        let mut cell = Some(cell);
+
+        assert_matches!(
+            Data::try_from_relay_versioned(ver, &mut cell),
+            Err(CellCastError::CellFormatError(_))
+        );
+        assert_matches!(cell, Some(_));
+        return;
+    };
+
+    let mut cell = Some(cell);
+
+    let t = Data::try_from_relay_versioned(ver, &mut cell)
+        .unwrap()
+        .unwrap();
+    assert_matches!(cell, None);
+
+    assert_eq!(t.stream_id(), stream_id);
+    assert_eq!(t.data(), s);
+
+    let cell = FixedCell::from(t);
+    assert_eq!(cell, data);
+}
+
 #[derive(Debug, Clone, Arbitrary)]
-struct Data {
+struct FuzzData {
     version: CellVersion,
     data: FixedCellData,
 }
 
-fuzz_target!(|data: Data| {
-    let Data { version, data } = data;
+fuzz_target!(|data: FuzzData| {
+    let FuzzData { version, data } = data;
     let version = Ver::from(version);
     let mut cell = FixedCell::from(data);
 
     dispatch! {
         (data, cell, version) {
             BeginDir => cast_begin_dir,
+            Drop => cast_drop,
+            Data => cast_data,
         }
     }
 });

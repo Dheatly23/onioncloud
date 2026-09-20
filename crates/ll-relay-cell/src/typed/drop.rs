@@ -1,5 +1,7 @@
 //! `DROP` relay cell.
 
+use std::fmt::{Debug, Formatter, Result as FmtResult};
+
 use onioncloud_ll_cell::fixed::FixedCell;
 
 use crate::AutoReturnCell;
@@ -12,6 +14,14 @@ use crate::v1::V1;
 pub struct Drop<V = V0> {
     cell: FixedCell,
     version: V,
+}
+
+impl<V: Debug + DynRelayVersion> Debug for Drop<V> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("Drop")
+            .field("version", &self.version)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<V: DynRelayVersion> TryFromRelay<V> for Drop<V> {
