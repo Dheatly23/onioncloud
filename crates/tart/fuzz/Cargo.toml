@@ -13,12 +13,12 @@ futures-util.workspace = true
 libfuzzer-sys.workspace = true
 pin-project.workspace = true
 
+[dependencies.onioncloud-tart]
+workspace = true
+
 [dependencies.tracing]
 workspace = true
 features = ["max_level_off"]
-
-[dependencies.onioncloud-tart]
-path = ".."
 
 [[bin]]
 name = "timer"

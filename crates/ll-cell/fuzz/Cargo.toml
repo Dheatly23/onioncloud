@@ -18,15 +18,15 @@ zerocopy.workspace = true
 workspace = true
 features = ["alloc"]
 
+[dependencies.onioncloud-ll-cell]
+workspace = true
+
+[dependencies.onioncloud-tart]
+workspace = true
+
 [dependencies.tracing]
 workspace = true
 features = ["max_level_off"]
-
-[dependencies.onioncloud-ll-cell]
-path = ".."
-
-[dependencies.onioncloud-tart]
-path = "../../tart"
 
 [[bin]]
 name = "create2_new"
