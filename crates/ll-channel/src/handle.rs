@@ -5,9 +5,12 @@ use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::task::Context;
+use std::thread::panicking;
 use std::time::Instant;
 
+use onioncloud_ll_cell::cache::{Cachable, CellCache, CellCacheExt as _};
 use onioncloud_ll_cell::cell::{Cell, CellHeader, CellTy};
+use tracing::warn;
 
 /// Circuit handler.
 pub trait CircuitHandle {
@@ -60,6 +63,24 @@ pub struct Handle<'a, 'b> {
     pub(crate) cell: Option<(CellTy, u8)>,
 
     pub(crate) _phantom: PhantomData<*mut u8>,
+}
+
+impl Drop for Handle<'_, '_> {
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        if !panicking() && self.cell.is_some() {
+            warn!("Handle dropped before received cell is taken. This might be a bug.");
+        }
+    }
+}
+
+impl Cachable for Handle<'_, '_> {
+    #[inline]
+    fn cache<C: ?Sized + CellCache>(mut self, c: &C) {
+        if let Some((t, _)) = self.cell.take() {
+            c.discard(t);
+        }
+    }
 }
 
 impl<'a, 'b> Handle<'a, 'b> {
@@ -140,24 +161,33 @@ pub struct Return {
     /// Cell to be send.
     pub(crate) cell: Option<(CellTy, u8)>,
 
-    pub(crate) _phantom: PhantomData<*mut u8>,
+    #[cfg(debug_assertions)]
+    circ_id: NonZeroU32,
+
+    _phantom: PhantomData<*mut u8>,
 }
 
-impl Default for Return {
+impl Cachable for Return {
     #[inline]
-    fn default() -> Self {
-        Self::new()
+    fn cache<C: ?Sized + CellCache>(mut self, c: &C) {
+        if let Some((t, _)) = self.cell.take() {
+            c.discard(t);
+        }
     }
 }
 
 impl Return {
     /// Creates new [`Return`].
     #[inline]
-    pub const fn new() -> Self {
+    pub fn new(handle: &Handle) -> Self {
+        let _ = handle;
+
         Self {
             is_shutdown: false,
             timeout: None,
             cell: None,
+            #[cfg(debug_assertions)]
+            circ_id: handle.circ_id,
             _phantom: PhantomData,
         }
     }
@@ -181,7 +211,15 @@ impl Return {
     /// **NOTE: DO NOT** set this unless [`Handle::send_ready`] returns [`true`]!
     /// Sending cell when controller is not ready will cause warning and the cell will be dropped.
     #[inline]
-    pub const fn with_cell(mut self, cell: Cell) -> Self {
+    pub fn with_cell(mut self, cell: Cell) -> Self {
+        #[cfg(debug_assertions)]
+        if cell.header.circuit != self.circ_id.into() {
+            warn!(
+                "Circuit ID to be send mismatch! This might be a bug. (expected: {}, got: {})",
+                self.circ_id, cell.header.circuit
+            );
+        }
+
         self.cell = Some((cell.data, cell.header.command));
         self
     }
