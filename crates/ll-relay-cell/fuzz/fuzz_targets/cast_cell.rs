@@ -79,7 +79,7 @@ macro_rules! dispatch {
     }
 }
 
-fn cast_begin_dir(data: FixedCellData, cell: FixedCell, ver: Ver) {
+fn cast_begin_dir(data: FixedCell, cell: FixedCell, ver: Ver) {
     let Some(stream_id) = NonZeroU16::new(ver.stream_id(&cell)) else {
         let mut cell = Some(cell);
 
@@ -110,11 +110,11 @@ fn cast_begin_dir(data: FixedCellData, cell: FixedCell, ver: Ver) {
         assert_eq!(t.stream_id(), stream_id);
 
         let cell = FixedCell::from(t);
-        assert_eq!(*cell.data(), data.0);
+        assert_eq!(cell, data);
     }
 }
 
-fn cast_drop(data: FixedCellData, cell: FixedCell, ver: Ver) {
+fn cast_drop(data: FixedCell, cell: FixedCell, ver: Ver) {
     if ver.stream_id(&cell) != 0 {
         let mut cell = Some(cell);
 
@@ -140,11 +140,11 @@ fn cast_drop(data: FixedCellData, cell: FixedCell, ver: Ver) {
         assert_matches!(cell, None);
 
         let cell = FixedCell::from(t);
-        assert_eq!(*cell.data(), data.0);
+        assert_eq!(cell, data);
     }
 }
 
-fn cast_data(data: FixedCellData, cell: FixedCell, ver: Ver) {
+fn cast_data(data: FixedCell, cell: FixedCell, ver: Ver) {
     let Some(stream_id) = NonZeroU16::new(ver.stream_id(&cell)) else {
         let mut cell = Some(cell);
 
@@ -156,7 +156,6 @@ fn cast_data(data: FixedCellData, cell: FixedCell, ver: Ver) {
         return;
     };
 
-    let data = FixedCell::from(data);
     let Some(s) = ver.data_checked(&data) else {
         let mut cell = Some(cell);
 
@@ -192,6 +191,7 @@ fuzz_target!(|data: FuzzData| {
     let FuzzData { version, data } = data;
     let version = Ver::from(version);
     let mut cell = FixedCell::from(data);
+    let data = cell.clone();
 
     dispatch! {
         (data, cell, version) {
