@@ -143,6 +143,108 @@ impl<'a, 'b> Handle<'a, 'b> {
     }
 }
 
+/// Builder for [`Handle`].
+#[derive(Debug, Default)]
+pub struct HandleBuilder<'a, 'b> {
+    /// Context.
+    ctx: Option<&'a mut Context<'b>>,
+
+    /// Circuit ID.
+    circ_id: Option<NonZeroU32>,
+
+    /// Current time.
+    time: Option<Instant>,
+
+    /// `true` if in the same poll cycle.
+    is_same_poll: bool,
+
+    /// `true` if timeout has been reached.
+    is_timeout: bool,
+
+    /// `true` if controller is ready to send cell.
+    send_ready: bool,
+
+    /// Cell that is received.
+    cell: Option<(CellTy, u8)>,
+}
+
+impl<'a, 'b> HandleBuilder<'a, 'b> {
+    /// Sets async context. **REQUIRED**
+    #[inline]
+    pub fn ctx(&mut self, ctx: &'a mut Context<'b>) -> &mut Self {
+        assert!(self.ctx.is_none(), "ctx has already been set");
+        self.ctx = Some(ctx);
+        self
+    }
+
+    /// Sets circuit ID. **REQUIRED**
+    #[inline]
+    pub fn circ_id(&mut self, circ_id: NonZeroU32) -> &mut Self {
+        assert!(self.circ_id.is_none(), "circ_id has already been set");
+        self.circ_id = Some(circ_id);
+        self
+    }
+
+    /// Sets current time. **REQUIRED**
+    #[inline]
+    pub fn time(&mut self, time: Instant) -> &mut Self {
+        assert!(self.time.is_none(), "time has already been set");
+        self.time = Some(time);
+        self
+    }
+
+    /// Marks in same poll cycle.
+    #[inline]
+    pub fn is_same_poll(&mut self, v: bool) -> &mut Self {
+        self.is_same_poll = v;
+        self
+    }
+
+    /// Marks timeout.
+    #[inline]
+    pub fn is_timeout(&mut self, v: bool) -> &mut Self {
+        self.is_timeout = v;
+        self
+    }
+
+    /// Marks ready to send cell.
+    #[inline]
+    pub fn send_ready(&mut self, v: bool) -> &mut Self {
+        self.send_ready = v;
+        self
+    }
+
+    /// Sets cell to be received.
+    #[inline]
+    pub fn cell(&mut self, cell: Cell) -> &mut Self {
+        assert!(self.cell.is_none(), "cell has already been set");
+        self.cell = Some((cell.data, cell.header.command));
+        self
+    }
+
+    /// Builds [`Handle`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if any of the required fields are not set.
+    #[inline]
+    #[must_use]
+    pub fn build(&mut self) -> Handle<'a, 'b> {
+        const REQ_NOT_SET: &str = "required field is not set";
+
+        Handle {
+            ctx: self.ctx.take().expect(REQ_NOT_SET),
+            circ_id: self.circ_id.take().expect(REQ_NOT_SET),
+            time: self.time.take().expect(REQ_NOT_SET),
+            cell: self.cell.take(),
+            is_same_poll: self.is_same_poll,
+            is_timeout: self.is_timeout,
+            send_ready: self.send_ready,
+            _phantom: PhantomData,
+        }
+    }
+}
+
 /// Return value of [`CircuitHandle::handle`].
 #[derive(Debug)]
 #[must_use = "handle return value must be returned"]
