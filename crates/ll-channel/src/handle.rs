@@ -194,14 +194,14 @@ impl Return {
 
     /// Marks handler for shutdown.
     #[inline]
-    pub const fn shutdown(mut self) -> Self {
+    pub fn shutdown(mut self) -> Self {
         self.is_shutdown = true;
         self
     }
 
     /// Sets timeout for handler.
     #[inline]
-    pub const fn with_timeout(mut self, timeout: Instant) -> Self {
+    pub fn with_timeout(mut self, timeout: Instant) -> Self {
         self.timeout = Some(timeout);
         self
     }
@@ -211,7 +211,7 @@ impl Return {
     /// **NOTE: DO NOT** set this unless [`Handle::send_ready`] returns [`true`]!
     /// Sending cell when controller is not ready will cause warning and the cell will be dropped.
     #[inline]
-    pub fn with_cell(mut self, cell: Cell) -> Self {
+    pub fn set_cell(&mut self, cell: Cell) {
         #[cfg(debug_assertions)]
         if cell.header.circuit != self.circ_id.into() {
             warn!(
@@ -221,6 +221,14 @@ impl Return {
         }
 
         self.cell = Some((cell.data, cell.header.command));
+    }
+
+    /// Sets cell to be send.
+    ///
+    /// This is a convenience method around [`Self::set_cell`].
+    #[inline]
+    pub fn with_cell(mut self, cell: Cell) -> Self {
+        self.set_cell(cell);
         self
     }
 }
