@@ -1,0 +1,29 @@
+[package]
+name = "onioncloud-ll-channel"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64ct.workspace = true
+onioncloud-ll-cell.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dependencies.loom]
+workspace = true
+optional = true
+
+[dev-dependencies]
+onioncloud-tart.workspace = true
+
+[dev-dependencies.test-log]
+workspace = true
+features = [
+  "trace",
+]
+
+[features]
+loom = ["dep:loom"]

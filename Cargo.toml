@@ -3,8 +3,10 @@ resolver = "3"
 members = [
   "crates/ll-cell",
   "crates/ll-cell/fuzz",
+  "crates/ll-channel",
   "crates/ll-relay-cell",
   "crates/ll-relay-cell/fuzz",
+  "crates/rt",
   "crates/tart",
   "crates/tart/fuzz",
 ]
@@ -154,6 +156,10 @@ path = "crates/ll-cell"
 [workspace.dependencies.onioncloud-ll-relay-cell]
 version = "0.1.0"
 path = "crates/ll-relay-cell"
+
+[workspace.dependencies.onioncloud-runtime]
+version = "0.1.0"
+path = "crates/rt"
 
 [workspace.dependencies.onioncloud-tart]
 version = "0.1.0"
