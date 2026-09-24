@@ -423,9 +423,12 @@ name = "onioncloud-ll-channel"
 version = "0.1.0"
 dependencies = [
  "base64ct",
+ "futures-io",
  "loom",
  "onioncloud-ll-cell",
+ "onioncloud-runtime",
  "onioncloud-tart",
+ "pin-project",
  "test-log",
  "thiserror",
  "tracing",

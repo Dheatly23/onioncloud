@@ -1,19 +1,20 @@
-//! Circuit handler trait definition.
+//! Channel handle trait definition.
 
 use std::error::Error;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::io::{ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::marker::PhantomData;
+use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::pin::Pin;
-use std::task::Context;
+use std::task::{Context, Poll};
 use std::thread::panicking;
 use std::time::Instant;
 
-use onioncloud_ll_cell::cache::{Cachable, CellCache, CellCacheExt as _};
-use onioncloud_ll_cell::cell::{Cell, CellHeader, CellTy};
-use tracing::warn;
+use crate::stream::Stream;
 
-/// Circuit handler.
-pub trait CircuitHandle {
+/// Channel handler trait.
+pub trait ChannelHandle {
     /// Error type.
     type Error: Error;
 
@@ -25,163 +26,153 @@ pub trait CircuitHandle {
     /// use [`Handle::is_same_poll`] to optimize it.
     fn handle(self: Pin<&mut Self>, args: Handle) -> Result<Return, Self::Error>;
 
-    /// Returns [`true`] if handle is ready to receive cell.
-    ///
-    /// If it returns [`false`], it is guaranteed that the next [`Self::handle`] call will not contain cell.
-    /// (AKA [`Handle::take_cell`] will return [`None`]).
-    ///
-    /// NOTE: Not receiving cell may blocks other handlers from receiving their cell.
-    fn recv_ready(&self) -> bool;
-
-    /// Sets circuit ID.
+    /// Sets peer address.
     ///
     /// This will be called when setting up circuit handle for the first time.
-    fn set_circ_id(self: Pin<&mut Self>, circ_id: NonZeroU32) -> Result<(), Self::Error>;
-}
-
-#[derive(Debug)]
-pub struct Handle<'a, 'b> {
-    /// Context.
-    pub(crate) ctx: &'a mut Context<'b>,
-
-    /// Circuit ID.
-    pub(crate) circ_id: NonZeroU32,
-
-    /// Current time.
-    pub(crate) time: Instant,
-
-    /// `true` if in the same poll cycle.
-    pub(crate) is_same_poll: bool,
-
-    /// `true` if timeout has been reached.
-    pub(crate) is_timeout: bool,
-
-    /// `true` if controller is ready to send cell.
-    pub(crate) send_ready: bool,
-
-    /// Cell that is received.
-    pub(crate) cell: Option<(CellTy, u8)>,
-
-    pub(crate) _phantom: PhantomData<*mut u8>,
-}
-
-impl Drop for Handle<'_, '_> {
-    fn drop(&mut self) {
-        #[cfg(debug_assertions)]
-        if !panicking() && self.cell.is_some() {
-            warn!("Handle dropped before received cell is taken. This might be a bug.");
-        }
+    fn set_peer_addr(self: Pin<&mut Self>, peer_addr: SocketAddr) -> Result<(), Self::Error> {
+        let _ = peer_addr;
+        Ok(())
     }
 }
 
-impl Cachable for Handle<'_, '_> {
+/// Channel handle parameters.
+pub struct Handle<'a, 'b> {
+    /// Context.
+    cx: &'a mut Context<'b>,
+
+    /// Stream.
+    stream: Pin<&'a mut dyn Stream>,
+
+    /// Current time.
+    time: Instant,
+
+    /// Is same poll cycle?
+    is_same_poll: bool,
+
+    /// Is timeout.
+    is_timeout: bool,
+
+    _phantom: PhantomData<*mut u8>,
+}
+
+impl Debug for Handle<'_, '_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("Handle")
+            .field("cx", &self.cx)
+            .field("time", &self.time)
+            .field("is_same_poll", &self.is_same_poll)
+            .field("is_timeout", &self.is_timeout)
+            .finish_non_exhaustive()
+    }
+}
+
+#[inline]
+fn poll_wrap<T>(v: Poll<IoResult<T>>) -> IoResult<T> {
+    match v {
+        Poll::Ready(v) => v,
+        Poll::Pending => Err(ErrorKind::WouldBlock.into()),
+    }
+}
+
+impl Read for Handle<'_, '_> {
     #[inline]
-    fn cache<C: ?Sized + CellCache>(mut self, c: &C) {
-        if let Some((t, _)) = self.cell.take() {
-            c.discard(t);
-        }
+    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+        poll_wrap(self.stream.as_mut().poll_read(self.cx, buf))
+    }
+
+    #[inline]
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> IoResult<usize> {
+        poll_wrap(self.stream.as_mut().poll_read_vectored(self.cx, bufs))
+    }
+}
+
+impl Write for Handle<'_, '_> {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+        poll_wrap(self.stream.as_mut().poll_write(self.cx, buf))
+    }
+
+    #[inline]
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> IoResult<usize> {
+        poll_wrap(self.stream.as_mut().poll_write_vectored(self.cx, bufs))
+    }
+
+    #[inline]
+    fn flush(&mut self) -> IoResult<()> {
+        poll_wrap(self.stream.as_mut().poll_flush(self.cx))
     }
 }
 
 impl<'a, 'b> Handle<'a, 'b> {
-    /// Gets current async context.
+    /// Gets async context.
     #[inline]
-    pub fn ctx(&mut self) -> &mut Context<'b> {
-        self.ctx
-    }
-
-    /// Gets circuit ID.
-    ///
-    /// It is guaranteed to be the same for the lifetime of [`CircuitHandle`].
-    #[inline]
-    pub fn circ_id(&self) -> NonZeroU32 {
-        self.circ_id
+    pub fn cx(&mut self) -> &mut Context<'b> {
+        self.cx
     }
 
     /// Gets current time.
-    ///
-    /// Use this instead of checking global time [`Instant::now`] because runtime may do time emulation.
     #[inline]
     pub fn time(&self) -> Instant {
         self.time
     }
 
-    /// Checks if timeout had fired.
+    /// Gets peer address.
     #[inline]
-    pub fn is_timeout(&self) -> bool {
-        self.is_timeout
+    pub fn peer_addr(&self) -> SocketAddr {
+        self.stream.peer_addr()
     }
 
-    /// Checks if handle is in the same polling cycle.
-    ///
-    /// # About Polling Cycle
-    ///
-    /// Channel controller may poll it's [`CircuitHandle`] multiple times within the same [`poll`](`std::future::Future::poll`) call.
-    /// Implementers of [`CircuitHandle`] may do optimization (eg. not repolling channel) by using this flag.
+    /// Checks if it's in the same poll cycle.
     #[inline]
     pub fn is_same_poll(&self) -> bool {
         self.is_same_poll
     }
 
-    /// Takes received cell destined to this handle.
+    /// Checks if timeout has expired.
     #[inline]
-    pub fn take_cell(&mut self) -> Option<Cell> {
-        let (cell, command) = self.cell.take()?;
-        Some(Cell::new(
-            CellHeader {
-                command,
-                circuit: self.circ_id.get(),
-            },
-            cell,
-        ))
-    }
-
-    /// Checks if controller is ready to send cell.
-    #[inline]
-    pub fn send_ready(&self) -> bool {
-        self.send_ready
+    pub fn is_timeout(&self) -> bool {
+        self.is_timeout
     }
 }
 
-/// Builder for [`Handle`].
-#[derive(Debug, Default)]
+/// [`Handle`] builder.
+#[derive(Default)]
+#[must_use]
 pub struct HandleBuilder<'a, 'b> {
     /// Context.
-    ctx: Option<&'a mut Context<'b>>,
+    cx: Option<&'a mut Context<'b>>,
 
-    /// Circuit ID.
-    circ_id: Option<NonZeroU32>,
+    /// Stream.
+    stream: Option<Pin<&'a mut dyn Stream>>,
 
     /// Current time.
     time: Option<Instant>,
 
-    /// `true` if in the same poll cycle.
+    /// Is same poll cycle?
     is_same_poll: bool,
 
-    /// `true` if timeout has been reached.
+    /// Is timeout.
     is_timeout: bool,
 
-    /// `true` if controller is ready to send cell.
-    send_ready: bool,
+    built: bool,
 
-    /// Cell that is received.
-    cell: Option<(CellTy, u8)>,
+    _phantom: PhantomData<*mut u8>,
 }
 
 impl<'a, 'b> HandleBuilder<'a, 'b> {
     /// Sets async context. **REQUIRED**
     #[inline]
-    pub fn ctx(&mut self, ctx: &'a mut Context<'b>) -> &mut Self {
-        assert!(self.ctx.is_none(), "ctx has already been set");
-        self.ctx = Some(ctx);
+    pub fn cx(&mut self, cx: &'a mut Context<'b>) -> &mut Self {
+        assert!(self.cx.is_none(), "cx has already been set");
+        self.cx = Some(cx);
         self
     }
 
-    /// Sets circuit ID. **REQUIRED**
+    /// Sets network stream. **REQUIRED**
     #[inline]
-    pub fn circ_id(&mut self, circ_id: NonZeroU32) -> &mut Self {
-        assert!(self.circ_id.is_none(), "circ_id has already been set");
-        self.circ_id = Some(circ_id);
+    pub fn stream(&mut self, stream: Pin<&'a mut dyn Stream>) -> &mut Self {
+        assert!(self.stream.is_none(), "stream has already been set");
+        self.stream = Some(stream);
         self
     }
 
@@ -193,89 +184,60 @@ impl<'a, 'b> HandleBuilder<'a, 'b> {
         self
     }
 
-    /// Marks in same poll cycle.
+    /// Sets `is_same_poll`.
     #[inline]
     pub fn is_same_poll(&mut self, v: bool) -> &mut Self {
         self.is_same_poll = v;
         self
     }
 
-    /// Marks timeout.
+    /// Sets `is_timeout`.
     #[inline]
     pub fn is_timeout(&mut self, v: bool) -> &mut Self {
         self.is_timeout = v;
         self
     }
 
-    /// Marks ready to send cell.
-    #[inline]
-    pub fn send_ready(&mut self, v: bool) -> &mut Self {
-        self.send_ready = v;
-        self
-    }
-
-    /// Sets cell to be received.
-    #[inline]
-    pub fn cell(&mut self, cell: Cell) -> &mut Self {
-        assert!(self.cell.is_none(), "cell has already been set");
-        self.cell = Some((cell.data, cell.header.command));
-        self
-    }
-
     /// Builds [`Handle`].
+    ///
+    /// Builder **should not** be reused afterwards.
     ///
     /// # Panics
     ///
-    /// Panics if any of the required fields are not set.
+    /// Panics if any of the required fields is not set.
     #[inline]
     #[must_use]
     pub fn build(&mut self) -> Handle<'a, 'b> {
-        const REQ_NOT_SET: &str = "required field is not set";
+        assert!(!self.built, "builder must not be reused");
+        self.built = true;
 
+        const REQ_MSG: &str = "required field is not set";
         Handle {
-            ctx: self.ctx.take().expect(REQ_NOT_SET),
-            circ_id: self.circ_id.take().expect(REQ_NOT_SET),
-            time: self.time.take().expect(REQ_NOT_SET),
-            cell: self.cell.take(),
+            cx: self.cx.take().expect(REQ_MSG),
+            stream: self.stream.take().expect(REQ_MSG),
+            time: self.time.take().expect(REQ_MSG),
             is_same_poll: self.is_same_poll,
             is_timeout: self.is_timeout,
-            send_ready: self.send_ready,
             _phantom: PhantomData,
         }
     }
 }
 
-/// Return value of [`CircuitHandle::handle`].
+/// Channel handler return value.
 #[derive(Debug)]
-#[must_use = "handle return value must be returned"]
+#[must_use]
 pub struct Return {
-    /// Set this to shut down handle.
+    /// Set to `true` to initiate shutdown sequence.
     ///
-    /// After shutdown, handle will be dropped.
+    /// Once shutdown is signalled, the handler will be dropped.
     pub is_shutdown: bool,
 
-    /// Set or reset timeout.
+    /// Timeout epoch.
     ///
-    /// If set to [`None`], it cancels the current timeout.
-    /// Keep setting it to ensure timeout is not cancelled.
+    /// If set to [`None`], timeout will be reset and never expires.
     pub timeout: Option<Instant>,
 
-    /// Cell to be send.
-    pub(crate) cell: Option<(CellTy, u8)>,
-
-    #[cfg(debug_assertions)]
-    circ_id: NonZeroU32,
-
     _phantom: PhantomData<*mut u8>,
-}
-
-impl Cachable for Return {
-    #[inline]
-    fn cache<C: ?Sized + CellCache>(mut self, c: &C) {
-        if let Some((t, _)) = self.cell.take() {
-            c.discard(t);
-        }
-    }
 }
 
 impl Return {
@@ -283,54 +245,24 @@ impl Return {
     #[inline]
     pub fn new(handle: &Handle) -> Self {
         let _ = handle;
-
         Self {
             is_shutdown: false,
             timeout: None,
-            cell: None,
-            #[cfg(debug_assertions)]
-            circ_id: handle.circ_id,
             _phantom: PhantomData,
         }
     }
 
-    /// Marks handler for shutdown.
+    /// Sets shutdown flag.
     #[inline]
-    pub fn shutdown(mut self) -> Self {
+    pub fn with_shutdown(mut self) -> Self {
         self.is_shutdown = true;
         self
     }
 
-    /// Sets timeout for handler.
+    /// Sets timeout.
     #[inline]
-    pub fn with_timeout(mut self, timeout: Instant) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
-    /// Sets cell to be send.
-    ///
-    /// **NOTE: DO NOT** set this unless [`Handle::send_ready`] returns [`true`]!
-    /// Sending cell when controller is not ready will cause warning and the cell will be dropped.
-    #[inline]
-    pub fn set_cell(&mut self, cell: Cell) {
-        #[cfg(debug_assertions)]
-        if cell.header.circuit != self.circ_id.into() {
-            warn!(
-                "Circuit ID to be send mismatch! This might be a bug. (expected: {}, got: {})",
-                self.circ_id, cell.header.circuit
-            );
-        }
-
-        self.cell = Some((cell.data, cell.header.command));
-    }
-
-    /// Sets cell to be send.
-    ///
-    /// This is a convenience method around [`Self::set_cell`].
-    #[inline]
-    pub fn with_cell(mut self, cell: Cell) -> Self {
-        self.set_cell(cell);
+    pub fn with_timeout(mut self, timeout: Option<Instant>) -> Self {
+        self.timeout = timeout;
         self
     }
 }
