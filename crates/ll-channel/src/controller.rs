@@ -1,12 +1,15 @@
 //! Channel controller type.
 
 use std::error::Error;
+use std::io::Result as IoResult;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::Poll::*;
 use std::task::{Context, Poll};
 
-use onioncloud_runtime::{HasTimer, Timer};
+use onioncloud_runtime::{HasNetwork, HasTimer, Timer};
 use pin_project::pin_project;
+use tracing::field::Field;
 use tracing::{Span, info_span, instrument, trace};
 
 use crate::handle::{ChannelHandle, HandleBuilder};
@@ -15,13 +18,14 @@ use crate::stream::Stream;
 /// Channel controller.
 #[pin_project(project = ChannelControllerProj)]
 #[derive(Debug)]
+#[must_use = "channel controller does nothing until polled"]
 pub struct ChannelController<R: HasTimer, S, C> {
     rt: R,
     #[pin]
     stream: S,
     #[pin]
     state: State<R::Timer, C>,
-    span: Option<Span>,
+    span: Option<(Span, Field)>,
 }
 
 #[pin_project(project = StateProj)]
@@ -44,6 +48,7 @@ enum MainState {
 }
 
 impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
+    #[allow(clippy::too_many_lines)]
     fn poll_inner(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -55,9 +60,12 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
             mut state,
             span,
         } = self.project();
-        let _g = span
-            .get_or_insert_with(|| info_span!("ChannelController::poll_inner"))
-            .enter();
+        let (span, field) = span.get_or_insert_with(|| {
+            let span = info_span!("ChannelController::poll_inner", is_same_poll = false);
+            let field = span.field("is_same_poll").unwrap();
+            (span, field)
+        });
+        let _g = span.record(field, is_same_poll).enter();
 
         if stream.as_mut().poll_inner(cx, is_same_poll)?.is_ready() {
             // Stream shut down.
@@ -183,6 +191,12 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
     pub fn poll_same(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), impl Error>> {
         self.poll_inner(cx, true)
     }
+
+    /// Gets reference to runtime.
+    #[inline]
+    pub fn runtime(&self) -> &R {
+        &self.rt
+    }
 }
 
 /// Builder for [`ChannelController`].
@@ -255,4 +269,19 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelControllerBuilder<R, S,
             span: None,
         }
     }
+}
+
+#[inline]
+pub async fn open<R: HasTimer + HasNetwork, S: Stream, C: ChannelHandle<R>>(
+    rt: R,
+    addrs: &[SocketAddr],
+    stream: impl FnOnce(R::Socket) -> S,
+    controller: impl FnOnce() -> C,
+) -> IoResult<ChannelController<R, S, C>> {
+    let socket = rt.connect(addrs).await?;
+    Ok(ChannelControllerBuilder::default()
+        .runtime(rt)
+        .stream(stream(socket))
+        .controller(controller())
+        .build())
 }
