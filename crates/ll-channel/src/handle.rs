@@ -2,21 +2,19 @@
 
 use std::error::Error;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
-use std::io::{ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
+use std::io::{Error as IoError, ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::marker::PhantomData;
 use std::net::SocketAddr;
-use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::thread::panicking;
 use std::time::Instant;
 
 use crate::stream::Stream;
 
 /// Channel handler trait.
-pub trait ChannelHandle {
+pub trait ChannelHandle<R> {
     /// Error type.
-    type Error: Error;
+    type Error: Error + From<IoError>;
 
     /// General handle.
     ///
@@ -24,7 +22,7 @@ pub trait ChannelHandle {
     /// It will be called when channel controller is polled.
     /// It may be called multiple times within the same poll call,
     /// use [`Handle::is_same_poll`] to optimize it.
-    fn handle(self: Pin<&mut Self>, args: Handle) -> Result<Return, Self::Error>;
+    fn handle(self: Pin<&mut Self>, args: Handle<R>) -> Result<Return, Self::Error>;
 
     /// Sets peer address.
     ///
@@ -36,7 +34,7 @@ pub trait ChannelHandle {
 }
 
 /// Channel handle parameters.
-pub struct Handle<'a, 'b> {
+pub struct Handle<'a, 'b, R> {
     /// Context.
     cx: &'a mut Context<'b>,
 
@@ -45,6 +43,9 @@ pub struct Handle<'a, 'b> {
 
     /// Current time.
     time: Instant,
+
+    /// Runtime.
+    rt: &'a R,
 
     /// Is same poll cycle?
     is_same_poll: bool,
@@ -55,10 +56,11 @@ pub struct Handle<'a, 'b> {
     _phantom: PhantomData<*mut u8>,
 }
 
-impl Debug for Handle<'_, '_> {
+impl<R: Debug> Debug for Handle<'_, '_, R> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("Handle")
-            .field("cx", &self.cx)
+            .field("cx", self.cx)
+            .field("runtime", self.rt)
             .field("time", &self.time)
             .field("is_same_poll", &self.is_same_poll)
             .field("is_timeout", &self.is_timeout)
@@ -74,7 +76,7 @@ fn poll_wrap<T>(v: Poll<IoResult<T>>) -> IoResult<T> {
     }
 }
 
-impl Read for Handle<'_, '_> {
+impl<R> Read for Handle<'_, '_, R> {
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
         poll_wrap(self.stream.as_mut().poll_read(self.cx, buf))
@@ -86,7 +88,7 @@ impl Read for Handle<'_, '_> {
     }
 }
 
-impl Write for Handle<'_, '_> {
+impl<R> Write for Handle<'_, '_, R> {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
         poll_wrap(self.stream.as_mut().poll_write(self.cx, buf))
@@ -103,7 +105,7 @@ impl Write for Handle<'_, '_> {
     }
 }
 
-impl<'a, 'b> Handle<'a, 'b> {
+impl<'a, 'b, R> Handle<'a, 'b, R> {
     /// Gets async context.
     #[inline]
     pub fn cx(&mut self) -> &mut Context<'b> {
@@ -114,6 +116,12 @@ impl<'a, 'b> Handle<'a, 'b> {
     #[inline]
     pub fn time(&self) -> Instant {
         self.time
+    }
+
+    /// Gets runtime.
+    #[inline]
+    pub fn runtime(&self) -> &R {
+        self.rt
     }
 
     /// Gets peer address.
@@ -136,9 +144,8 @@ impl<'a, 'b> Handle<'a, 'b> {
 }
 
 /// [`Handle`] builder.
-#[derive(Default)]
 #[must_use]
-pub struct HandleBuilder<'a, 'b> {
+pub struct HandleBuilder<'a, 'b, R> {
     /// Context.
     cx: Option<&'a mut Context<'b>>,
 
@@ -147,6 +154,9 @@ pub struct HandleBuilder<'a, 'b> {
 
     /// Current time.
     time: Option<Instant>,
+
+    /// Runtime.
+    rt: Option<&'a R>,
 
     /// Is same poll cycle?
     is_same_poll: bool,
@@ -159,7 +169,22 @@ pub struct HandleBuilder<'a, 'b> {
     _phantom: PhantomData<*mut u8>,
 }
 
-impl<'a, 'b> HandleBuilder<'a, 'b> {
+impl<'a, 'b, R> Default for HandleBuilder<'a, 'b, R> {
+    fn default() -> Self {
+        Self {
+            cx: None,
+            stream: None,
+            time: None,
+            rt: None,
+            is_same_poll: false,
+            is_timeout: false,
+            built: false,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<'a, 'b, R> HandleBuilder<'a, 'b, R> {
     /// Sets async context. **REQUIRED**
     #[inline]
     pub fn cx(&mut self, cx: &'a mut Context<'b>) -> &mut Self {
@@ -181,6 +206,14 @@ impl<'a, 'b> HandleBuilder<'a, 'b> {
     pub fn time(&mut self, time: Instant) -> &mut Self {
         assert!(self.time.is_none(), "time has already been set");
         self.time = Some(time);
+        self
+    }
+
+    /// Sets runtime. **REQUIRED**
+    #[inline]
+    pub fn runtime(&mut self, rt: &'a mut R) -> &mut Self {
+        assert!(self.rt.is_none(), "runtime has already been set");
+        self.rt = Some(rt);
         self
     }
 
@@ -207,7 +240,7 @@ impl<'a, 'b> HandleBuilder<'a, 'b> {
     /// Panics if any of the required fields is not set.
     #[inline]
     #[must_use]
-    pub fn build(&mut self) -> Handle<'a, 'b> {
+    pub fn build(&mut self) -> Handle<'a, 'b, R> {
         assert!(!self.built, "builder must not be reused");
         self.built = true;
 
@@ -216,6 +249,7 @@ impl<'a, 'b> HandleBuilder<'a, 'b> {
             cx: self.cx.take().expect(REQ_MSG),
             stream: self.stream.take().expect(REQ_MSG),
             time: self.time.take().expect(REQ_MSG),
+            rt: self.rt.take().expect(REQ_MSG),
             is_same_poll: self.is_same_poll,
             is_timeout: self.is_timeout,
             _phantom: PhantomData,
@@ -243,7 +277,7 @@ pub struct Return {
 impl Return {
     /// Creates new [`Return`].
     #[inline]
-    pub fn new(handle: &Handle) -> Self {
+    pub fn new<R>(handle: &Handle<R>) -> Self {
         let _ = handle;
         Self {
             is_shutdown: false,

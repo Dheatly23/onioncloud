@@ -23,6 +23,14 @@ pub trait Stream: AsyncRead + AsyncWrite {
     /// If `true`, it indicates [`Self::poll_inner`] must be called in the future.
     fn wants_poll(&self) -> bool;
 
+    /// Checks if stream is initializing.
+    ///
+    /// Stream may use this to signal that it's not ready to be used yet.
+    /// It can use [`Self::poll_inner`] to drive itself to completion.
+    fn is_init(&self) -> bool {
+        false
+    }
+
     /// Do internal works (flushing buffers, etc).
     ///
     /// If it returns `Poll:Ready(Ok(()))`, it indicates the stream has closed.
