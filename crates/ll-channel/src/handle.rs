@@ -105,39 +105,45 @@ impl<R> Write for Handle<'_, '_, R> {
     }
 }
 
-impl<'a, 'b, R> Handle<'a, 'b, R> {
+impl<'b, R> Handle<'_, 'b, R> {
     /// Gets async context.
     #[inline]
+    #[must_use]
     pub fn cx(&mut self) -> &mut Context<'b> {
         self.cx
     }
 
     /// Gets current time.
     #[inline]
+    #[must_use]
     pub fn time(&self) -> Instant {
         self.time
     }
 
     /// Gets runtime.
     #[inline]
+    #[must_use]
     pub fn runtime(&self) -> &R {
         self.rt
     }
 
     /// Gets peer address.
     #[inline]
+    #[must_use]
     pub fn peer_addr(&self) -> SocketAddr {
         self.stream.peer_addr()
     }
 
     /// Checks if it's in the same poll cycle.
     #[inline]
+    #[must_use]
     pub fn is_same_poll(&self) -> bool {
         self.is_same_poll
     }
 
     /// Checks if timeout has expired.
     #[inline]
+    #[must_use]
     pub fn is_timeout(&self) -> bool {
         self.is_timeout
     }
@@ -169,7 +175,7 @@ pub struct HandleBuilder<'a, 'b, R> {
     _phantom: PhantomData<*mut u8>,
 }
 
-impl<'a, 'b, R> Default for HandleBuilder<'a, 'b, R> {
+impl<R> Default for HandleBuilder<'_, '_, R> {
     fn default() -> Self {
         Self {
             cx: None,

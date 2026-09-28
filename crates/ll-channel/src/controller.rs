@@ -44,7 +44,7 @@ enum MainState {
 }
 
 impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
-    pub fn poll_inner(
+    fn poll_inner(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         is_same_poll: bool,
@@ -165,8 +165,27 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
             }
         }
     }
+
+    /// Polls controller.
+    ///
+    /// Error type is intentionally opaque.
+    #[inline]
+    pub fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), impl Error>> {
+        self.poll_inner(cx, false)
+    }
+
+    /// Polls controller in same polling cycle.
+    ///
+    /// Unlike [`Self::poll`], this one for optimization
+    /// where controller is polled multiple times within the same async poll.
+    /// If you're unsure, use [`Self::poll`] instead.
+    #[inline]
+    pub fn poll_same(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), impl Error>> {
+        self.poll_inner(cx, true)
+    }
 }
 
+/// Builder for [`ChannelController`].
 #[derive(Debug)]
 pub struct ChannelControllerBuilder<R, S, C> {
     rt: R,
@@ -185,6 +204,8 @@ impl Default for ChannelControllerBuilder<(), (), ()> {
 }
 
 impl<R, S, C> ChannelControllerBuilder<R, S, C> {
+    /// Sets runtime.
+    #[inline]
     pub fn runtime<R2: HasTimer>(self, rt: R2) -> ChannelControllerBuilder<R2, S, C> {
         ChannelControllerBuilder {
             rt,
@@ -193,6 +214,8 @@ impl<R, S, C> ChannelControllerBuilder<R, S, C> {
         }
     }
 
+    /// Sets stream.
+    #[inline]
     pub fn stream<S2: Stream>(self, stream: S2) -> ChannelControllerBuilder<R, S2, C> {
         ChannelControllerBuilder {
             rt: self.rt,
@@ -201,10 +224,9 @@ impl<R, S, C> ChannelControllerBuilder<R, S, C> {
         }
     }
 
-    pub fn controller<C2: ChannelHandle<R>>(
-        self,
-        controller: C2,
-    ) -> ChannelControllerBuilder<R, S, C2> {
+    /// Sets controller.
+    #[inline]
+    pub fn controller<C2>(self, controller: C2) -> ChannelControllerBuilder<R, S, C2> {
         ChannelControllerBuilder {
             rt: self.rt,
             stream: self.stream,
@@ -214,7 +236,13 @@ impl<R, S, C> ChannelControllerBuilder<R, S, C> {
 }
 
 impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelControllerBuilder<R, S, C> {
+    /// Builds [`ChannelController`].
+    ///
+    /// # Panics
+    ///
+    /// May panics if required fields aren't set.
     #[instrument(name = "ChannelControllerBuilder::build", skip_all)]
+    #[inline]
     pub fn build(self) -> ChannelController<R, S, C> {
         ChannelController {
             state: State::Main {
