@@ -160,6 +160,7 @@ path = "crates/ll-relay-cell"
 [workspace.dependencies.onioncloud-runtime]
 version = "0.1.0"
 path = "crates/rt"
+default-features = false
 
 [workspace.dependencies.onioncloud-tart]
 version = "0.1.0"
