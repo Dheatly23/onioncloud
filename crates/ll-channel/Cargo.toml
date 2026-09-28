@@ -20,7 +20,14 @@ workspace = true
 optional = true
 
 [dev-dependencies]
+anyhow.workspace = true
 onioncloud-tart.workspace = true
+
+[dev-dependencies.onioncloud-runtime]
+workspace = true
+features = [
+  "tart",
+]
 
 [dev-dependencies.test-log]
 workspace = true

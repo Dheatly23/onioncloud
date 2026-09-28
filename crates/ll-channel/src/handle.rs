@@ -217,7 +217,7 @@ impl<'a, 'b, R> HandleBuilder<'a, 'b, R> {
 
     /// Sets runtime. **REQUIRED**
     #[inline]
-    pub fn runtime(&mut self, rt: &'a mut R) -> &mut Self {
+    pub fn runtime(&mut self, rt: &'a R) -> &mut Self {
         assert!(self.rt.is_none(), "runtime has already been set");
         self.rt = Some(rt);
         self

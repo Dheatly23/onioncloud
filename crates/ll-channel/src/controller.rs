@@ -9,7 +9,6 @@ use std::task::{Context, Poll};
 
 use onioncloud_runtime::{HasNetwork, HasTimer, Timer};
 use pin_project::pin_project;
-use tracing::field::Field;
 use tracing::{Span, info_span, instrument, trace};
 
 use crate::handle::{ChannelHandle, HandleBuilder};
@@ -25,7 +24,7 @@ pub struct ChannelController<R: HasTimer, S, C> {
     stream: S,
     #[pin]
     state: State<R::Timer, C>,
-    span: Option<(Span, Field)>,
+    span: Option<Span>,
 }
 
 #[pin_project(project = StateProj)]
@@ -53,19 +52,16 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         is_same_poll: bool,
-    ) -> Poll<Result<(), impl Error>> {
+    ) -> Poll<Result<(), impl Error + use<R, S, C>>> {
         let ChannelControllerProj {
             rt,
             mut stream,
             mut state,
             span,
         } = self.project();
-        let (span, field) = span.get_or_insert_with(|| {
-            let span = info_span!("ChannelController::poll_inner", is_same_poll = false);
-            let field = span.field("is_same_poll").unwrap();
-            (span, field)
-        });
-        let _g = span.record(field, is_same_poll).enter();
+        let _g = span
+            .get_or_insert_with(|| info_span!("ChannelController::poll_inner"))
+            .enter();
 
         if stream.as_mut().poll_inner(cx, is_same_poll)?.is_ready() {
             // Stream shut down.
@@ -119,6 +115,7 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
             let mut has_event = false;
             let mut builder = HandleBuilder::default();
             builder
+                .runtime(rt)
                 .time(rt.current_time())
                 .is_same_poll(flags & FLAG_SAME_POLL != 0)
                 .is_timeout(flags & FLAG_TIMER != 0);
@@ -178,7 +175,10 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
     ///
     /// Error type is intentionally opaque.
     #[inline]
-    pub fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), impl Error>> {
+    pub fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<Result<(), impl Error + use<R, S, C>>> {
         self.poll_inner(cx, false)
     }
 
@@ -188,7 +188,10 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
     /// where controller is polled multiple times within the same async poll.
     /// If you're unsure, use [`Self::poll`] instead.
     #[inline]
-    pub fn poll_same(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), impl Error>> {
+    pub fn poll_same(
+        self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<Result<(), impl Error + use<R, S, C>>> {
         self.poll_inner(cx, true)
     }
 
@@ -275,13 +278,168 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelControllerBuilder<R, S,
 pub async fn open<R: HasTimer + HasNetwork, S: Stream, C: ChannelHandle<R>>(
     rt: R,
     addrs: &[SocketAddr],
-    stream: impl FnOnce(R::Socket) -> S,
+    stream: impl FnOnce(R::Socket) -> IoResult<S>,
     controller: impl FnOnce() -> C,
 ) -> IoResult<ChannelController<R, S, C>> {
-    let socket = rt.connect(addrs).await?;
+    let s = rt.connect(addrs).await.and_then(stream)?;
     Ok(ChannelControllerBuilder::default()
         .runtime(rt)
-        .stream(stream(socket))
+        .stream(s)
         .controller(controller())
         .build())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+    use std::future::poll_fn;
+    use std::io::Error as IoError;
+    use std::pin::pin;
+    use std::time::Duration;
+
+    use anyhow::Error as AnyError;
+    use futures_io::{AsyncRead, AsyncWrite};
+    use onioncloud_runtime::Socket;
+    use onioncloud_tart::rt::{Executor, Runtime};
+    use test_log::test;
+    use tracing::info;
+
+    use crate::handle::{Handle, Return};
+    use crate::stream::StreamNoTls;
+
+    struct AnyErr(AnyError);
+
+    impl Debug for AnyErr {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            Debug::fmt(&self.0, f)
+        }
+    }
+
+    impl Display for AnyErr {
+        fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+            Display::fmt(&self.0, f)
+        }
+    }
+
+    impl Error for AnyErr {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            self.0.chain().next()
+        }
+    }
+
+    impl From<IoError> for AnyErr {
+        fn from(e: IoError) -> Self {
+            Self(e.into())
+        }
+    }
+
+    #[derive(Default)]
+    struct AlwaysPending {
+        close: bool,
+    }
+
+    impl AsyncRead for AlwaysPending {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &mut [u8],
+        ) -> Poll<IoResult<usize>> {
+            if self.close { Ready(Ok(0)) } else { Pending }
+        }
+    }
+
+    impl AsyncWrite for AlwaysPending {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &[u8],
+        ) -> Poll<IoResult<usize>> {
+            if self.close { Ready(Ok(0)) } else { Pending }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<IoResult<()>> {
+            Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<IoResult<()>> {
+            Pin::into_inner(self).close = true;
+            Ready(Ok(()))
+        }
+    }
+
+    impl Socket for AlwaysPending {
+        fn peer_addr(&self) -> IoResult<SocketAddr> {
+            Ok(SocketAddr::from(([127, 0, 0, 1], 9001)))
+        }
+    }
+
+    #[test]
+    #[instrument]
+    fn test_controller() {
+        struct Controller;
+
+        impl ChannelHandle<Runtime> for Controller {
+            type Error = AnyErr;
+
+            #[instrument(skip_all)]
+            fn handle(self: Pin<&mut Self>, args: Handle<Runtime>) -> Result<Return, Self::Error> {
+                Ok(Return::new(&args).with_shutdown())
+            }
+        }
+
+        let mut executor = Executor::builder().build();
+
+        let rt = executor.runtime();
+        rt.clone().spawn(async move {
+            let mut cont = pin!(
+                ChannelControllerBuilder::default()
+                    .runtime(rt)
+                    .stream(StreamNoTls::new(AlwaysPending::default()).unwrap())
+                    .controller(Controller)
+                    .build()
+            );
+            poll_fn(|cx| cont.as_mut().poll(cx)).await.unwrap();
+        });
+
+        executor.run();
+    }
+
+    #[test]
+    #[instrument]
+    fn test_controller_timer() {
+        struct Controller;
+
+        impl ChannelHandle<Runtime> for Controller {
+            type Error = AnyErr;
+
+            #[instrument(skip_all)]
+            fn handle(self: Pin<&mut Self>, args: Handle<Runtime>) -> Result<Return, Self::Error> {
+                let ret = Return::new(&args);
+                info!("is timeout? {}", args.is_timeout());
+                Ok(if args.is_timeout() {
+                    ret.with_shutdown()
+                } else {
+                    ret.with_timeout(Some(args.time() + Duration::from_secs(60)))
+                })
+            }
+        }
+
+        let mut executor = Executor::builder().build();
+
+        let rt = executor.runtime();
+        rt.clone().spawn(async move {
+            let mut cont = pin!(
+                ChannelControllerBuilder::default()
+                    .runtime(rt)
+                    .stream(StreamNoTls::new(AlwaysPending::default()).unwrap())
+                    .controller(Controller)
+                    .build()
+            );
+            poll_fn(|cx| cont.as_mut().poll(cx)).await.unwrap();
+        });
+
+        executor.run();
+    }
 }
