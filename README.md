@@ -72,10 +72,10 @@ We would _love_ to use stronger license like LGPL, but the ramifications are _un
 ### What is the design policy/language?
 
 Our policy in designing this project is as follows:
-- We don't believe in "splitting into bunch of small crates then glue up everything".
-  It's simply too much headache for marginal compile time speedup.
-  Instead, this project will be split up into 3 layer/crates:
-  1. Low-level crate: Contains things needed to parse and handle Tor protocol.
+- Crates are split to make testing and fuzzing a lot easier.
+  Not linking huge dependency list is huge for fuzzing.
+- This project will be generally split into 3 layer/crates:
+  1. Low-level crates: Contains things needed to parse and handle Tor protocol.
      Cryptography code also lives here.
   2. Mid-level crates: Contains implementation of Tor protocol.
      It may be split up into relay, user, hidden service, etc.

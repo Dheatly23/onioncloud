@@ -1,0 +1,45 @@
+[package]
+name = "onioncloud-runtime"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+futures-core.workspace = true
+futures-io.workspace = true
+futures-sink.workspace = true
+pin-project.workspace = true
+
+[dependencies.flume]
+workspace = true
+optional = true
+features = [
+  "async",
+]
+
+[dependencies.onioncloud-tart]
+workspace = true
+optional = true
+
+[dependencies.tokio]
+workspace = true
+optional = true
+features = [
+  "rt",
+  "net",
+  "time",
+]
+
+[dependencies.tokio-util]
+workspace = true
+optional = true
+
+[dev-dependencies]
+onioncloud-tart.workspace = true
+
+[features]
+default = ["tokio"]
+tart = ["dep:onioncloud-tart"]
+tokio = ["dep:flume", "dep:tokio", "dep:tokio-util"]
