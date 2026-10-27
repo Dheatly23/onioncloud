@@ -4,7 +4,7 @@ use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::mem::ManuallyDrop;
 
 use onioncloud_ll_cell::fixed::FixedCell;
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng};
 
 pub mod error;
 mod traits;
@@ -69,7 +69,7 @@ impl<'a> AutoReturnCell<'a> {
 pub fn fill_padding(
     cell: &mut FixedCell,
     version: &impl DynRelayVersion,
-    rng: &mut (impl RngCore + CryptoRng),
+    rng: &mut (impl Rng + CryptoRng),
 ) {
     let l = version.len(cell);
     if let Some(s) = version.data_padding_mut(cell).get_mut(l as usize..) {
