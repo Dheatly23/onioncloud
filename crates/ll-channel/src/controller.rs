@@ -48,7 +48,6 @@ enum MainState {
 }
 
 impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
-    #[expect(clippy::too_many_lines)]
     fn poll_inner(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

@@ -10,6 +10,7 @@ use std::task::{Context, Poll};
 use futures_io::{AsyncRead, AsyncWrite};
 use once_cell::sync::OnceCell;
 use onioncloud_runtime::Socket;
+use pin_project::pin_project;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::{ClientConfig, ClientConnection};
 use rustls::crypto::ring::default_provider;
@@ -20,18 +21,22 @@ use super::Stream;
 use crate::error::ChannelError;
 
 /// Wrapper for [`Socket`] with TLS.
+#[pin_project]
 #[derive(Debug)]
 pub struct StreamTLS<S> {
+    #[pin]
     stream: S,
     peer_addr: SocketAddr,
     tls: ClientConnection,
-    close_state: CloseState,
+    state: State,
     flags: u8,
 }
 
 #[derive(Debug)]
-enum CloseState {
-    None,
+enum State {
+    Init,
+    Main,
+    InitClosing,
     TlsClose,
     SocketClose,
     Closed,
@@ -40,14 +45,14 @@ enum CloseState {
 const FLAG_READ: u8 = 1 << 0;
 const FLAG_WRITE: u8 = 1 << 1;
 
-impl<S: Socket + Unpin> AsyncRead for StreamTLS<S> {
+impl<S: Socket> AsyncRead for StreamTLS<S> {
     #[inline]
     fn poll_read(
         self: Pin<&mut Self>,
         _: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<IoResult<usize>> {
-        let this = Pin::into_inner(self);
+        let this = self.project();
         match this.tls.reader().read(buf) {
             Ok(0) => Pending,
             v => Ready(v),
@@ -60,7 +65,7 @@ impl<S: Socket + Unpin> AsyncRead for StreamTLS<S> {
         _: &mut Context<'_>,
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<IoResult<usize>> {
-        let this = Pin::into_inner(self);
+        let this = self.project();
         match this.tls.reader().read_vectored(bufs) {
             Ok(0) => Pending,
             v => Ready(v),
@@ -68,13 +73,13 @@ impl<S: Socket + Unpin> AsyncRead for StreamTLS<S> {
     }
 }
 
-impl<S: Socket + Unpin> AsyncWrite for StreamTLS<S> {
+impl<S: Socket> AsyncWrite for StreamTLS<S> {
     #[inline]
     fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, buf: &[u8]) -> Poll<IoResult<usize>> {
-        let this = Pin::into_inner(self);
-        match this.close_state {
-            CloseState::None => (),
-            CloseState::Closed => return Ready(Ok(0)),
+        let this = self.project();
+        match this.state {
+            State::Main => (),
+            State::Closed => return Ready(Ok(0)),
             _ => return Pending,
         }
         match this.tls.writer().write(buf) {
@@ -89,10 +94,10 @@ impl<S: Socket + Unpin> AsyncWrite for StreamTLS<S> {
         _: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<IoResult<usize>> {
-        let this = Pin::into_inner(self);
-        match this.close_state {
-            CloseState::None => (),
-            CloseState::Closed => return Ready(Ok(0)),
+        let this = self.project();
+        match this.state {
+            State::Main => (),
+            State::Closed => return Ready(Ok(0)),
             _ => return Pending,
         }
         match this.tls.writer().write_vectored(bufs) {
@@ -103,10 +108,10 @@ impl<S: Socket + Unpin> AsyncWrite for StreamTLS<S> {
 
     #[inline]
     fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<IoResult<()>> {
-        let this = Pin::into_inner(self);
-        match this.close_state {
-            CloseState::None => (),
-            CloseState::Closed => return Ready(Ok(())),
+        let this = self.project();
+        match this.state {
+            State::Main => (),
+            State::Closed => return Ready(Ok(())),
             _ => return Pending,
         }
         this.tls.writer().flush()?;
@@ -119,13 +124,14 @@ impl<S: Socket + Unpin> AsyncWrite for StreamTLS<S> {
 
     #[inline]
     fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<IoResult<()>> {
-        let this = Pin::into_inner(self);
-        match &mut this.close_state {
-            CloseState::None => {
+        let this = self.project();
+        match this.state {
+            State::Init => *this.state = State::InitClosing,
+            State::Main => {
                 this.tls.send_close_notify();
-                this.close_state = CloseState::TlsClose;
+                *this.state = State::TlsClose;
             }
-            CloseState::Closed => return Ready(Ok(())),
+            State::Closed => return Ready(Ok(())),
             _ => (),
         }
 
@@ -133,9 +139,13 @@ impl<S: Socket + Unpin> AsyncWrite for StreamTLS<S> {
     }
 }
 
-impl<S: Socket + Unpin> Stream for StreamTLS<S> {
+impl<S: Socket> Stream for StreamTLS<S> {
     fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
+    }
+
+    fn is_init(&self) -> bool {
+        matches!(self.state, State::Init | State::InitClosing)
     }
 
     fn leaf_cert(&self) -> Option<Cow<'_, [u8]>> {
@@ -146,11 +156,9 @@ impl<S: Socket + Unpin> Stream for StreamTLS<S> {
     }
 
     fn wants_poll(&self) -> bool {
-        matches!(
-            self.close_state,
-            CloseState::SocketClose | CloseState::Closed
-        ) || self.tls.wants_read()
-            || self.tls.wants_write()
+        matches!(self.state, State::SocketClose | State::Closed)
+            || (self.flags & FLAG_READ == 0 && self.tls.wants_read())
+            || (self.flags & FLAG_WRITE == 0 && self.tls.wants_write())
     }
 
     fn poll_inner(
@@ -158,46 +166,91 @@ impl<S: Socket + Unpin> Stream for StreamTLS<S> {
         cx: &mut Context<'_>,
         is_same_poll: bool,
     ) -> Poll<Result<(), ChannelError>> {
-        let this = Pin::into_inner(self);
+        let mut this = self.project();
 
         if !is_same_poll {
-            this.flags = 0;
+            *this.flags = 0;
         }
 
         loop {
-            match this.close_state {
-                CloseState::None | CloseState::TlsClose => (),
-                CloseState::SocketClose => match Pin::new(&mut this.stream).poll_close(cx) {
+            match this.state {
+                State::Main | State::TlsClose => (),
+                State::Init | State::InitClosing if this.tls.is_handshaking() => {
+                    let mut w = WrapAsync {
+                        cx,
+                        p: this.stream.as_mut(),
+                    };
+
+                    let wants_write = this.tls.wants_write();
+                    let wants_read = this.tls.wants_read();
+                    if !wants_write && !wants_read {
+                        unreachable!("handshaking but TLS does not want to read nor write");
+                    } else if *this.flags & FLAG_WRITE == 0 && wants_write {
+                        match poll_io_unwrap(this.tls.write_tls(&mut w)) {
+                            Pending => *this.flags |= FLAG_WRITE,
+                            Ready(Err(e)) => return Ready(Err(e.into())),
+                            Ready(Ok(0)) => {
+                                return Ready(Err(
+                                    IoError::from(ErrorKind::ConnectionAborted).into()
+                                ));
+                            }
+                            Ready(Ok(_)) => (),
+                        }
+                    } else if *this.flags & FLAG_READ == 0 && wants_read {
+                        match poll_io_unwrap(this.tls.read_tls(&mut w)) {
+                            Pending => *this.flags |= FLAG_READ,
+                            Ready(Err(e)) => return Ready(Err(e.into())),
+                            Ready(Ok(0)) => {
+                                return Ready(Err(
+                                    IoError::from(ErrorKind::ConnectionAborted).into()
+                                ));
+                            }
+                            Ready(Ok(_)) => (),
+                        }
+
+                        this.tls.process_new_packets()?;
+                    } else {
+                        return Pending;
+                    }
+
+                    continue;
+                }
+                State::Init => *this.state = State::Main,
+                State::InitClosing => {
+                    this.tls.send_close_notify();
+                    *this.state = State::TlsClose;
+                }
+                State::SocketClose => match this.stream.poll_close(cx) {
                     Ready(Ok(())) => {
-                        this.close_state = CloseState::Closed;
+                        *this.state = State::Closed;
                         return Ready(Ok(()));
                     }
                     r => return r.map_err(ChannelError::from),
                 },
-                CloseState::Closed => return Ready(Ok(())),
+                State::Closed => return Ready(Ok(())),
             }
 
             let mut w = WrapAsync {
                 cx,
-                p: Pin::new(&mut this.stream),
+                p: this.stream.as_mut(),
             };
 
             let wants_write = this.tls.wants_write();
             let wants_read = this.tls.wants_read();
             if !wants_write && !wants_read {
                 return Pending;
-            } else if this.flags & FLAG_WRITE == 0 && wants_write {
+            } else if *this.flags & FLAG_WRITE == 0 && wants_write {
                 match poll_io_unwrap(this.tls.write_tls(&mut w)) {
-                    Pending => this.flags |= FLAG_WRITE,
+                    Pending => *this.flags |= FLAG_WRITE,
                     Ready(Err(e)) => return Ready(Err(e.into())),
-                    Ready(Ok(0)) => this.close_state = CloseState::SocketClose,
+                    Ready(Ok(0)) => *this.state = State::SocketClose,
                     Ready(Ok(_)) => (),
                 }
-            } else if this.flags & FLAG_READ == 0 && wants_read {
+            } else if *this.flags & FLAG_READ == 0 && wants_read {
                 match poll_io_unwrap(this.tls.read_tls(&mut w)) {
-                    Pending => this.flags |= FLAG_READ,
+                    Pending => *this.flags |= FLAG_READ,
                     Ready(Err(e)) => return Ready(Err(e.into())),
-                    Ready(Ok(0)) => this.close_state = CloseState::SocketClose,
+                    Ready(Ok(0)) => *this.state = State::SocketClose,
                     Ready(Ok(_)) => (),
                 }
 
@@ -209,59 +262,35 @@ impl<S: Socket + Unpin> Stream for StreamTLS<S> {
     }
 }
 
-impl<S: Socket + Unpin> StreamTLS<S> {
+impl<S: Socket> StreamTLS<S> {
     /// Creates new stream.
-    pub async fn new(mut stream: S) -> Result<Self, ChannelError> {
+    pub async fn new(stream: S) -> Result<Self, ChannelError>
+    where
+        S: Unpin,
+    {
+        let mut ret = Self::new_uninit(stream)?;
+
+        poll_fn(|cx| match Pin::new(&mut ret).poll_inner(cx, false) {
+            Poll::Pending if !ret.is_init() => Poll::Ready(Ok(())),
+            r => r,
+        })
+        .await?;
+        Ok(ret)
+    }
+
+    /// Creates new uninitialized stream.
+    pub fn new_uninit(stream: S) -> Result<Self, ChannelError> {
         let peer_addr = stream.peer_addr()?;
-        let mut tls = ClientConnection::new(
+        let tls = ClientConnection::new(
             get_client_cfg()?,
             ServerName::IpAddress(peer_addr.ip().into()),
         )?;
 
-        poll_fn(|cx| -> Poll<Result<(), ChannelError>> {
-            let mut w = WrapAsync {
-                cx,
-                p: Pin::new(&mut stream),
-            };
-            let mut flags = 0;
-            while tls.is_handshaking() {
-                let wants_write = tls.wants_write();
-                let wants_read = tls.wants_read();
-                if !wants_write && !wants_read {
-                    unreachable!("handshaking but TLS does not want to read nor write");
-                } else if flags & FLAG_WRITE == 0 && wants_write {
-                    match poll_io_unwrap(tls.write_tls(&mut w)) {
-                        Pending => flags |= FLAG_WRITE,
-                        Ready(Err(e)) => return Ready(Err(e.into())),
-                        Ready(Ok(0)) => {
-                            return Ready(Err(IoError::from(ErrorKind::ConnectionAborted).into()));
-                        }
-                        Ready(Ok(_)) => (),
-                    }
-                } else if flags & FLAG_READ == 0 && wants_read {
-                    match poll_io_unwrap(tls.read_tls(&mut w)) {
-                        Pending => flags |= FLAG_READ,
-                        Ready(Err(e)) => return Ready(Err(e.into())),
-                        Ready(Ok(0)) => {
-                            return Ready(Err(IoError::from(ErrorKind::ConnectionAborted).into()));
-                        }
-                        Ready(Ok(_)) => (),
-                    }
-
-                    tls.process_new_packets()?;
-                } else {
-                    return Pending;
-                }
-            }
-
-            Ready(Ok(()))
-        })
-        .await?;
         Ok(Self {
             peer_addr,
             tls,
             stream,
-            close_state: CloseState::None,
+            state: State::Init,
             flags: 0,
         })
     }
