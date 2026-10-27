@@ -10,6 +10,6 @@ use thiserror::Error;
 #[error(transparent)]
 #[non_exhaustive]
 pub enum ChannelError {
-    IoError(#[from] IoError),
-    RustlsError(#[from] RustlsError),
+    Io(#[from] IoError),
+    Rustls(#[from] RustlsError),
 }

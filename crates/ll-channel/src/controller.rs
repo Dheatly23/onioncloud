@@ -1,6 +1,6 @@
 //! Channel controller type.
 
-use std::error::Error;
+use std::future::Future;
 use std::io::Result as IoResult;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -48,12 +48,12 @@ enum MainState {
 }
 
 impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     fn poll_inner(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         is_same_poll: bool,
-    ) -> Poll<Result<(), impl Error + use<R, S, C>>> {
+    ) -> Poll<Result<(), C::Error>> {
         let ChannelControllerProj {
             rt,
             mut stream,
@@ -172,27 +172,13 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
         }
     }
 
-    /// Polls controller.
-    ///
-    /// Error type is intentionally opaque.
-    #[inline]
-    pub fn poll(
-        self: Pin<&mut Self>,
-        cx: &mut Context,
-    ) -> Poll<Result<(), impl Error + use<R, S, C>>> {
-        self.poll_inner(cx, false)
-    }
-
     /// Polls controller in same polling cycle.
     ///
     /// Unlike [`Self::poll`], this one for optimization
     /// where controller is polled multiple times within the same async poll.
     /// If you're unsure, use [`Self::poll`] instead.
     #[inline]
-    pub fn poll_same(
-        self: Pin<&mut Self>,
-        cx: &mut Context,
-    ) -> Poll<Result<(), impl Error + use<R, S, C>>> {
+    pub fn poll_same(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), C::Error>> {
         self.poll_inner(cx, true)
     }
 
@@ -200,6 +186,16 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
     #[inline]
     pub fn runtime(&self) -> &R {
         &self.rt
+    }
+}
+
+impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> Future for ChannelController<R, S, C> {
+    type Output = Result<(), C::Error>;
+
+    /// Polls controller.
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        self.poll_inner(cx, false)
     }
 }
 
@@ -294,9 +290,9 @@ pub async fn open<R: HasTimer + HasNetwork, S: Stream, C: ChannelHandle<R>>(
 mod tests {
     use super::*;
 
+    use std::error::Error;
     use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
     use std::future::poll_fn;
-    use std::io::Error as IoError;
     use std::pin::pin;
     use std::time::{Duration, Instant};
 
@@ -331,9 +327,12 @@ mod tests {
         }
     }
 
-    impl From<IoError> for AnyErr {
-        fn from(e: IoError) -> Self {
-            Self(e.into())
+    impl From<ChannelError> for AnyErr {
+        fn from(e: ChannelError) -> Self {
+            Self(match e {
+                ChannelError::Io(e) => e.into(),
+                ChannelError::Rustls(e) => e.into(),
+            })
         }
     }
 
