@@ -7,10 +7,11 @@ use std::pin::Pin;
 use std::task::Poll::*;
 use std::task::{Context, Poll};
 
-use onioncloud_runtime::{HasNetwork, HasTimer, Timer};
+use onioncloud_runtime::{HasNetwork, HasTimer, Timer as _};
 use pin_project::pin_project;
 use tracing::{Span, info_span, instrument, trace};
 
+use crate::error::ChannelError;
 use crate::handle::{ChannelHandle, HandleBuilder};
 use crate::stream::Stream;
 
@@ -135,7 +136,7 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
                 if ret.is_shutdown {
                     trace!("controller request graceful shutdown");
                     state.set(State::Shutdown);
-                    let _ = stream.as_mut().poll_close(cx)?;
+                    let _ = stream.as_mut().poll_close(cx).map_err(ChannelError::from)?;
                     continue;
                 }
 
@@ -278,10 +279,10 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelControllerBuilder<R, S,
 pub async fn open<R: HasTimer + HasNetwork, S: Stream, C: ChannelHandle<R>>(
     rt: R,
     addrs: &[SocketAddr],
-    stream: impl FnOnce(R::Socket) -> IoResult<S>,
+    stream: impl AsyncFnOnce(R::Socket) -> IoResult<S>,
     controller: impl FnOnce() -> C,
 ) -> IoResult<ChannelController<R, S, C>> {
-    let s = rt.connect(addrs).await.and_then(stream)?;
+    let s = stream(rt.connect(addrs).await?).await?;
     Ok(ChannelControllerBuilder::default()
         .runtime(rt)
         .stream(s)
@@ -297,12 +298,13 @@ mod tests {
     use std::future::poll_fn;
     use std::io::Error as IoError;
     use std::pin::pin;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use anyhow::Error as AnyError;
     use futures_io::{AsyncRead, AsyncWrite};
     use onioncloud_runtime::Socket;
     use onioncloud_tart::rt::{Executor, Runtime};
+    use onioncloud_tart::timer::Timer;
     use test_log::test;
     use tracing::info;
 
@@ -363,7 +365,9 @@ mod tests {
             Ready(Ok(()))
         }
 
+        #[instrument(name = "AlwaysPending::poll_close", skip_all)]
         fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<IoResult<()>> {
+            info!("closing socket");
             Pin::into_inner(self).close = true;
             Ready(Ok(()))
         }
@@ -383,7 +387,7 @@ mod tests {
         impl ChannelHandle<Runtime> for Controller {
             type Error = AnyErr;
 
-            #[instrument(skip_all)]
+            #[instrument(name = "Controller::handle", skip_all)]
             fn handle(self: Pin<&mut Self>, args: Handle<Runtime>) -> Result<Return, Self::Error> {
                 Ok(Return::new(&args).with_shutdown())
             }
@@ -414,7 +418,7 @@ mod tests {
         impl ChannelHandle<Runtime> for Controller {
             type Error = AnyErr;
 
-            #[instrument(skip_all)]
+            #[instrument(name = "Controller::handle", skip_all)]
             fn handle(self: Pin<&mut Self>, args: Handle<Runtime>) -> Result<Return, Self::Error> {
                 let ret = Return::new(&args);
                 info!("is timeout? {}", args.is_timeout());
@@ -435,6 +439,103 @@ mod tests {
                     .runtime(rt)
                     .stream(StreamNoTls::new(AlwaysPending::default()).unwrap())
                     .controller(Controller)
+                    .build()
+            );
+            poll_fn(|cx| cont.as_mut().poll(cx)).await.unwrap();
+        });
+
+        executor.run();
+    }
+
+    #[test]
+    #[instrument]
+    fn test_controller_timer2() {
+        struct Controller;
+
+        impl ChannelHandle<Runtime> for Controller {
+            type Error = AnyErr;
+
+            #[instrument(name = "Controller::handle", skip_all)]
+            fn handle(self: Pin<&mut Self>, args: Handle<Runtime>) -> Result<Return, Self::Error> {
+                let ret = Return::new(&args);
+                info!("is timeout? {}", args.is_timeout());
+                Ok(if args.is_timeout() {
+                    assert!(args.is_same_poll(), "controller not immediately repolled");
+                    ret.with_shutdown()
+                } else {
+                    assert!(!args.is_same_poll(), "controller not immediately repolled");
+                    ret.with_timeout(Some(args.time()))
+                })
+            }
+        }
+
+        let mut executor = Executor::builder().build();
+
+        let rt = executor.runtime();
+        rt.clone().spawn(async move {
+            let mut cont = pin!(
+                ChannelControllerBuilder::default()
+                    .runtime(rt)
+                    .stream(StreamNoTls::new(AlwaysPending::default()).unwrap())
+                    .controller(Controller)
+                    .build()
+            );
+            poll_fn(|cx| cont.as_mut().poll(cx)).await.unwrap();
+        });
+
+        executor.run();
+    }
+
+    #[test]
+    #[instrument]
+    fn test_controller_timer3() {
+        #[pin_project]
+        #[derive(Default)]
+        struct Controller {
+            time: Option<Instant>,
+            #[pin]
+            timer: Option<Timer>,
+        }
+
+        impl ChannelHandle<Runtime> for Controller {
+            type Error = AnyErr;
+
+            #[instrument(name = "Controller::handle", skip_all)]
+            fn handle(
+                self: Pin<&mut Self>,
+                mut args: Handle<Runtime>,
+            ) -> Result<Return, Self::Error> {
+                let mut this = self.project();
+                loop {
+                    match this.timer.as_mut().as_pin_mut() {
+                        Some(timer) => {
+                            break Ok(if timer.poll(args.cx()).is_ready() {
+                                assert_eq!(args.time(), *this.time.as_ref().unwrap());
+                                Return::new(&args).with_shutdown()
+                            } else {
+                                Return::new(&args)
+                            });
+                        }
+                        None => {
+                            let time = args.time() + Duration::from_secs(60);
+                            this.timer
+                                .set(Some(Timer::with_instant(args.runtime().clone(), time)));
+                            *this.time = Some(time);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut executor = Executor::builder().build();
+
+        let rt = executor.runtime();
+        rt.clone().spawn(async move {
+            let mut cont = pin!(
+                ChannelControllerBuilder::default()
+                    .runtime(rt)
+                    .stream(StreamNoTls::new(AlwaysPending::default()).unwrap())
+                    .controller(Controller::default())
                     .build()
             );
             poll_fn(|cx| cont.as_mut().poll(cx)).await.unwrap();

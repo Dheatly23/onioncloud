@@ -1,14 +1,21 @@
 //! Stream trait definition and wrappers.
 
+mod tls;
+
 use std::borrow::Cow;
 use std::io::{IoSlice, IoSliceMut, Result as IoResult};
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::task::Poll::*;
 use std::task::{Context, Poll};
 
 use futures_io::{AsyncRead, AsyncWrite};
 use onioncloud_runtime::Socket;
 use pin_project::pin_project;
+
+use crate::error::ChannelError;
+
+pub use tls::*;
 
 /// Network stream wrapper type.
 pub trait Stream: AsyncRead + AsyncWrite {
@@ -41,7 +48,7 @@ pub trait Stream: AsyncRead + AsyncWrite {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         is_same_poll: bool,
-    ) -> Poll<IoResult<()>>;
+    ) -> Poll<Result<(), ChannelError>>;
 }
 
 /// Wrapper for [`Socket`] without TLS.
@@ -105,11 +112,11 @@ impl<S: AsyncWrite> AsyncWrite for StreamNoTls<S> {
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
         let this = self.project();
         if matches!(this.close_state, CloseState::Closed) {
-            return Poll::Ready(Ok(()));
+            return Ready(Ok(()));
         }
         *this.close_state = CloseState::Closing;
         let ret = this.stream.poll_close(cx);
-        if matches!(ret, Poll::Ready(Ok(()))) {
+        if matches!(ret, Ready(Ok(()))) {
             *this.close_state = CloseState::Closed;
         }
         ret
@@ -133,18 +140,19 @@ impl<S: Socket> Stream for StreamNoTls<S> {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         is_same_poll: bool,
-    ) -> Poll<IoResult<()>> {
+    ) -> Poll<Result<(), ChannelError>> {
         let this = self.project();
         match this.close_state {
-            CloseState::Closing if !is_same_poll => {
-                let ret = this.stream.poll_close(cx);
-                if matches!(ret, Poll::Ready(Ok(()))) {
+            CloseState::Closing if !is_same_poll => match this.stream.poll_close(cx) {
+                Ready(Ok(())) => {
                     *this.close_state = CloseState::Closed;
+                    Ready(Ok(()))
                 }
-                ret
-            }
-            CloseState::Closed => Poll::Ready(Ok(())),
-            _ => Poll::Pending,
+                Ready(Err(e)) => Ready(Err(e.into())),
+                Pending => Pending,
+            },
+            CloseState::Closed => Ready(Ok(())),
+            _ => Pending,
         }
     }
 }

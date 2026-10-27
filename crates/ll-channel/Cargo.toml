@@ -9,9 +9,11 @@ publish.workspace = true
 [dependencies]
 base64ct.workspace = true
 futures-io.workspace = true
+once_cell.workspace = true
 onioncloud-ll-cell.workspace = true
 onioncloud-runtime.workspace = true
 pin-project.workspace = true
+rustls.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

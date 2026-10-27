@@ -2,19 +2,20 @@
 
 use std::error::Error;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
-use std::io::{Error as IoError, ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
+use std::io::{ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
+use crate::error::ChannelError;
 use crate::stream::Stream;
 
 /// Channel handler trait.
 pub trait ChannelHandle<R> {
     /// Error type.
-    type Error: Error + From<IoError>;
+    type Error: Error + From<ChannelError>;
 
     /// General handle.
     ///
