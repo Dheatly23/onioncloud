@@ -14,8 +14,15 @@ use onioncloud_runtime::Socket;
 use pin_project::pin_project;
 
 use crate::error::ChannelError;
+#[cfg(feature = "test-dummy-tls")]
+pub use tls::tls_dummy::transform_server_message;
 
-pub use tls::*;
+/// Wrapper for [`Socket`] with TLS (client).
+pub type StreamTLSClient<S> = tls::StreamTLSInner<S, tls::tls_impl::RustlsWrapper>;
+
+/// Dummy TLS client.
+#[cfg(feature = "test-dummy-tls")]
+pub type StreamDummyClient<S> = tls::StreamTLSInner<S, tls::tls_dummy::DummyWrapper>;
 
 /// Network stream wrapper type.
 pub trait Stream: AsyncRead + AsyncWrite {

@@ -1,33 +1,49 @@
+#[cfg(feature = "test-dummy-tls")]
+pub(crate) mod tls_dummy;
+pub(crate) mod tls_impl;
+
 use std::borrow::Cow;
 use std::future::poll_fn;
 use std::io::{Error as IoError, ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::Poll::*;
 use std::task::{Context, Poll};
 
 use futures_io::{AsyncRead, AsyncWrite};
-use once_cell::sync::OnceCell;
 use onioncloud_runtime::Socket;
 use pin_project::pin_project;
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::client::{ClientConfig, ClientConnection};
-use rustls::crypto::ring::default_provider;
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 
 use super::Stream;
 use crate::error::ChannelError;
 
-/// Wrapper for [`Socket`] with TLS.
+/// Private trait for anything TLS-like.
+pub trait TLSLike {
+    fn leaf_cert(&self) -> Option<Cow<'_, [u8]>>;
+    fn is_handshaking(&self) -> bool;
+    fn wants_read(&self) -> bool;
+    fn wants_write(&self) -> bool;
+    fn process_new_packets(&mut self) -> Result<(), ChannelError>;
+    fn send_close_notify(&mut self);
+    fn reader(&mut self) -> impl '_ + Read;
+    fn writer(&mut self) -> impl '_ + Write;
+    fn read_tls(&mut self, r: &mut dyn Read) -> IoResult<usize>;
+    fn write_tls(&mut self, w: &mut dyn Write) -> IoResult<usize>;
+}
+
+/// Private trait for anything client TLS-like.
+pub trait ClientTLSLike: TLSLike + Sized {
+    fn new(peer_addr: SocketAddr) -> Result<Self, ChannelError>;
+}
+
+/// Inner implementation of stream TLS.
 #[pin_project]
 #[derive(Debug)]
-pub struct StreamTLS<S> {
+pub struct StreamTLSInner<S, T: TLSLike> {
     #[pin]
     stream: S,
     peer_addr: SocketAddr,
-    tls: ClientConnection,
+    tls: T,
     state: State,
     flags: u8,
 }
@@ -44,8 +60,10 @@ enum State {
 
 const FLAG_READ: u8 = 1 << 0;
 const FLAG_WRITE: u8 = 1 << 1;
+const FLAG_READ_CLOSED: u8 = 1 << 2;
+const FLAG_WRITE_CLOSED: u8 = 1 << 3;
 
-impl<S: Socket> AsyncRead for StreamTLS<S> {
+impl<S: Socket, T: TLSLike> AsyncRead for StreamTLSInner<S, T> {
     #[inline]
     fn poll_read(
         self: Pin<&mut Self>,
@@ -54,7 +72,7 @@ impl<S: Socket> AsyncRead for StreamTLS<S> {
     ) -> Poll<IoResult<usize>> {
         let this = self.project();
         match this.tls.reader().read(buf) {
-            Ok(0) => Pending,
+            Ok(0) if *this.flags & FLAG_READ_CLOSED == 0 => Pending,
             v => Ready(v),
         }
     }
@@ -67,13 +85,13 @@ impl<S: Socket> AsyncRead for StreamTLS<S> {
     ) -> Poll<IoResult<usize>> {
         let this = self.project();
         match this.tls.reader().read_vectored(bufs) {
-            Ok(0) => Pending,
+            Ok(0) if *this.flags & FLAG_READ_CLOSED == 0 => Pending,
             v => Ready(v),
         }
     }
 }
 
-impl<S: Socket> AsyncWrite for StreamTLS<S> {
+impl<S: Socket, T: TLSLike> AsyncWrite for StreamTLSInner<S, T> {
     #[inline]
     fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, buf: &[u8]) -> Poll<IoResult<usize>> {
         let this = self.project();
@@ -83,7 +101,7 @@ impl<S: Socket> AsyncWrite for StreamTLS<S> {
             _ => return Pending,
         }
         match this.tls.writer().write(buf) {
-            Ok(0) => Pending,
+            Ok(0) if *this.flags & FLAG_WRITE_CLOSED == 0 => Pending,
             v => Ready(v),
         }
     }
@@ -101,7 +119,7 @@ impl<S: Socket> AsyncWrite for StreamTLS<S> {
             _ => return Pending,
         }
         match this.tls.writer().write_vectored(bufs) {
-            Ok(0) => Pending,
+            Ok(0) if *this.flags & FLAG_WRITE_CLOSED == 0 => Pending,
             v => Ready(v),
         }
     }
@@ -115,7 +133,7 @@ impl<S: Socket> AsyncWrite for StreamTLS<S> {
             _ => return Pending,
         }
         this.tls.writer().flush()?;
-        if this.tls.wants_write() {
+        if this.tls.wants_write() && *this.flags & FLAG_WRITE_CLOSED == 0 {
             Pending
         } else {
             Ready(Ok(()))
@@ -139,7 +157,7 @@ impl<S: Socket> AsyncWrite for StreamTLS<S> {
     }
 }
 
-impl<S: Socket> Stream for StreamTLS<S> {
+impl<S: Socket, T: TLSLike> Stream for StreamTLSInner<S, T> {
     fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
     }
@@ -149,10 +167,7 @@ impl<S: Socket> Stream for StreamTLS<S> {
     }
 
     fn leaf_cert(&self) -> Option<Cow<'_, [u8]>> {
-        self.tls
-            .peer_certificates()?
-            .first()
-            .map(|v| (&v[..]).into())
+        self.tls.leaf_cert()
     }
 
     fn wants_poll(&self) -> bool {
@@ -169,7 +184,7 @@ impl<S: Socket> Stream for StreamTLS<S> {
         let mut this = self.project();
 
         if !is_same_poll {
-            *this.flags = 0;
+            *this.flags &= !(FLAG_READ | FLAG_WRITE);
         }
 
         loop {
@@ -237,20 +252,31 @@ impl<S: Socket> Stream for StreamTLS<S> {
 
             let wants_write = this.tls.wants_write();
             let wants_read = this.tls.wants_read();
-            if !wants_write && !wants_read {
+            if *this.flags & (FLAG_READ_CLOSED | FLAG_WRITE_CLOSED)
+                == FLAG_READ_CLOSED | FLAG_WRITE_CLOSED
+            {
+                match this.state {
+                    State::Main => {
+                        this.tls.send_close_notify();
+                        *this.state = State::TlsClose;
+                    }
+                    State::TlsClose => *this.state = State::SocketClose,
+                    _ => unreachable!(),
+                }
+            } else if !wants_write && !wants_read {
                 return Pending;
-            } else if *this.flags & FLAG_WRITE == 0 && wants_write {
+            } else if *this.flags & (FLAG_WRITE | FLAG_WRITE_CLOSED) == 0 && wants_write {
                 match poll_io_unwrap(this.tls.write_tls(&mut w)) {
                     Pending => *this.flags |= FLAG_WRITE,
                     Ready(Err(e)) => return Ready(Err(e.into())),
-                    Ready(Ok(0)) => *this.state = State::SocketClose,
+                    Ready(Ok(0)) => *this.flags |= FLAG_WRITE_CLOSED,
                     Ready(Ok(_)) => (),
                 }
-            } else if *this.flags & FLAG_READ == 0 && wants_read {
+            } else if *this.flags & (FLAG_READ | FLAG_READ_CLOSED) == 0 && wants_read {
                 match poll_io_unwrap(this.tls.read_tls(&mut w)) {
                     Pending => *this.flags |= FLAG_READ,
                     Ready(Err(e)) => return Ready(Err(e.into())),
-                    Ready(Ok(0)) => *this.state = State::SocketClose,
+                    Ready(Ok(0)) => *this.flags |= FLAG_READ_CLOSED,
                     Ready(Ok(_)) => (),
                 }
 
@@ -262,7 +288,7 @@ impl<S: Socket> Stream for StreamTLS<S> {
     }
 }
 
-impl<S: Socket> StreamTLS<S> {
+impl<S: Socket, T: ClientTLSLike> StreamTLSInner<S, T> {
     /// Creates new stream.
     pub async fn new(stream: S) -> Result<Self, ChannelError>
     where
@@ -281,10 +307,7 @@ impl<S: Socket> StreamTLS<S> {
     /// Creates new uninitialized stream.
     pub fn new_uninit(stream: S) -> Result<Self, ChannelError> {
         let peer_addr = stream.peer_addr()?;
-        let tls = ClientConnection::new(
-            get_client_cfg()?,
-            ServerName::IpAddress(peer_addr.ip().into()),
-        )?;
+        let tls = T::new(peer_addr)?;
 
         Ok(Self {
             peer_addr,
@@ -337,75 +360,5 @@ fn poll_io_unwrap<R>(v: IoResult<R>) -> Poll<IoResult<R>> {
     match v {
         Err(e) if e.kind() == ErrorKind::WouldBlock => Pending,
         v => Ready(v),
-    }
-}
-
-fn get_client_cfg() -> Result<Arc<ClientConfig>, RustlsError> {
-    static CFG: OnceCell<Arc<ClientConfig>> = OnceCell::new();
-
-    // TODO: Restrict ciphersuite in accordance with spec
-    CFG.get_or_try_init(|| {
-        Ok(Arc::new(
-            ClientConfig::builder_with_provider(Arc::new(default_provider()))
-                .with_safe_default_protocol_versions()?
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NullCertVerifier))
-                .with_no_client_auth(),
-        ))
-    })
-    .map(Arc::clone)
-}
-
-/// Null cerificate verifier.
-#[derive(Debug)]
-struct NullCertVerifier;
-
-impl ServerCertVerifier for NullCertVerifier {
-    fn verify_server_cert(
-        &self,
-        _: &CertificateDer<'_>,
-        _: &[CertificateDer<'_>],
-        _: &ServerName<'_>,
-        _: &[u8],
-        _: UnixTime,
-    ) -> Result<ServerCertVerified, RustlsError> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _: &[u8],
-        _: &CertificateDer<'_>,
-        _: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, RustlsError> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _: &[u8],
-        _: &CertificateDer<'_>,
-        _: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, RustlsError> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        // TODO: All of them?
-        vec![
-            SignatureScheme::RSA_PKCS1_SHA1,
-            SignatureScheme::ECDSA_SHA1_Legacy,
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512,
-            SignatureScheme::ECDSA_NISTP521_SHA512,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512,
-            SignatureScheme::ED25519,
-            SignatureScheme::ED448,
-        ]
     }
 }

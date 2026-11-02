@@ -474,6 +474,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "onioncloud-ll-channel-fuzz"
+version = "0.0.0"
+dependencies = [
+ "arbitrary",
+ "futures-util",
+ "libfuzzer-sys",
+ "onioncloud-ll-channel",
+ "onioncloud-runtime",
+ "onioncloud-tart",
+ "pin-project",
+ "tracing",
+]
+
+[[package]]
 name = "onioncloud-ll-relay-cell"
 version = "0.1.0"
 dependencies = [

@@ -4,6 +4,7 @@ members = [
   "crates/ll-cell",
   "crates/ll-cell/fuzz",
   "crates/ll-channel",
+  "crates/ll-channel/fuzz",
   "crates/ll-relay-cell",
   "crates/ll-relay-cell/fuzz",
   "crates/rt",
@@ -152,6 +153,10 @@ features = [
 [workspace.dependencies.onioncloud-ll-cell]
 version = "0.1.0"
 path = "crates/ll-cell"
+
+[workspace.dependencies.onioncloud-ll-channel]
+version = "0.1.0"
+path = "crates/ll-channel"
 
 [workspace.dependencies.onioncloud-ll-relay-cell]
 version = "0.1.0"

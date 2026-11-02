@@ -39,3 +39,4 @@ features = [
 
 [features]
 loom = ["dep:loom"]
+test-dummy-tls = []

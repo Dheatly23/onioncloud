@@ -1,0 +1,40 @@
+[package]
+name = "onioncloud-ll-channel-fuzz"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary.workspace = true
+futures-util.workspace = true
+libfuzzer-sys.workspace = true
+pin-project.workspace = true
+
+[dependencies.onioncloud-ll-channel]
+workspace = true
+features = [
+  "test-dummy-tls",
+]
+
+[dependencies.onioncloud-runtime]
+workspace = true
+features = [
+  "tart",
+]
+
+[dependencies.onioncloud-tart]
+workspace = true
+
+[dependencies.tracing]
+workspace = true
+features = ["max_level_off"]
+
+[[bin]]
+name = "dummy_tls"
+path = "fuzz_targets/dummy_tls.rs"
+test = false
+doc = false
+bench = false
