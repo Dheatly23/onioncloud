@@ -3,6 +3,7 @@
 //! Contains generic traits defining network socket handler.
 
 pub mod emulation;
+pub mod pipe;
 
 use std::future::Future;
 use std::io::{ErrorKind, Result as IoResult};
