@@ -597,8 +597,6 @@ pub fn make_pipe(rt: &Runtime) -> (Pipe, Pipe) {
 mod tests {
     use super::*;
 
-    use std::pin::pin;
-
     use futures_util::{AsyncReadExt, AsyncWriteExt};
     use test_log::test;
     use tracing::info;
@@ -617,26 +615,109 @@ mod tests {
             let rt_ = executor.runtime();
             let rt = rt_.clone();
             rt_.spawn(async move {
-                let (client, server) = make_pipe(&rt);
+                let (mut client, mut server) = make_pipe(&rt);
 
                 rt.spawn(async move {
-                    let mut pipe = pin!(server);
+                    info!("Writing message.");
 
-                    pipe.as_mut().write_all(MSG).await.unwrap();
-                    pipe.as_mut().close().await.unwrap();
+                    server.write_all(MSG).await.unwrap();
+                    server.close().await.unwrap();
+
+                    info!("Done!");
                 });
 
-                let mut pipe = pin!(client);
+                info!("Reading message.");
 
                 let mut buf = [0; const { MSG.len() }];
-                pipe.as_mut().read_exact(&mut buf).await.unwrap();
+                client.read_exact(&mut buf).await.unwrap();
                 assert_eq!(buf, MSG);
-                assert_eq!(pipe.as_mut().read(&mut buf).await.unwrap(), 0);
+                assert_eq!(client.read(&mut buf).await.unwrap(), 0);
+
+                info!("Done!");
             });
 
             executor.run();
         }
 
         run_test(test);
+    }
+
+    #[test]
+    fn test_pipe_split() {
+        #[instrument]
+        fn test() {
+            let mut executor = Executor::builder().build();
+
+            let rt_ = executor.runtime();
+            let rt = rt_.clone();
+            rt_.spawn(async move {
+                let (client, server) = make_pipe(&rt);
+
+                rt.spawn(async move {
+                    let (mut read, mut write) = Pipe::split(server);
+
+                    info!("Reading message.");
+
+                    let mut buf = [0; const { MSG.len() }];
+                    read.read_exact(&mut buf).await.unwrap();
+                    assert_eq!(buf, MSG);
+                    assert_eq!(read.read(&mut buf).await.unwrap(), 0);
+
+                    info!("Writing message.");
+
+                    write.write_all(MSG).await.unwrap();
+                    write.close().await.unwrap();
+
+                    info!("Done!");
+                });
+
+                let (mut read, mut write) = Pipe::split(client);
+
+                info!("Writing message.");
+
+                write.write_all(MSG).await.unwrap();
+                write.close().await.unwrap();
+
+                info!("Reading message.");
+
+                let mut buf = [0; const { MSG.len() }];
+                read.read_exact(&mut buf).await.unwrap();
+                assert_eq!(buf, MSG);
+                assert_eq!(read.read(&mut buf).await.unwrap(), 0);
+
+                info!("Done!");
+            });
+
+            executor.run();
+        }
+
+        run_test(test);
+    }
+
+    #[test]
+    #[should_panic(expected = "Read and write half cannot be rejoined")]
+    fn test_pipe_rejoin_fail_same() {
+        let executor = Executor::builder().build();
+
+        let (client, server) = make_pipe(&executor.runtime());
+
+        let (read, _) = Pipe::split(client);
+        let (_, write) = Pipe::split(server);
+
+        let _pipe = Pipe::rejoin(read, write);
+    }
+
+    #[test]
+    #[should_panic(expected = "Read and write half cannot be rejoined")]
+    fn test_pipe_rejoin_fail_different() {
+        let executor = Executor::builder().build();
+
+        let (client, _) = make_pipe(&executor.runtime());
+        let (_, server) = make_pipe(&executor.runtime());
+
+        let (read, _) = Pipe::split(client);
+        let (_, write) = Pipe::split(server);
+
+        let _pipe = Pipe::rejoin(read, write);
     }
 }
