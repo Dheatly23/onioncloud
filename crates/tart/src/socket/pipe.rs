@@ -137,31 +137,20 @@ impl InnerHalf {
     fn write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<usize> {
         if buf.is_empty() {
             return Ready(0);
-        } else if self.end == self.start.wrapping_sub(1) {
-            trace!("Register write waker.");
-            match &mut self.rw_waker {
-                RWWaker::Write(w) => w.clone_from(cx.waker()),
-                v => *v = RWWaker::Write(cx.waker().clone()),
-            }
-            return Pending;
         }
 
-        let n = match self.start.cmp(&self.end) {
+        let start = self.start.wrapping_sub(1);
+        let n = match start.cmp(&self.end) {
             Equal => {
-                let l = buf.len().min(self.buf.len() - 1);
-                self.buf[..l].copy_from_slice(&buf[..l]);
-                self.start = 0;
-                self.end = l as u8;
-                l
+                trace!("Register write waker.");
+                match &mut self.rw_waker {
+                    RWWaker::Write(w) => w.clone_from(cx.waker()),
+                    v => *v = RWWaker::Write(cx.waker().clone()),
+                }
+                return Pending;
             }
             Greater => {
-                let l = usize::from(self.start - self.end - 1).min(buf.len());
-                self.buf[self.end as usize..self.end as usize + l].copy_from_slice(&buf[..l]);
-                self.end += l as u8;
-                l
-            }
-            Less if self.start == 0 => {
-                let l = (self.buf.len() - self.end as usize - 1).min(buf.len());
+                let l = usize::from(start - self.end).min(buf.len());
                 self.buf[self.end as usize..self.end as usize + l].copy_from_slice(&buf[..l]);
                 self.end += l as u8;
                 l
@@ -175,7 +164,7 @@ impl InnerHalf {
                 } else {
                     let (a, b) = buf.split_at(l1);
                     self.buf[self.end as usize..].copy_from_slice(a);
-                    let l2 = usize::from(self.start - 1).min(b.len());
+                    let l2 = usize::from(start).min(b.len());
                     self.buf[..l2].copy_from_slice(&b[..l2]);
                     self.end = l2 as u8;
                     l1 + l2
