@@ -289,13 +289,21 @@ impl Outer {
         ret
     }
 
+    unsafe fn inc(p: NonNull<Self>) {
+        let p = p.as_ptr().map_addr(|a| a & MASK);
+        debug_assert!(p.is_aligned(), "pointer {p:?} is not aligned");
+
+        // SAFETY: Pointer points to valid allocation.
+        unsafe { (*p).state.fetch_add(COUNT_FLAG, Relaxed) };
+    }
+
     unsafe fn dec(p: NonNull<Self>) {
         let p = p.as_ptr().map_addr(|a| a & MASK);
         debug_assert!(p.is_aligned(), "pointer {p:?} is not aligned");
 
         // SAFETY: Pointer points to valid allocation.
         let r = unsafe { (*p).state.fetch_sub(COUNT_FLAG, Release) };
-        if r & (COUNT_FLAG * 3) == COUNT_FLAG {
+        if r & (COUNT_FLAG * 15) == COUNT_FLAG {
             fence(Acquire);
 
             // SAFETY: Pointer points to valid allocation and we're about to drop it.
@@ -378,6 +386,62 @@ impl Pipe {
         self.0.as_ptr().addr() & MASK == other.0.as_ptr().addr() & MASK
     }
 
+    /// Splits pipe into [`ReadHalf`] and [`WriteHalf`].
+    pub fn split(this: Self) -> (ReadHalf, WriteHalf) {
+        // SAFETY: Pointer points to valid allocation.
+        unsafe { Outer::inc(this.0) }
+
+        (ReadHalf(Self(this.0)), WriteHalf(this))
+    }
+
+    /// Rejoins [`ReadHalf`] and [`WriteHalf`].
+    ///
+    /// Effectively reverses [`Self::split`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if halves are not part of the same end of pipe.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use onioncloud_tart::rt::Executor;
+    /// # use onioncloud_tart::socket::pipe::{Pipe, make_pipe};
+    /// let executor = Executor::builder().build();
+    ///
+    /// let (client, server) = make_pipe(&executor.runtime());
+    ///
+    /// // Split.
+    /// let (read, write) = Pipe::split(client);
+    ///
+    /// // Rejoin.
+    /// let client = Pipe::rejoin(read, write);
+    /// ```
+    ///
+    /// This one panics because read half is not of the same end of pipe as write half.
+    ///
+    /// ```should_panic
+    /// # use onioncloud_tart::rt::Executor;
+    /// # use onioncloud_tart::socket::pipe::{Pipe, make_pipe};
+    /// let executor = Executor::builder().build();
+    ///
+    /// let (client, server) = make_pipe(&executor.runtime());
+    ///
+    /// // Split.
+    /// let (cread, cwrite) = Pipe::split(client);
+    /// let (sread, swrite) = Pipe::split(server);
+    ///
+    /// // Rejoin.
+    /// let pipe = Pipe::rejoin(cread, swrite);
+    /// ```
+    pub fn rejoin(read: ReadHalf, write: WriteHalf) -> Self {
+        if read.0.0 != write.0.0 {
+            panic!("Read and write half cannot be rejoined");
+        }
+
+        read.0
+    }
+
     fn get(&self) -> (&Outer, bool) {
         let p = self.0.as_ptr();
         let is_client = p.addr() & 1 != 0;
@@ -407,7 +471,7 @@ impl AsyncRead for Pipe {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<IoResult<usize>> {
-        Pin::into_inner(self).inner(false, |i| i.poll_read(cx, buf))
+        self.inner(false, |i| i.poll_read(cx, buf))
     }
 
     #[instrument(level = "trace", name = "Pipe::poll_read_vectored", skip_all)]
@@ -416,24 +480,24 @@ impl AsyncRead for Pipe {
         cx: &mut Context<'_>,
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<IoResult<usize>> {
-        Pin::into_inner(self).inner(false, |i| i.poll_read_vectored(cx, bufs))
+        self.inner(false, |i| i.poll_read_vectored(cx, bufs))
     }
 }
 
 impl AsyncWrite for Pipe {
     #[instrument(level = "trace", name = "Pipe::poll_write", skip_all)]
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<IoResult<usize>> {
-        Pin::into_inner(self).inner(true, |i| i.poll_write(cx, buf))
+        self.inner(true, |i| i.poll_write(cx, buf))
     }
 
     #[instrument(level = "trace", name = "Pipe::poll_flush", skip_all)]
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
-        Pin::into_inner(self).inner(true, |i| i.poll_flush(cx))
+        self.inner(true, |i| i.poll_flush(cx))
     }
 
     #[instrument(level = "trace", name = "Pipe::poll_close", skip_all)]
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
-        Pin::into_inner(self).inner(true, |i| i.poll_close(cx))
+        self.inner(true, |i| i.poll_close(cx))
     }
 
     #[instrument(level = "trace", name = "Pipe::poll_write_vectored", skip_all)]
@@ -442,7 +506,81 @@ impl AsyncWrite for Pipe {
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<IoResult<usize>> {
-        Pin::into_inner(self).inner(true, |i| i.poll_write_vectored(cx, bufs))
+        self.inner(true, |i| i.poll_write_vectored(cx, bufs))
+    }
+}
+
+/// Read half of [`Pipe`].
+#[must_use = "ReadHalf is useless without polling it"]
+pub struct ReadHalf(Pipe);
+
+impl Debug for ReadHalf {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let (p, c) = self.0.get();
+        f.debug_struct("ReadHalf")
+            .field("ptr", &(p as *const Outer))
+            .field("is_client", &c)
+            .finish()
+    }
+}
+
+impl AsyncRead for ReadHalf {
+    #[instrument(level = "trace", name = "ReadHalf::poll_read", skip_all)]
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<IoResult<usize>> {
+        self.0.inner(false, |i| i.poll_read(cx, buf))
+    }
+
+    #[instrument(level = "trace", name = "ReadHalf::poll_read_vectored", skip_all)]
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<IoResult<usize>> {
+        self.0.inner(false, |i| i.poll_read_vectored(cx, bufs))
+    }
+}
+
+/// Write half of [`Pipe`].
+#[must_use = "WriteHalf is useless without polling it"]
+pub struct WriteHalf(Pipe);
+
+impl Debug for WriteHalf {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let (p, c) = self.0.get();
+        f.debug_struct("WriteHalf")
+            .field("ptr", &(p as *const Outer))
+            .field("is_client", &c)
+            .finish()
+    }
+}
+
+impl AsyncWrite for WriteHalf {
+    #[instrument(level = "trace", name = "WriteHalf::poll_write", skip_all)]
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<IoResult<usize>> {
+        self.0.inner(true, |i| i.poll_write(cx, buf))
+    }
+
+    #[instrument(level = "trace", name = "WriteHalf::poll_flush", skip_all)]
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
+        self.0.inner(true, |i| i.poll_flush(cx))
+    }
+
+    #[instrument(level = "trace", name = "WriteHalf::poll_close", skip_all)]
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
+        self.0.inner(true, |i| i.poll_close(cx))
+    }
+
+    #[instrument(level = "trace", name = "WriteHalf::poll_write_vectored", skip_all)]
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<IoResult<usize>> {
+        self.0.inner(true, |i| i.poll_write_vectored(cx, bufs))
     }
 }
 
