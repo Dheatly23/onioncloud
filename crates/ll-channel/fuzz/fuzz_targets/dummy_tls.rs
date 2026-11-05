@@ -1,13 +1,13 @@
 #![no_main]
 
 use std::future::poll_fn;
-use std::io::{ErrorKind, Result as IoResult};
+use std::io::ErrorKind;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::pin::{Pin, pin};
+use std::pin::pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::Poll;
 
-use futures_util::{AsyncRead, AsyncWrite};
+use futures_util::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libfuzzer_sys::fuzz_target;
 use onioncloud_ll_channel::stream::{Stream, StreamDummyClient, transform_server_message};
 use onioncloud_tart::rt::schedule::FuzzSchedule;
@@ -15,6 +15,7 @@ use onioncloud_tart::rt::{Executor, Runtime};
 use onioncloud_tart::socket::emulation::{
     FuzzBidiSocketLimiter, FuzzBidiSocketLimiterShared, SocketLimiterWrapper,
 };
+use onioncloud_tart::socket::pipe::{Pipe, make_pipe};
 use onioncloud_tart::socket::{OpenOpt, Socket as DynSocket, SocketHandler, SocketOpener};
 
 struct SharedData {
@@ -22,62 +23,63 @@ struct SharedData {
     client_write: Vec<u8>,
     server_read: Vec<u8>,
     server_write: Vec<u8>,
+
+    client_limiter: FuzzBidiSocketLimiter,
+    server_limiter: FuzzBidiSocketLimiter,
 }
 
-struct Server {
-    shared: Arc<SharedData>,
-    read_ix: usize,
-    write_ix: usize,
-}
+struct ClientLimiterWrapper(Arc<SharedData>);
 
-impl AsyncRead for Server {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        _: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<IoResult<usize>> {
-        let this = Pin::into_inner(self);
-        let n = buf.len().min(this.shared.server_read.len() - this.read_ix);
-        buf[..n].copy_from_slice(&this.shared.server_read[this.read_ix..this.read_ix + n]);
-        this.read_ix += n;
-        Poll::Ready(Ok(n))
+impl AsRef<FuzzBidiSocketLimiter> for ClientLimiterWrapper {
+    fn as_ref(&self) -> &FuzzBidiSocketLimiter {
+        &self.0.client_limiter
     }
 }
 
-impl AsyncWrite for Server {
-    fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, buf: &[u8]) -> Poll<IoResult<usize>> {
-        let this = Pin::into_inner(self);
-        let n = buf
-            .len()
-            .min(this.shared.server_write.len() - this.write_ix);
-        assert_eq!(
-            &buf[..n],
-            &this.shared.server_write[this.write_ix..this.write_ix + n],
-            "mismatch at index {}..{}",
-            this.write_ix,
-            this.write_ix + n
-        );
-        this.write_ix += n;
-        Poll::Ready(Ok(n))
-    }
+struct ServerLimiterWrapper(Arc<SharedData>);
 
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<IoResult<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<IoResult<()>> {
-        Poll::Ready(Ok(()))
+impl AsRef<FuzzBidiSocketLimiter> for ServerLimiterWrapper {
+    fn as_ref(&self) -> &FuzzBidiSocketLimiter {
+        &self.0.server_limiter
     }
 }
 
-async fn client(rt: Runtime, shared: Arc<SharedData>, limiter: FuzzBidiSocketLimiter) {
+fn server(rt: Runtime, shared: Arc<SharedData>, socket: Pipe) {
+    let (mut read, mut write) = Pipe::split(socket);
+    let sr = shared.clone();
+    let sw = shared;
+
+    rt.spawn(async move {
+        let mut buf = [0u8; 256];
+        let mut ix = 0;
+        loop {
+            let n = read.read(&mut buf).await.unwrap();
+            let exp = &sr.server_read[ix..];
+            if exp.is_empty() {
+                assert_eq!(n, 0);
+                break;
+            }
+
+            assert_ne!(n, 0);
+            assert_eq!(&buf[..n], &exp[..n]);
+            ix += n;
+        }
+    });
+
+    rt.spawn(async move {
+        write.write_all(&sw.server_write).await.unwrap();
+        write.close().await.unwrap();
+    });
+}
+
+async fn client(rt: Runtime, shared: Arc<SharedData>) {
     let socket = rt
         .connect(&[SocketAddr::from((IPV4_ADDR, 80))])
         .await
         .unwrap();
     let mut socket = pin!(SocketLimiterWrapper::new(
         StreamDummyClient::new_uninit(socket).unwrap(),
-        limiter
+        FuzzBidiSocketLimiterShared::new(ClientLimiterWrapper(shared.clone()))
     ));
 
     let mut buf = vec![0; shared.client_read.len()];
@@ -146,7 +148,6 @@ const IPV6_ADDR: Ipv6Addr = Ipv6Addr::from_bits(0x00518776_00522415_00535453_004
 
 struct Network {
     shared: Arc<SharedData>,
-    limiter: Arc<FuzzBidiSocketLimiter>,
 }
 
 impl SocketHandler for Network {
@@ -163,16 +164,20 @@ impl SocketHandler for Network {
             return Box::pin(async { Err(ErrorKind::HostUnreachable.into()) });
         };
 
-        let server = Box::pin(SocketLimiterWrapper::new(
-            Server {
-                shared: self.shared.clone(),
-                read_ix: 0,
-                write_ix: 0,
-            },
-            FuzzBidiSocketLimiterShared::new(self.limiter.clone()),
-        )) as DynSocket;
+        let rt = args.rt.clone();
+        let shared = self.shared.clone();
 
-        Box::pin(async move { Ok((a, server)) })
+        Box::pin(async move {
+            let (c, s) = make_pipe(&rt);
+            server(rt, shared.clone(), s);
+            Ok((
+                a,
+                Box::pin(SocketLimiterWrapper::new(
+                    c,
+                    FuzzBidiSocketLimiterShared::new(ServerLimiterWrapper(shared)),
+                )) as DynSocket,
+            ))
+        })
     }
 }
 
@@ -187,15 +192,17 @@ type Data = (
 fuzz_target!(|data: Data| {
     let (client_limiter, server_limiter, schedule, read, write) = data;
     let shared = Arc::new(SharedData {
-        server_read: transform_server_message(&read),
-        server_write: transform_server_message(&write),
+        server_read: transform_server_message(&write),
+        server_write: transform_server_message(&read),
         client_read: read,
         client_write: write,
+
+        client_limiter,
+        server_limiter,
     });
 
     let network = Network {
         shared: shared.clone(),
-        limiter: Arc::new(server_limiter),
     };
 
     let mut executor = Executor::builder()
@@ -203,10 +210,8 @@ fuzz_target!(|data: Data| {
         .with_network(network)
         .build();
 
-    {
-        let rt = executor.runtime();
-        rt.spawn(client(rt.clone(), shared, client_limiter));
-    }
+    let rt = executor.runtime();
+    rt.spawn(client(rt.clone(), shared));
 
     executor.run();
 });

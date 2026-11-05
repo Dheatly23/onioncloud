@@ -8,11 +8,12 @@ use std::io::{Error as IoError, ErrorKind, IoSlice, IoSliceMut, Read, Result as 
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::Poll::*;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 
 use futures_io::{AsyncRead, AsyncWrite};
 use onioncloud_runtime::Socket;
 use pin_project::pin_project;
+use tracing::{instrument, trace};
 
 use super::Stream;
 use crate::error::ChannelError;
@@ -71,7 +72,7 @@ impl<S: Socket, T: TLSLike> AsyncRead for StreamTLSInner<S, T> {
         buf: &mut [u8],
     ) -> Poll<IoResult<usize>> {
         let this = self.project();
-        match this.tls.reader().read(buf) {
+        match ready!(poll_io_unwrap(this.tls.reader().read(buf))) {
             Ok(0) if *this.flags & FLAG_READ_CLOSED == 0 => Pending,
             v => Ready(v),
         }
@@ -84,7 +85,7 @@ impl<S: Socket, T: TLSLike> AsyncRead for StreamTLSInner<S, T> {
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<IoResult<usize>> {
         let this = self.project();
-        match this.tls.reader().read_vectored(bufs) {
+        match ready!(poll_io_unwrap(this.tls.reader().read_vectored(bufs))) {
             Ok(0) if *this.flags & FLAG_READ_CLOSED == 0 => Pending,
             v => Ready(v),
         }
@@ -100,7 +101,7 @@ impl<S: Socket, T: TLSLike> AsyncWrite for StreamTLSInner<S, T> {
             State::Closed => return Ready(Ok(0)),
             _ => return Pending,
         }
-        match this.tls.writer().write(buf) {
+        match ready!(poll_io_unwrap(this.tls.writer().write(buf))) {
             Ok(0) if *this.flags & FLAG_WRITE_CLOSED == 0 => Pending,
             v => Ready(v),
         }
@@ -118,7 +119,7 @@ impl<S: Socket, T: TLSLike> AsyncWrite for StreamTLSInner<S, T> {
             State::Closed => return Ready(Ok(0)),
             _ => return Pending,
         }
-        match this.tls.writer().write_vectored(bufs) {
+        match ready!(poll_io_unwrap(this.tls.writer().write_vectored(bufs))) {
             Ok(0) if *this.flags & FLAG_WRITE_CLOSED == 0 => Pending,
             v => Ready(v),
         }
@@ -132,7 +133,7 @@ impl<S: Socket, T: TLSLike> AsyncWrite for StreamTLSInner<S, T> {
             State::Closed => return Ready(Ok(())),
             _ => return Pending,
         }
-        this.tls.writer().flush()?;
+        ready!(poll_io_unwrap(this.tls.writer().flush()))?;
         if this.tls.wants_write() && *this.flags & FLAG_WRITE_CLOSED == 0 {
             Pending
         } else {
@@ -172,10 +173,11 @@ impl<S: Socket, T: TLSLike> Stream for StreamTLSInner<S, T> {
 
     fn wants_poll(&self) -> bool {
         matches!(self.state, State::SocketClose | State::Closed)
-            || (self.flags & FLAG_READ == 0 && self.tls.wants_read())
-            || (self.flags & FLAG_WRITE == 0 && self.tls.wants_write())
+            || (self.flags & (FLAG_READ | FLAG_READ_CLOSED) == 0 && self.tls.wants_read())
+            || (self.flags & (FLAG_WRITE | FLAG_WRITE_CLOSED) == 0 && self.tls.wants_write())
     }
 
+    #[instrument(level = "debug", skip_all, fields(is_same_poll))]
     fn poll_inner(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -188,6 +190,8 @@ impl<S: Socket, T: TLSLike> Stream for StreamTLSInner<S, T> {
         }
 
         loop {
+            trace!(state = ?this.state, flags = this.flags, "poll inner loop");
+
             match this.state {
                 State::Main | State::TlsClose => (),
                 State::Init | State::InitClosing if this.tls.is_handshaking() => {
@@ -252,6 +256,8 @@ impl<S: Socket, T: TLSLike> Stream for StreamTLSInner<S, T> {
 
             let wants_write = this.tls.wants_write();
             let wants_read = this.tls.wants_read();
+            trace!(wants_read, wants_write, "reading/writing into TLS");
+
             if *this.flags & (FLAG_READ_CLOSED | FLAG_WRITE_CLOSED)
                 == FLAG_READ_CLOSED | FLAG_WRITE_CLOSED
             {
