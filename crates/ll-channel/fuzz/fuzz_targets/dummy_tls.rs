@@ -68,6 +68,7 @@ fn server(rt: Runtime, shared: Arc<SharedData>, socket: Pipe) {
 
     rt.spawn(async move {
         write.write_all(&sw.server_write).await.unwrap();
+        write.flush().await.unwrap();
         write.close().await.unwrap();
     });
 }
