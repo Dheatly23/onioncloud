@@ -1,7 +1,13 @@
 use std::borrow::Cow;
+use std::future::poll_fn;
 use std::io::{ErrorKind, Read, Result as IoResult, Write};
 use std::mem::take;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::Poll::*;
+
+use futures_io::{AsyncRead, AsyncWrite};
+use tracing::{instrument, trace};
 
 use super::{ClientTLSLike, TLSLike};
 use crate::error::ChannelError;
@@ -43,14 +49,18 @@ enum IoState {
 struct DummyWrapperIO<'a>(&'a mut DummyWrapper);
 
 impl Read for DummyWrapperIO<'_> {
+    #[instrument(level = "debug", name = "DummyWrapper::read", skip_all, fields(len = buf.len()))]
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
         if buf.is_empty() {
             return Ok(0);
         } else if self.0.read_len == 0 {
-            if matches!(self.0.read_state, State::Closed) {
-                return Ok(0);
-            }
-            return Err(ErrorKind::WouldBlock.into());
+            return if matches!(self.0.read_state, State::Closed) {
+                trace!("Read 0 bytes");
+                Ok(0)
+            } else {
+                trace!("Pending read");
+                Err(ErrorKind::WouldBlock.into())
+            };
         }
 
         let i = usize::from(self.0.read_ix);
@@ -60,18 +70,22 @@ impl Read for DummyWrapperIO<'_> {
         buf[..n].copy_from_slice(&self.0.read_buf[i..i + n]);
         self.0.read_ix = (self.0.read_ix + n as u8) % (BUF_SIZE as u8);
         self.0.read_len -= n as u8;
+        trace!("Read {n} bytes");
         Ok(n)
     }
 }
 
 impl Write for DummyWrapperIO<'_> {
+    #[instrument(level = "debug", name = "DummyWrapper::write", skip_all, fields(len = buf.len()))]
     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
         if buf.is_empty() || matches!(self.0.write_state, State::Closed) {
+            trace!("Wrote 0 bytes");
             return Ok(0);
         } else if self.0.write_len == BUF_SIZE as u8
             || matches!(self.0.write_state, State::Handshake(_) | State::Closing(_))
             || self.0.req_close
         {
+            trace!("Pending write");
             return Err(ErrorKind::WouldBlock.into());
         }
 
@@ -81,13 +95,16 @@ impl Write for DummyWrapperIO<'_> {
             .min(buf.len());
         self.0.write_buf[i..i + n].copy_from_slice(&buf[..n]);
         self.0.write_len += n as u8;
+        trace!("Wrote {n} bytes");
         Ok(n)
     }
 
     fn flush(&mut self) -> IoResult<()> {
         if matches!(self.0.write_state, State::Closed) || self.0.write_len == 0 {
+            trace!("Flushed buffer");
             Ok(())
         } else {
+            trace!("Pending flush");
             Err(ErrorKind::WouldBlock.into())
         }
     }
@@ -145,9 +162,12 @@ impl TLSLike for DummyWrapper {
         DummyWrapperIO(self)
     }
 
+    #[instrument(level = "debug", name = "DummyWrapper::read_tls", skip_all)]
     fn read_tls(&mut self, r: &mut dyn Read) -> IoResult<usize> {
         let mut n = 0;
         while self.wants_read() {
+            trace!(state = ?self.read_state, "Reading in TLS");
+
             let mut arr = [0; BUF_SIZE];
 
             let state = match &mut self.read_state {
@@ -157,6 +177,7 @@ impl TLSLike for DummyWrapper {
 
                     let t = r.read(buf)?;
                     if t == 0 && !buf.is_empty() {
+                        trace!("Read closed, read 0 bytes");
                         self.read_state = State::Closed;
                         break;
                     }
@@ -180,6 +201,7 @@ impl TLSLike for DummyWrapper {
 
                     let t = r.read(buf)?;
                     if t == 0 && !buf.is_empty() {
+                        trace!("Read closed, read 0 bytes");
                         self.read_state = State::Closed;
                         break;
                     }
@@ -192,6 +214,7 @@ impl TLSLike for DummyWrapper {
                     );
                     *v += t as u8;
                     if usize::from(*v) == CLOSE_MSG.len() {
+                        trace!("Read closed, received close message");
                         self.read_state = State::Closed;
                     }
 
@@ -248,12 +271,15 @@ impl TLSLike for DummyWrapper {
         Ok(n)
     }
 
+    #[instrument(level = "debug", name = "DummyWrapper::write_tls", skip_all)]
     fn write_tls(&mut self, w: &mut dyn Write) -> IoResult<usize> {
         let mut n = 0;
         while self.wants_write() {
             if self.write_len == 0 && take(&mut self.req_close) {
                 self.write_state = State::Closing(0);
             }
+
+            trace!(state = ?self.write_state, "Writing in TLS");
 
             let state = match &mut self.write_state {
                 State::Handshake(v) => {
@@ -262,6 +288,7 @@ impl TLSLike for DummyWrapper {
 
                     let t = w.write(buf)?;
                     if t == 0 && !buf.is_empty() {
+                        trace!("Write closed, wrote 0 bytes");
                         self.write_state = State::Closed;
                         break;
                     }
@@ -284,6 +311,7 @@ impl TLSLike for DummyWrapper {
 
                     let t = w.write(buf)?;
                     if t == 0 && !buf.is_empty() {
+                        trace!("Write closed, wrote 0 bytes");
                         self.write_state = State::Closed;
                         break;
                     }
@@ -291,6 +319,7 @@ impl TLSLike for DummyWrapper {
 
                     *v += t as u8;
                     if usize::from(*v) == CLOSE_MSG.len() {
+                        trace!("Write closed, sent close message");
                         self.write_state = State::Closed;
                     }
 
@@ -394,4 +423,92 @@ pub fn transform_server_message(buf: &[u8]) -> Vec<u8> {
     }
     ret.extend_from_slice(CLOSE_MSG);
     ret
+}
+
+/// Do handshake protocol.
+pub async fn do_handshake<T>(mut socket: Pin<&mut T>) -> IoResult<()>
+where
+    T: AsyncRead + AsyncWrite,
+{
+    let mut read_ix = 0;
+    let mut write_ix = 0;
+
+    poll_fn(|cx| {
+        while write_ix < HANDSHAKE_MSG.len() {
+            write_ix += match socket.as_mut().poll_write(cx, &HANDSHAKE_MSG[write_ix..]) {
+                Pending => break,
+                Ready(Err(e)) => return Ready(Err(e)),
+                Ready(Ok(0)) => return Ready(Err(ErrorKind::UnexpectedEof.into())),
+                Ready(Ok(n)) => n,
+            };
+        }
+
+        let mut buf = [0; const { HANDSHAKE_MSG.len() }];
+        while read_ix < HANDSHAKE_MSG.len() {
+            let n = match socket.as_mut().poll_read(cx, &mut buf[read_ix..]) {
+                Pending => break,
+                Ready(Err(e)) => return Ready(Err(e)),
+                Ready(Ok(0)) => return Ready(Err(ErrorKind::UnexpectedEof.into())),
+                Ready(Ok(n)) => n,
+            };
+
+            if &buf[read_ix..read_ix + n] != &HANDSHAKE_MSG[read_ix..read_ix + n] {
+                return Ready(Err(ErrorKind::UnexpectedEof.into()));
+            }
+
+            read_ix += n;
+        }
+
+        if read_ix >= HANDSHAKE_MSG.len() && write_ix >= HANDSHAKE_MSG.len() {
+            Ready(Ok(()))
+        } else {
+            Pending
+        }
+    })
+    .await
+}
+
+/// Do closing protocol and closes socket.
+pub async fn do_close<T>(mut socket: Pin<&mut T>) -> IoResult<()>
+where
+    T: AsyncRead + AsyncWrite,
+{
+    let mut read_ix = 0;
+    let mut write_ix = 0;
+
+    poll_fn(|cx| {
+        while write_ix < CLOSE_MSG.len() {
+            write_ix += match socket.as_mut().poll_write(cx, &CLOSE_MSG[write_ix..]) {
+                Pending => break,
+                Ready(Err(e)) => return Ready(Err(e)),
+                Ready(Ok(0)) => return Ready(Err(ErrorKind::UnexpectedEof.into())),
+                Ready(Ok(n)) => n,
+            };
+        }
+
+        let mut buf = [0; const { CLOSE_MSG.len() }];
+        while read_ix < CLOSE_MSG.len() {
+            let n = match socket.as_mut().poll_read(cx, &mut buf[read_ix..]) {
+                Pending => break,
+                Ready(Err(e)) => return Ready(Err(e)),
+                Ready(Ok(0)) => return Ready(Err(ErrorKind::UnexpectedEof.into())),
+                Ready(Ok(n)) => n,
+            };
+
+            if &buf[read_ix..read_ix + n] != &CLOSE_MSG[read_ix..read_ix + n] {
+                return Ready(Err(ErrorKind::UnexpectedEof.into()));
+            }
+
+            read_ix += n;
+        }
+
+        if read_ix >= CLOSE_MSG.len() && write_ix >= CLOSE_MSG.len() {
+            Ready(Ok(()))
+        } else {
+            Pending
+        }
+    })
+    .await?;
+
+    poll_fn(|cx| socket.as_mut().poll_close(cx)).await
 }

@@ -461,7 +461,6 @@ dependencies = [
  "anyhow",
  "base64ct",
  "futures-io",
- "loom",
  "once_cell",
  "onioncloud-ll-cell",
  "onioncloud-runtime",

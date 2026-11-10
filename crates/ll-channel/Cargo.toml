@@ -17,10 +17,6 @@ rustls.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-[dependencies.loom]
-workspace = true
-optional = true
-
 [dev-dependencies]
 anyhow.workspace = true
 onioncloud-tart.workspace = true
@@ -38,5 +34,4 @@ features = [
 ]
 
 [features]
-loom = ["dep:loom"]
 test-dummy-tls = []

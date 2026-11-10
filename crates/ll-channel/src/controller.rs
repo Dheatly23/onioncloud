@@ -11,7 +11,6 @@ use onioncloud_runtime::{HasNetwork, HasTimer, Timer as _};
 use pin_project::pin_project;
 use tracing::{Span, info_span, instrument, trace};
 
-use crate::error::ChannelError;
 use crate::handle::{ChannelHandle, HandleBuilder};
 use crate::stream::Stream;
 
@@ -135,7 +134,7 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
                 if ret.is_shutdown {
                     trace!("controller request graceful shutdown");
                     state.set(State::Shutdown);
-                    let _ = stream.as_mut().poll_close(cx).map_err(ChannelError::from)?;
+                    stream.as_mut().request_shutdown();
                     continue;
                 }
 
@@ -303,6 +302,7 @@ mod tests {
     use test_log::test;
     use tracing::info;
 
+    use crate::error::ChannelError;
     use crate::handle::{Handle, Return};
     use crate::stream::StreamNoTls;
 

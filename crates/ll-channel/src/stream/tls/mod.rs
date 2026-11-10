@@ -8,7 +8,7 @@ use std::io::{Error as IoError, ErrorKind, IoSlice, IoSliceMut, Read, Result as 
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::Poll::*;
-use std::task::{Context, Poll, ready};
+use std::task::{Context, Poll};
 
 use futures_io::{AsyncRead, AsyncWrite};
 use onioncloud_runtime::Socket;
@@ -64,97 +64,57 @@ const FLAG_WRITE: u8 = 1 << 1;
 const FLAG_READ_CLOSED: u8 = 1 << 2;
 const FLAG_WRITE_CLOSED: u8 = 1 << 3;
 
-impl<S: Socket, T: TLSLike> AsyncRead for StreamTLSInner<S, T> {
+impl<S: Socket, T: TLSLike> Read for StreamTLSInner<S, T> {
     #[inline]
-    fn poll_read(
-        self: Pin<&mut Self>,
-        _: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<IoResult<usize>> {
-        let this = self.project();
-        match ready!(poll_io_unwrap(this.tls.reader().read(buf))) {
-            Ok(0) if *this.flags & FLAG_READ_CLOSED == 0 => Pending,
-            v => Ready(v),
+    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+        match self.state {
+            State::Init | State::InitClosing | State::SocketClose => {
+                Err(ErrorKind::WouldBlock.into())
+            }
+            _ => self.tls.reader().read(buf),
         }
     }
 
     #[inline]
-    fn poll_read_vectored(
-        self: Pin<&mut Self>,
-        _: &mut Context<'_>,
-        bufs: &mut [IoSliceMut<'_>],
-    ) -> Poll<IoResult<usize>> {
-        let this = self.project();
-        match ready!(poll_io_unwrap(this.tls.reader().read_vectored(bufs))) {
-            Ok(0) if *this.flags & FLAG_READ_CLOSED == 0 => Pending,
-            v => Ready(v),
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> IoResult<usize> {
+        match self.state {
+            State::Init | State::InitClosing | State::SocketClose => {
+                Err(ErrorKind::WouldBlock.into())
+            }
+            _ => self.tls.reader().read_vectored(bufs),
         }
     }
 }
 
-impl<S: Socket, T: TLSLike> AsyncWrite for StreamTLSInner<S, T> {
+impl<S: Socket, T: TLSLike> Write for StreamTLSInner<S, T> {
     #[inline]
-    fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, buf: &[u8]) -> Poll<IoResult<usize>> {
-        let this = self.project();
-        match this.state {
-            State::Main => (),
-            State::Closed => return Ready(Ok(0)),
-            _ => return Pending,
-        }
-        match ready!(poll_io_unwrap(this.tls.writer().write(buf))) {
-            Ok(0) if *this.flags & FLAG_WRITE_CLOSED == 0 => Pending,
-            v => Ready(v),
-        }
-    }
-
-    #[inline]
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
-        _: &mut Context<'_>,
-        bufs: &[IoSlice<'_>],
-    ) -> Poll<IoResult<usize>> {
-        let this = self.project();
-        match this.state {
-            State::Main => (),
-            State::Closed => return Ready(Ok(0)),
-            _ => return Pending,
-        }
-        match ready!(poll_io_unwrap(this.tls.writer().write_vectored(bufs))) {
-            Ok(0) if *this.flags & FLAG_WRITE_CLOSED == 0 => Pending,
-            v => Ready(v),
-        }
-    }
-
-    #[inline]
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<IoResult<()>> {
-        let this = self.project();
-        match this.state {
-            State::Main => (),
-            State::Closed => return Ready(Ok(())),
-            _ => return Pending,
-        }
-        ready!(poll_io_unwrap(this.tls.writer().flush()))?;
-        if this.tls.wants_write() && *this.flags & FLAG_WRITE_CLOSED == 0 {
-            Pending
-        } else {
-            Ready(Ok(()))
-        }
-    }
-
-    #[inline]
-    fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<IoResult<()>> {
-        let this = self.project();
-        match this.state {
-            State::Init => *this.state = State::InitClosing,
-            State::Main => {
-                this.tls.send_close_notify();
-                *this.state = State::TlsClose;
+    fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+        match self.state {
+            State::Init | State::InitClosing | State::SocketClose => {
+                Err(ErrorKind::WouldBlock.into())
             }
-            State::Closed => return Ready(Ok(())),
-            _ => (),
+            _ => self.tls.writer().write(buf),
         }
+    }
 
-        Pending
+    #[inline]
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> IoResult<usize> {
+        match self.state {
+            State::Init | State::InitClosing | State::SocketClose => {
+                Err(ErrorKind::WouldBlock.into())
+            }
+            _ => self.tls.writer().write_vectored(bufs),
+        }
+    }
+
+    #[inline]
+    fn flush(&mut self) -> IoResult<()> {
+        match self.state {
+            State::Init | State::InitClosing | State::SocketClose => {
+                Err(ErrorKind::WouldBlock.into())
+            }
+            _ => self.tls.writer().flush(),
+        }
     }
 }
 
@@ -175,6 +135,18 @@ impl<S: Socket, T: TLSLike> Stream for StreamTLSInner<S, T> {
         matches!(self.state, State::SocketClose | State::Closed)
             || (self.flags & (FLAG_READ | FLAG_READ_CLOSED) == 0 && self.tls.wants_read())
             || (self.flags & (FLAG_WRITE | FLAG_WRITE_CLOSED) == 0 && self.tls.wants_write())
+    }
+
+    fn request_shutdown(self: Pin<&mut Self>) {
+        let this = self.project();
+        match this.state {
+            State::Init => *this.state = State::InitClosing,
+            State::Main => {
+                this.tls.send_close_notify();
+                *this.state = State::TlsClose;
+            }
+            _ => (),
+        }
     }
 
     #[instrument(level = "debug", skip_all, fields(is_same_poll))]
@@ -332,24 +304,29 @@ struct WrapAsync<'a, 'b, S> {
 }
 
 impl<S: AsyncRead> Read for WrapAsync<'_, '_, S> {
+    #[inline]
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
         poll_io_wrap(self.p.as_mut().poll_read(self.cx, buf))
     }
 
+    #[inline]
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> IoResult<usize> {
         poll_io_wrap(self.p.as_mut().poll_read_vectored(self.cx, bufs))
     }
 }
 
 impl<S: AsyncWrite> Write for WrapAsync<'_, '_, S> {
+    #[inline]
     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
         poll_io_wrap(self.p.as_mut().poll_write(self.cx, buf))
     }
 
+    #[inline]
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> IoResult<usize> {
         poll_io_wrap(self.p.as_mut().poll_write_vectored(self.cx, bufs))
     }
 
+    #[inline]
     fn flush(&mut self) -> IoResult<()> {
         poll_io_wrap(self.p.as_mut().poll_flush(self.cx))
     }

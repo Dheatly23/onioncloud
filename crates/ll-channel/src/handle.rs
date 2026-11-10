@@ -2,11 +2,11 @@
 
 use std::error::Error;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
-use std::io::{ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
+use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::Context;
 use std::time::Instant;
 
 use crate::error::ChannelError;
@@ -69,40 +69,42 @@ impl<R: Debug> Debug for Handle<'_, '_, R> {
     }
 }
 
-#[inline]
-fn poll_wrap<T>(v: Poll<IoResult<T>>) -> IoResult<T> {
-    match v {
-        Poll::Ready(v) => v,
-        Poll::Pending => Err(ErrorKind::WouldBlock.into()),
-    }
-}
-
 impl<R> Read for Handle<'_, '_, R> {
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-        poll_wrap(self.stream.as_mut().poll_read(self.cx, buf))
+        // SAFETY: Stream is not moved.
+        let stream = unsafe { Pin::into_inner_unchecked(self.stream.as_mut()) };
+        stream.read(buf)
     }
 
     #[inline]
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> IoResult<usize> {
-        poll_wrap(self.stream.as_mut().poll_read_vectored(self.cx, bufs))
+        // SAFETY: Stream is not moved.
+        let stream = unsafe { Pin::into_inner_unchecked(self.stream.as_mut()) };
+        stream.read_vectored(bufs)
     }
 }
 
 impl<R> Write for Handle<'_, '_, R> {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
-        poll_wrap(self.stream.as_mut().poll_write(self.cx, buf))
+        // SAFETY: Stream is not moved.
+        let stream = unsafe { Pin::into_inner_unchecked(self.stream.as_mut()) };
+        stream.write(buf)
     }
 
     #[inline]
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> IoResult<usize> {
-        poll_wrap(self.stream.as_mut().poll_write_vectored(self.cx, bufs))
+        // SAFETY: Stream is not moved.
+        let stream = unsafe { Pin::into_inner_unchecked(self.stream.as_mut()) };
+        stream.write_vectored(bufs)
     }
 
     #[inline]
     fn flush(&mut self) -> IoResult<()> {
-        poll_wrap(self.stream.as_mut().poll_flush(self.cx))
+        // SAFETY: Stream is not moved.
+        let stream = unsafe { Pin::into_inner_unchecked(self.stream.as_mut()) };
+        stream.flush()
     }
 }
 
