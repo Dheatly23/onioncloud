@@ -2,6 +2,7 @@
 
 use std::io::{Error as IoError, ErrorKind, Read};
 use std::mem::replace;
+use std::ops::Deref;
 
 use zerocopy::{IntoBytes, transmute_mut};
 
@@ -46,6 +47,27 @@ pub trait ReadConfig {
     /// The default implementation simply returns nothing.
     fn get_fixed_cell(&self) -> FixedCell {
         FixedCell::default()
+    }
+}
+
+impl<T> ReadConfig for T
+where
+    T: Deref,
+    T::Target: ReadConfig,
+{
+    #[inline]
+    fn is_circ_id_4bytes(&self) -> bool {
+        <T as Deref>::Target::is_circ_id_4bytes(&**self)
+    }
+
+    #[inline]
+    fn cell_type(&self, header: &CellHeader) -> Option<CellType> {
+        <T as Deref>::Target::cell_type(&**self, header)
+    }
+
+    #[inline]
+    fn get_fixed_cell(&self) -> FixedCell {
+        <T as Deref>::Target::get_fixed_cell(&**self)
     }
 }
 

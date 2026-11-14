@@ -2,6 +2,7 @@
 
 use std::io::{Error as IoError, ErrorKind, Write};
 use std::mem::replace;
+use std::ops::Deref;
 
 use zerocopy::IntoBytes;
 
@@ -45,6 +46,27 @@ pub trait WriteConfig {
     /// The default implementation simply drops it.
     fn cache_variable_cell(&self, cell: VariableCell) {
         drop(cell);
+    }
+}
+
+impl<T> WriteConfig for T
+where
+    T: Deref,
+    T::Target: WriteConfig,
+{
+    #[inline]
+    fn is_circ_id_4bytes(&self) -> bool {
+        <T as Deref>::Target::is_circ_id_4bytes(&**self)
+    }
+
+    #[inline]
+    fn cache_fixed_cell(&self, cell: FixedCell) {
+        <T as Deref>::Target::cache_fixed_cell(&**self, cell)
+    }
+
+    #[inline]
+    fn cache_variable_cell(&self, cell: VariableCell) {
+        <T as Deref>::Target::cache_variable_cell(&**self, cell)
     }
 }
 
