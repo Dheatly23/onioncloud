@@ -195,6 +195,10 @@ impl<R> Default for HandleBuilder<'_, '_, R> {
 
 impl<'a, 'b, R> HandleBuilder<'a, 'b, R> {
     /// Sets async context. **REQUIRED**
+    ///
+    /// # Panics
+    ///
+    /// Panics if it has been set.
     #[inline]
     pub fn cx(&mut self, cx: &'a mut Context<'b>) -> &mut Self {
         assert!(self.cx.is_none(), "cx has already been set");
@@ -203,6 +207,10 @@ impl<'a, 'b, R> HandleBuilder<'a, 'b, R> {
     }
 
     /// Sets network stream. **REQUIRED**
+    ///
+    /// # Panics
+    ///
+    /// Panics if it has been set.
     #[inline]
     pub fn stream(&mut self, stream: Pin<&'a mut dyn Stream>) -> &mut Self {
         assert!(self.stream.is_none(), "stream has already been set");
@@ -211,6 +219,10 @@ impl<'a, 'b, R> HandleBuilder<'a, 'b, R> {
     }
 
     /// Sets current time. **REQUIRED**
+    ///
+    /// # Panics
+    ///
+    /// Panics if it has been set.
     #[inline]
     pub fn time(&mut self, time: Instant) -> &mut Self {
         assert!(self.time.is_none(), "time has already been set");
@@ -219,6 +231,10 @@ impl<'a, 'b, R> HandleBuilder<'a, 'b, R> {
     }
 
     /// Sets runtime. **REQUIRED**
+    ///
+    /// # Panics
+    ///
+    /// Panics if it has been set.
     #[inline]
     pub fn runtime(&mut self, rt: &'a R) -> &mut Self {
         assert!(self.rt.is_none(), "runtime has already been set");

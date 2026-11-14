@@ -1,8 +1,10 @@
 //! Error types.
 
-use std::io::Error as IoError;
+#[doc(no_inline)]
+pub use std::io::Error as IoError;
 
-use rustls::Error as RustlsError;
+#[doc(no_inline)]
+pub use rustls::Error as RustlsError;
 use thiserror::Error;
 
 /// Channel error.
