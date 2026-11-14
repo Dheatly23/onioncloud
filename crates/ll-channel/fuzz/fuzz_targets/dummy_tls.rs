@@ -146,8 +146,8 @@ async fn client(rt: Runtime, shared: Arc<SharedData>) {
     .await;
 }
 
-const IPV4_ADDR: Ipv4Addr = Ipv4Addr::from_bits(0x00535299);
-const IPV6_ADDR: Ipv6Addr = Ipv6Addr::from_bits(0x00518776_00522415_00535453_00437573);
+const IPV4_ADDR: Ipv4Addr = Ipv4Addr::from_bits(0x00629496);
+const IPV6_ADDR: Ipv6Addr = Ipv6Addr::from_bits(0x00650199_00564962_00505869_00529506);
 
 struct Network {
     shared: Arc<SharedData>,
