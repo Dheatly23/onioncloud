@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+  "crates/ll",
   "crates/ll-cell",
   "crates/ll-cell/fuzz",
   "crates/ll-channel",
@@ -149,6 +150,10 @@ features = [
   "precomputed-tables",
   "static_secrets",
 ]
+
+[workspace.dependencies.onioncloud-ll]
+version = "0.1.0"
+path = "crates/ll"
 
 [workspace.dependencies.onioncloud-ll-cell]
 version = "0.1.0"

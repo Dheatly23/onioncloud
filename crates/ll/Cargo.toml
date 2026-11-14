@@ -1,0 +1,28 @@
+[package]
+name = "onioncloud-ll"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+
+[dependencies.onioncloud-ll-cell]
+workspace = true
+optional = true
+
+[dependencies.onioncloud-ll-channel]
+workspace = true
+optional = true
+
+[dependencies.onioncloud-ll-relay-cell]
+workspace = true
+optional = true
+
+[features]
+cell = ["dep:onioncloud-ll-cell"]
+channel = ["dep:onioncloud-ll-channel"]
+relay-cell = ["dep:onioncloud-ll-relay-cell"]
