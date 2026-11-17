@@ -53,22 +53,22 @@ feat_import! {
 /// }
 ///
 /// error_from_enum! {
-///     CombinedErr => CombinedErr2 {
-///         [ErrA, ErrB],
-///         a => CombinedErr2::Any(Box::new(a) as _),
+///     CombinedErr2 {
+///         else a => Self::Any(Box::new(a) as _),
+///         CombinedErr => [ErrA, ErrB],
 ///     }
 /// }
 /// ```
 #[macro_export]
 macro_rules! error_from_enum {
-    {$a:ident => $b:ty { [$($f:ident),* $(,)?], $v:ident => $e:expr $(,)? }} => {
-        impl From<$a> for $b {
-            fn from(err: $a) -> $b {
+    {$t:ty { else $v:ident => $e:expr, $($a:ident => [$($f:ident),* $(,)?],)* }} => {$(
+        impl From<$a> for $t {
+            fn from(err: $a) -> $t {
                 match err {
-                    $($a::$f(v) => <$b as From<_>>::from(v),)*
+                    $($a::$f(v) => <$t as From<_>>::from(v),)*
                     $v => $e,
                 }
             }
         }
-    }
+    )*}
 }
