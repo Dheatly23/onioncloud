@@ -73,6 +73,11 @@ impl<C: CellCache> ReadConfig for Config<C> {
     fn get_fixed_cell(&self) -> FixedCell {
         self.cache.get_cached()
     }
+
+    #[inline]
+    fn cache_fixed_cell(&self, cell: FixedCell) {
+        self.cache.cache_cell(cell);
+    }
 }
 
 impl<C: CellCache> WriteConfig for Config<C> {
@@ -83,6 +88,6 @@ impl<C: CellCache> WriteConfig for Config<C> {
 
     #[inline]
     fn cache_fixed_cell(&self, cell: FixedCell) {
-        self.cache.cache_cell(cell);
+        ReadConfig::cache_fixed_cell(self, cell)
     }
 }

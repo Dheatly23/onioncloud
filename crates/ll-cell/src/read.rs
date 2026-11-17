@@ -48,6 +48,26 @@ pub trait ReadConfig {
     fn get_fixed_cell(&self) -> FixedCell {
         FixedCell::default()
     }
+
+    /// Caches [`FixedCell`].
+    ///
+    /// # Implementer's Note
+    ///
+    /// It's encouraged for configurator to cache the given cell.
+    /// The default implementation simply drops it.
+    fn cache_fixed_cell(&self, cell: FixedCell) {
+        drop(cell);
+    }
+
+    /// Caches [`VariableCell`].
+    ///
+    /// # Implementer's Note
+    ///
+    /// It's encouraged for configurator to cache the given cell.
+    /// The default implementation simply drops it.
+    fn cache_variable_cell(&self, cell: VariableCell) {
+        drop(cell);
+    }
 }
 
 impl<T> ReadConfig for T
@@ -69,6 +89,16 @@ where
     fn get_fixed_cell(&self) -> FixedCell {
         <T as Deref>::Target::get_fixed_cell(&**self)
     }
+
+    #[inline]
+    fn cache_fixed_cell(&self, cell: FixedCell) {
+        <T as Deref>::Target::cache_fixed_cell(&**self, cell)
+    }
+
+    #[inline]
+    fn cache_variable_cell(&self, cell: VariableCell) {
+        <T as Deref>::Target::cache_variable_cell(&**self, cell)
+    }
 }
 
 /// Possible cell types.
@@ -82,7 +112,7 @@ pub enum CellType {
 
 /// A cell reader.
 #[derive(Debug)]
-pub struct Reader<C> {
+pub struct Reader<C: ReadConfig> {
     /// Reader configurator.
     pub config: C,
 
@@ -110,6 +140,22 @@ enum HeaderBuf {
 enum CellBuf {
     Fixed(FixedCell),
     Variable(VariableCell),
+}
+
+impl<C: ReadConfig> Drop for Reader<C> {
+    fn drop(&mut self) {
+        match replace(&mut self.state, State::Err) {
+            State::Cell {
+                data: CellBuf::Fixed(cell),
+                ..
+            } => self.config.cache_fixed_cell(cell),
+            State::Cell {
+                data: CellBuf::Variable(cell),
+                ..
+            } => self.config.cache_variable_cell(cell),
+            _ => (),
+        }
+    }
 }
 
 impl<C: ReadConfig> Reader<C> {
