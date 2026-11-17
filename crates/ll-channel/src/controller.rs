@@ -256,11 +256,41 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
     pub fn poll_same(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), C::Error>> {
         self.poll_inner(cx, true)
     }
+}
 
+impl<R: HasTimer, S, C> ChannelController<R, S, C> {
     /// Gets reference to runtime.
     #[inline]
+    #[must_use]
     pub fn runtime(&self) -> &R {
         &self.rt
+    }
+
+    /// Gets reference to stream.
+    #[inline]
+    #[must_use]
+    pub fn stream(&self) -> &S {
+        &self.stream
+    }
+
+    /// Gets reference to controller.
+    #[inline]
+    #[must_use]
+    pub fn controller(&self) -> Option<&C> {
+        match &self.state {
+            State::Main { controller: c, .. } => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Gets mutable reference to controller.
+    #[inline]
+    #[must_use]
+    pub fn controller_mut(self: Pin<&mut Self>) -> Option<Pin<&mut C>> {
+        match self.project().state.project() {
+            StateProj::Main { controller: c, .. } => Some(c),
+            _ => None,
+        }
     }
 }
 
