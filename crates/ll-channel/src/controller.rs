@@ -11,7 +11,7 @@ use onioncloud_runtime::{HasNetwork, HasTimer, Timer as _};
 use pin_project::pin_project;
 use tracing::{Span, info_span, instrument, trace};
 
-use crate::handle::{ChannelHandle, HandleBuilder};
+use crate::handle::{ChannelHandle, HandleBuilder, ShutdownCause, ShutdownHandleBuilder};
 use crate::stream::Stream;
 
 /// Channel controller.
@@ -44,10 +44,11 @@ enum State<T, C> {
 enum MainState {
     Init,
     Main,
+    GracefulShutdown,
 }
 
 impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
-    fn poll_inner(
+    fn poll_inner2(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         is_same_poll: bool,
@@ -64,6 +65,25 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
 
         if stream.as_mut().poll_inner(cx, is_same_poll)?.is_ready() {
             // Stream shut down.
+            match state.as_mut().project() {
+                StateProj::Main {
+                    controller, state, ..
+                } => {
+                    let mut builder = ShutdownHandleBuilder::default();
+                    builder
+                        .cx(cx)
+                        .runtime(rt)
+                        .time(rt.current_time())
+                        .cause(match state {
+                            MainState::Init | MainState::Main => ShutdownCause::SocketClosed,
+                            MainState::GracefulShutdown => ShutdownCause::GracefulShutdown,
+                        });
+                    let handle = builder.build();
+                    drop(builder);
+                    controller.shutdown(handle);
+                }
+                _ => (),
+            }
             state.set(State::Shutdown);
             return Ready(Ok::<_, C::Error>(()));
         } else if stream.is_init() || matches!(&*state, State::Shutdown) {
@@ -79,14 +99,9 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
         }
 
         match state.as_mut().project() {
-            StateProj::Main {
-                state,
-                controller,
-                timer,
-            } => {
+            StateProj::Main { state, timer, .. } => {
                 if matches!(state, MainState::Init) {
                     *state = MainState::Main;
-                    controller.set_peer_addr(stream.peer_addr())?;
                 }
 
                 let has_timeout = timer.get_timeout().is_some();
@@ -98,17 +113,35 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
         }
 
         loop {
-            let (controller, mut timer) = match state.as_mut().project() {
+            let (mut controller, mut timer, inner_state) = match state.as_mut().project() {
+                StateProj::Shutdown => return Ready(Ok(())),
                 StateProj::Main {
-                    controller, timer, ..
-                } => (controller, timer),
-                StateProj::Shutdown => {
-                    return match stream.poll_inner(cx, true) {
-                        Pending => Pending,
-                        Ready(Ok(())) => Ready(Ok(())),
-                        Ready(Err(e)) => Ready(Err(C::Error::from(e))),
-                    };
-                }
+                    controller,
+                    state: MainState::GracefulShutdown,
+                    ..
+                } => match stream.poll_inner(cx, true) {
+                    Pending => return Pending,
+                    Ready(Ok(())) => {
+                        let mut builder = ShutdownHandleBuilder::default();
+                        builder
+                            .cx(cx)
+                            .runtime(rt)
+                            .time(rt.current_time())
+                            .cause(ShutdownCause::GracefulShutdown);
+                        let handle = builder.build();
+                        drop(builder);
+                        controller.shutdown(handle);
+
+                        state.set(State::Shutdown);
+                        return Ready(Ok(()));
+                    }
+                    Ready(Err(e)) => return Ready(Err(C::Error::from(e))),
+                },
+                StateProj::Main {
+                    controller,
+                    timer,
+                    state,
+                } => (controller, timer, state),
             };
 
             let mut has_event = false;
@@ -129,11 +162,11 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
             let mut repoll = false;
             if has_event {
                 flags |= FLAG_EMPTY_HANDLE | FLAG_SAME_POLL;
-                let ret = controller.handle(handle)?;
+                let ret = controller.as_mut().handle(handle)?;
 
                 if ret.is_shutdown {
                     trace!("controller request graceful shutdown");
-                    state.set(State::Shutdown);
+                    *inner_state = MainState::GracefulShutdown;
                     stream.as_mut().request_shutdown();
                     continue;
                 }
@@ -156,6 +189,16 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
             }
 
             if stream.as_mut().poll_inner(cx, true)?.is_ready() {
+                let mut builder = ShutdownHandleBuilder::default();
+                builder
+                    .cx(cx)
+                    .runtime(rt)
+                    .time(rt.current_time())
+                    .cause(ShutdownCause::SocketClosed);
+                let handle = builder.build();
+                drop(builder);
+                controller.shutdown(handle);
+
                 state.set(State::Shutdown);
                 return Ready(Ok(()));
             }
@@ -168,6 +211,40 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
                 return Pending;
             }
         }
+    }
+
+    fn poll_inner(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        is_same_poll: bool,
+    ) -> Poll<Result<(), C::Error>> {
+        let ret = self.as_mut().poll_inner2(cx, is_same_poll);
+
+        if let Ready(Err(e)) = &ret
+            && let ChannelControllerProj {
+                rt,
+                mut state,
+                span: Some(span),
+                ..
+            } = self.project()
+            && let StateProj::Main { controller, .. } = state.as_mut().project()
+        {
+            let _g = span.enter();
+
+            let mut builder = ShutdownHandleBuilder::default();
+            builder
+                .cx(cx)
+                .runtime(rt)
+                .time(rt.current_time())
+                .cause(ShutdownCause::Error(e));
+            let handle = builder.build();
+            drop(builder);
+            controller.shutdown(handle);
+
+            state.set(State::Shutdown);
+        }
+
+        ret
     }
 
     /// Polls controller in same polling cycle.

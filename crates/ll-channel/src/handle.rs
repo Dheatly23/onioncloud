@@ -25,12 +25,9 @@ pub trait ChannelHandle<R> {
     /// use [`Handle::is_same_poll`] to optimize it.
     fn handle(self: Pin<&mut Self>, args: Handle<R>) -> Result<Return, Self::Error>;
 
-    /// Sets peer address.
-    ///
-    /// This will be called when setting up circuit handle for the first time.
-    fn set_peer_addr(self: Pin<&mut Self>, peer_addr: SocketAddr) -> Result<(), Self::Error> {
-        let _ = peer_addr;
-        Ok(())
+    /// Shutdown handle.
+    fn shutdown(self: Pin<&mut Self>, args: ShutdownHandle<R, Self::Error>) {
+        let _ = args;
     }
 }
 
@@ -269,7 +266,6 @@ impl<'a, 'b, R> HandleBuilder<'a, 'b, R> {
         assert!(!self.built, "builder must not be reused");
         self.built = true;
 
-        const REQ_MSG: &str = "required field is not set";
         Handle {
             cx: self.cx.take().expect(REQ_MSG),
             stream: self.stream.take().expect(REQ_MSG),
@@ -325,3 +321,171 @@ impl Return {
         self
     }
 }
+
+/// Shutdown handle arguments.
+///
+/// Used as argument of [`ChannelHandle::shutdown`].
+pub struct ShutdownHandle<'a, 'b, R, E> {
+    /// Context.
+    cx: &'a mut Context<'b>,
+
+    /// Current time.
+    time: Instant,
+
+    /// Runtime.
+    rt: &'a R,
+
+    /// Shutdown cause.
+    ty: ShutdownCause<&'a E>,
+
+    _phantom: PhantomData<*mut u8>,
+}
+
+/// Shutdown cause.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ShutdownCause<E> {
+    /// Error happened.
+    Error(E),
+    /// Socket unexpectedly closed.
+    SocketClosed,
+    /// Graceful shutdown requested.
+    GracefulShutdown,
+}
+
+impl<'a, 'b, R, E> ShutdownHandle<'a, 'b, R, E> {
+    /// Gets async context.
+    #[inline]
+    #[must_use]
+    pub fn cx(&mut self) -> &mut Context<'b> {
+        self.cx
+    }
+
+    /// Gets current time.
+    #[inline]
+    #[must_use]
+    pub fn time(&self) -> Instant {
+        self.time
+    }
+
+    /// Gets runtime.
+    #[inline]
+    #[must_use]
+    pub fn runtime(&self) -> &R {
+        self.rt
+    }
+
+    /// Gets shutdown cause.
+    #[inline]
+    #[must_use]
+    pub fn cause(&self) -> &ShutdownCause<&'a E> {
+        &self.ty
+    }
+}
+
+/// [`ShutdownHandle`] builder.
+#[must_use]
+pub struct ShutdownHandleBuilder<'a, 'b, R, E> {
+    /// Context.
+    cx: Option<&'a mut Context<'b>>,
+
+    /// Current time.
+    time: Option<Instant>,
+
+    /// Runtime.
+    rt: Option<&'a R>,
+
+    /// Shutdown type.
+    ty: Option<ShutdownCause<&'a E>>,
+
+    built: bool,
+
+    _phantom: PhantomData<*mut u8>,
+}
+
+impl<R, E> Default for ShutdownHandleBuilder<'_, '_, R, E> {
+    fn default() -> Self {
+        Self {
+            cx: None,
+            time: None,
+            rt: None,
+            ty: None,
+            built: false,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<'a, 'b, R, E> ShutdownHandleBuilder<'a, 'b, R, E> {
+    /// Sets async context. **REQUIRED**
+    ///
+    /// # Panics
+    ///
+    /// Panics if it has been set.
+    #[inline]
+    pub fn cx(&mut self, cx: &'a mut Context<'b>) -> &mut Self {
+        assert!(self.cx.is_none(), "cx has already been set");
+        self.cx = Some(cx);
+        self
+    }
+
+    /// Sets current time. **REQUIRED**
+    ///
+    /// # Panics
+    ///
+    /// Panics if it has been set.
+    #[inline]
+    pub fn time(&mut self, time: Instant) -> &mut Self {
+        assert!(self.time.is_none(), "time has already been set");
+        self.time = Some(time);
+        self
+    }
+
+    /// Sets runtime. **REQUIRED**
+    ///
+    /// # Panics
+    ///
+    /// Panics if it has been set.
+    #[inline]
+    pub fn runtime(&mut self, rt: &'a R) -> &mut Self {
+        assert!(self.rt.is_none(), "runtime has already been set");
+        self.rt = Some(rt);
+        self
+    }
+
+    /// Sets shutdown cause. **REQUIRED**
+    ///
+    /// # Panics
+    ///
+    /// Panics if it has been set.
+    #[inline]
+    pub fn cause(&mut self, ty: ShutdownCause<&'a E>) -> &mut Self {
+        assert!(self.ty.is_none(), "shutdown causehas already been set");
+        self.ty = Some(ty);
+        self
+    }
+
+    /// Builds [`Handle`].
+    ///
+    /// Builder **should not** be reused afterwards.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any of the required fields is not set.
+    #[inline]
+    #[must_use]
+    pub fn build(&mut self) -> ShutdownHandle<'a, 'b, R, E> {
+        assert!(!self.built, "builder must not be reused");
+        self.built = true;
+
+        ShutdownHandle {
+            cx: self.cx.take().expect(REQ_MSG),
+            time: self.time.take().expect(REQ_MSG),
+            rt: self.rt.take().expect(REQ_MSG),
+            ty: self.ty.take().expect(REQ_MSG),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+static REQ_MSG: &str = "required field is not set";
