@@ -7,8 +7,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 base64ct.workspace = true
 futures-io.workspace = true
+humantime.workspace = true
 once_cell.workspace = true
 onioncloud-runtime.workspace = true
 pin-project.workspace = true
@@ -36,4 +38,10 @@ features = [
 workspace = true
 features = [
   "trace",
+]
+
+[features]
+check-clock-skew = []
+default = [
+  "check-clock-skew",
 ]

@@ -8,6 +8,7 @@ members = [
   "crates/ll-channel/fuzz",
   "crates/ll-relay-cell",
   "crates/ll-relay-cell/fuzz",
+  "crates/ml-channel-client",
   "crates/rt",
   "crates/tart",
   "crates/tart/fuzz",
@@ -166,6 +167,10 @@ path = "crates/ll-channel"
 [workspace.dependencies.onioncloud-ll-relay-cell]
 version = "0.1.0"
 path = "crates/ll-relay-cell"
+
+[workspace.dependencies.onioncloud-ml-channel-client]
+version = "0.1.0"
+path = "crates/ml-channel-client"
 
 [workspace.dependencies.onioncloud-runtime]
 version = "0.1.0"

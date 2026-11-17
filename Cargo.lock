@@ -523,6 +523,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "onioncloud-ml-channel-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64ct",
+ "futures-io",
+ "humantime",
+ "once_cell",
+ "onioncloud-ll",
+ "onioncloud-runtime",
+ "onioncloud-tart",
+ "pin-project",
+ "test-log",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "onioncloud-runtime"
 version = "0.1.0"
 dependencies = [
