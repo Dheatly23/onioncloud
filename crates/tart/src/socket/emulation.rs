@@ -5,6 +5,7 @@
 use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::mem::replace;
 use std::num::NonZeroUsize;
+use std::ops::DerefMut;
 use std::pin::Pin;
 use std::ptr::{null_mut, slice_from_raw_parts_mut};
 use std::task::{Context, Poll};
@@ -25,6 +26,20 @@ pub trait SocketLimiterEntropy {
     fn take_read_limit(&mut self) -> NonZeroUsize;
     /// Take write limit.
     fn take_write_limit(&mut self) -> NonZeroUsize;
+}
+
+impl<T> SocketLimiterEntropy for T
+where
+    T: DerefMut,
+    T::Target: SocketLimiterEntropy,
+{
+    fn take_read_limit(&mut self) -> NonZeroUsize {
+        <T::Target as SocketLimiterEntropy>::take_read_limit(&mut **self)
+    }
+
+    fn take_write_limit(&mut self) -> NonZeroUsize {
+        <T::Target as SocketLimiterEntropy>::take_write_limit(&mut **self)
+    }
 }
 
 /// Socket limiter wrapper.

@@ -188,23 +188,25 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
                 }
             }
 
-            if stream.as_mut().poll_inner(cx, true)?.is_ready() {
-                let mut builder = ShutdownHandleBuilder::default();
-                builder
-                    .cx(cx)
-                    .runtime(rt)
-                    .time(rt.current_time())
-                    .cause(ShutdownCause::SocketClosed);
-                let handle = builder.build();
-                drop(builder);
-                controller.shutdown(handle);
-
-                state.set(State::Shutdown);
-                return Ready(Ok(()));
-            }
             if stream.wants_poll() {
                 trace!("repolling: stream has more data");
+                flags &= !FLAG_EMPTY_HANDLE;
                 repoll = true;
+
+                if stream.as_mut().poll_inner(cx, true)?.is_ready() {
+                    let mut builder = ShutdownHandleBuilder::default();
+                    builder
+                        .cx(cx)
+                        .runtime(rt)
+                        .time(rt.current_time())
+                        .cause(ShutdownCause::SocketClosed);
+                    let handle = builder.build();
+                    drop(builder);
+                    controller.shutdown(handle);
+
+                    state.set(State::Shutdown);
+                    return Ready(Ok(()));
+                }
             }
 
             if !repoll {

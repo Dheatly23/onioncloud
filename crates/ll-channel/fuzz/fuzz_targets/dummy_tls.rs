@@ -1,16 +1,18 @@
 #![no_main]
 
-use std::future::poll_fn;
 use std::io::{ErrorKind, Read, Result as IoResult, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::pin::pin;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
 use std::task::Poll::*;
 
 use futures_util::{AsyncReadExt, AsyncWriteExt};
 use libfuzzer_sys::fuzz_target;
-use onioncloud_ll_channel::stream::{Stream, StreamDummyClient, transform_server_message};
+use onioncloud_ll_channel::controller::open;
+use onioncloud_ll_channel::error::ChannelError;
+use onioncloud_ll_channel::handle::{ChannelHandle, Handle, Return};
+use onioncloud_ll_channel::stream::{StreamDummyClient, transform_server_message};
 use onioncloud_tart::rt::schedule::FuzzSchedule;
 use onioncloud_tart::rt::{Executor, Runtime};
 use onioncloud_tart::socket::emulation::{
@@ -18,7 +20,7 @@ use onioncloud_tart::socket::emulation::{
 };
 use onioncloud_tart::socket::pipe::{Pipe, ReadHalf, WriteHalf, make_pipe};
 use onioncloud_tart::socket::{OpenOpt, Socket as DynSocket, SocketHandler, SocketOpener};
-use tracing::instrument;
+use tracing::{instrument, trace};
 
 struct SharedData {
     client_read: Vec<u8>,
@@ -80,70 +82,79 @@ fn server(rt: Runtime, shared: Arc<SharedData>, socket: Pipe) {
     rt.spawn(async move { server_write(shared, write).await });
 }
 
+struct CHandle {
+    shared: Arc<SharedData>,
+    buf: Vec<u8>,
+    read: usize,
+    write: usize,
+    limiter: FuzzBidiSocketLimiterShared<ClientLimiterWrapper>,
+}
+
+impl ChannelHandle<Runtime> for CHandle {
+    type Error = ChannelError;
+
+    #[instrument(skip_all)]
+    fn handle(self: Pin<&mut Self>, mut args: Handle<Runtime>) -> Result<Return, Self::Error> {
+        let this = Pin::into_inner(self);
+        let mut socket = SocketLimiterWrapper::new(&mut args, &mut this.limiter);
+
+        // Poll read
+        while this.read < this.shared.client_read.len()
+            && let Ready(v) = poll_io_unwrap(socket.read(&mut this.buf[this.read..]))
+        {
+            let n = v.unwrap();
+            assert!(n != 0, "read 0 bytes");
+            trace!("read {n} bytes");
+            assert_eq!(
+                &this.buf[this.read..this.read + n],
+                &this.shared.client_read[this.read..this.read + n],
+                "index mismatch at range {}..{}",
+                this.read,
+                this.read + n
+            );
+            this.read += n;
+        }
+
+        // Poll write
+        while this.write < this.shared.client_write.len()
+            && let Ready(v) = poll_io_unwrap(socket.write(&this.shared.client_write[this.write..]))
+        {
+            let n = v.unwrap();
+            assert!(n != 0, "written 0 bytes");
+            trace!("written {n} bytes");
+            this.write += n;
+        }
+
+        if this.read >= this.shared.client_read.len()
+            && this.write >= this.shared.client_write.len()
+        {
+            trace!("shutting down");
+            return Ok(Return::new(&args).with_shutdown());
+        }
+
+        trace!("client pending");
+        Ok(Return::new(&args))
+    }
+}
+
 #[instrument(skip_all)]
 async fn client(rt: Runtime, shared: Arc<SharedData>) {
-    let socket = rt
-        .connect(&[SocketAddr::from((IPV4_ADDR, 80))])
-        .await
-        .unwrap();
-    let mut socket = pin!(SocketLimiterWrapper::new(
-        StreamDummyClient::new_uninit(socket).unwrap(),
-        FuzzBidiSocketLimiterShared::new(ClientLimiterWrapper(shared.clone()))
-    ));
-
-    let mut buf = vec![0; shared.client_read.len()];
-    let mut read = 0;
-    let mut write = 0;
-    let mut closed = false;
-
-    poll_fn(|cx| {
-        let mut is_same_poll = false;
-        loop {
-            if let Ready(v) = socket
-                .as_mut()
-                .socket_pin_mut()
-                .poll_inner(cx, is_same_poll)
-            {
-                v.unwrap();
-                return Ready(());
-            }
-            is_same_poll = true;
-
-            // Poll read
-            while read < shared.client_read.len()
-                && let Ready(v) = poll_io_unwrap(socket.read(&mut buf[read..]))
-            {
-                let n = v.unwrap();
-                assert!(n != 0, "read 0 bytes");
-                assert_eq!(
-                    &buf[read..read + n],
-                    &shared.client_read[read..read + n],
-                    "index mismatch at range {read}..{}",
-                    read + n
-                );
-                read += n;
-            }
-
-            // Poll write
-            while write < shared.client_write.len()
-                && let Ready(v) = poll_io_unwrap(socket.write(&shared.client_write[write..]))
-            {
-                let n = v.unwrap();
-                assert!(n != 0, "written 0 bytes");
-                write += n;
-            }
-
-            if !closed && read >= shared.client_read.len() && write >= shared.client_write.len() {
-                socket.as_mut().socket_pin_mut().request_shutdown();
-                closed = true;
-            }
-
-            if !socket.as_mut().socket_pin_mut().wants_poll() {
-                return Pending;
-            }
-        }
-    })
-    .await;
+    open(
+        rt,
+        &[SocketAddr::from((IPV4_ADDR, 80))],
+        async move |socket| Ok(StreamDummyClient::new_uninit(socket).unwrap()),
+        move || CHandle {
+            buf: vec![0; shared.client_read.len()],
+            read: 0,
+            write: 0,
+            limiter: FuzzBidiSocketLimiterShared::new(ClientLimiterWrapper(shared.clone())),
+            shared,
+        },
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap();
 }
 
 const IPV4_ADDR: Ipv4Addr = Ipv4Addr::from_bits(0x00629496);

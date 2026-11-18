@@ -50,7 +50,7 @@ struct DummyWrapperIO<'a>(&'a mut DummyWrapper);
 
 impl Read for DummyWrapperIO<'_> {
     #[instrument(level = "debug", name = "DummyWrapper::read", skip_all, fields(len = buf.len()))]
-    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+    fn read(&mut self, mut buf: &mut [u8]) -> IoResult<usize> {
         if buf.is_empty() {
             return Ok(0);
         } else if self.0.read_len == 0 {
@@ -64,12 +64,25 @@ impl Read for DummyWrapperIO<'_> {
         }
 
         let i = usize::from(self.0.read_ix);
-        let n = usize::from(self.0.read_len)
+        let mut n = usize::from(self.0.read_len)
             .min(BUF_SIZE - i)
             .min(buf.len());
         buf[..n].copy_from_slice(&self.0.read_buf[i..i + n]);
+        buf = &mut buf[n..];
         self.0.read_ix = (self.0.read_ix + n as u8) % (BUF_SIZE as u8);
         self.0.read_len -= n as u8;
+
+        if !buf.is_empty() && self.0.read_len > 0 {
+            let i = usize::from(self.0.read_ix);
+            let n_ = usize::from(self.0.read_len)
+                .min(BUF_SIZE - i)
+                .min(buf.len());
+            buf[..n_].copy_from_slice(&self.0.read_buf[i..i + n_]);
+            self.0.read_ix = (self.0.read_ix + n_ as u8) % (BUF_SIZE as u8);
+            self.0.read_len -= n_ as u8;
+            n += n_;
+        }
+
         trace!("Read {n} bytes");
         Ok(n)
     }
@@ -77,7 +90,7 @@ impl Read for DummyWrapperIO<'_> {
 
 impl Write for DummyWrapperIO<'_> {
     #[instrument(level = "debug", name = "DummyWrapper::write", skip_all, fields(len = buf.len()))]
-    fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+    fn write(&mut self, mut buf: &[u8]) -> IoResult<usize> {
         if buf.is_empty() || matches!(self.0.write_state, State::Closed) {
             trace!("Wrote 0 bytes");
             return Ok(0);
@@ -90,11 +103,23 @@ impl Write for DummyWrapperIO<'_> {
         }
 
         let i = usize::from((self.0.write_ix + self.0.write_len) % BUF_SIZE as u8);
-        let n = usize::from(BUF_SIZE as u8 - self.0.write_len)
+        let mut n = usize::from(BUF_SIZE as u8 - self.0.write_len)
             .min(BUF_SIZE - i)
             .min(buf.len());
         self.0.write_buf[i..i + n].copy_from_slice(&buf[..n]);
+        buf = &buf[n..];
         self.0.write_len += n as u8;
+
+        if !buf.is_empty() && self.0.write_len != BUF_SIZE as u8 {
+            let i = usize::from((self.0.write_ix + self.0.write_len) % BUF_SIZE as u8);
+            let n_ = usize::from(BUF_SIZE as u8 - self.0.write_len)
+                .min(BUF_SIZE - i)
+                .min(buf.len());
+            self.0.write_buf[i..i + n_].copy_from_slice(&buf[..n_]);
+            self.0.write_len += n_ as u8;
+            n += n_;
+        }
+
         trace!("Wrote {n} bytes");
         Ok(n)
     }
