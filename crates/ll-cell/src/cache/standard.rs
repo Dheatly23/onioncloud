@@ -1,16 +1,21 @@
 //! Standard cell cache.
+#![expect(clippy::enum_glob_use)]
 
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::ptr::null_mut;
 #[cfg(not(feature = "loom"))]
 use std::sync::Arc;
 #[cfg(not(feature = "loom"))]
-use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering::*, fence};
+use std::sync::atomic::Ordering::*;
+#[cfg(not(feature = "loom"))]
+use std::sync::atomic::{AtomicPtr, AtomicU8, fence};
 
 #[cfg(feature = "loom")]
 use loom::sync::Arc;
 #[cfg(feature = "loom")]
-use loom::sync::atomic::{AtomicPtr, AtomicU8, Ordering::*, fence};
+use loom::sync::atomic::Ordering::*;
+#[cfg(feature = "loom")]
+use loom::sync::atomic::{AtomicPtr, AtomicU8, fence};
 
 use crate::cache::CellCache;
 use crate::fixed::{FIXED_CELL_SIZE, FixedCell};

@@ -13,6 +13,7 @@ use crate::error::ChannelError;
 use crate::stream::Stream;
 
 /// Channel handler trait.
+#[allow(clippy::missing_errors_doc)]
 pub trait ChannelHandle<R> {
     /// Error type.
     type Error: Error + From<ChannelError>;

@@ -4,7 +4,7 @@ use std::future::Future;
 use std::io::Result as IoResult;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::task::Poll::*;
+use std::task::Poll::{Pending, Ready};
 use std::task::{Context, Poll};
 
 use onioncloud_runtime::{HasNetwork, HasTimer, Timer as _};
@@ -48,6 +48,7 @@ enum MainState {
 }
 
 impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
+    #[expect(clippy::too_many_lines, clippy::items_after_statements)]
     fn poll_inner2(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -65,24 +66,22 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
 
         if stream.as_mut().poll_inner(cx, is_same_poll)?.is_ready() {
             // Stream shut down.
-            match state.as_mut().project() {
-                StateProj::Main {
-                    controller, state, ..
-                } => {
-                    let mut builder = ShutdownHandleBuilder::default();
-                    builder
-                        .cx(cx)
-                        .runtime(rt)
-                        .time(rt.current_time())
-                        .cause(match state {
-                            MainState::Init | MainState::Main => ShutdownCause::SocketClosed,
-                            MainState::GracefulShutdown => ShutdownCause::GracefulShutdown,
-                        });
-                    let handle = builder.build();
-                    drop(builder);
-                    controller.shutdown(handle);
-                }
-                _ => (),
+            if let StateProj::Main {
+                controller, state, ..
+            } = state.as_mut().project()
+            {
+                let mut builder = ShutdownHandleBuilder::default();
+                builder
+                    .cx(cx)
+                    .runtime(rt)
+                    .time(rt.current_time())
+                    .cause(match state {
+                        MainState::Init | MainState::Main => ShutdownCause::SocketClosed,
+                        MainState::GracefulShutdown => ShutdownCause::GracefulShutdown,
+                    });
+                let handle = builder.build();
+                drop(builder);
+                controller.shutdown(handle);
             }
             state.set(State::Shutdown);
             return Ready(Ok::<_, C::Error>(()));
@@ -153,7 +152,7 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelController<R, S, C> {
                 .is_timeout(flags & FLAG_TIMER != 0);
             flags &= !FLAG_TIMER;
 
-            has_event |= stream.wants_poll() | (flags & FLAG_EMPTY_HANDLE == 0);
+            has_event |= stream.wants_poll() || (flags & FLAG_EMPTY_HANDLE == 0);
             let handle = builder.stream(stream.as_mut()).cx(cx).build();
             drop(builder);
 
@@ -281,7 +280,7 @@ impl<R: HasTimer, S, C> ChannelController<R, S, C> {
     pub fn controller(&self) -> Option<&C> {
         match &self.state {
             State::Main { controller: c, .. } => Some(c),
-            _ => None,
+            State::Shutdown => None,
         }
     }
 
@@ -291,7 +290,7 @@ impl<R: HasTimer, S, C> ChannelController<R, S, C> {
     pub fn controller_mut(self: Pin<&mut Self>) -> Option<Pin<&mut C>> {
         match self.project().state.project() {
             StateProj::Main { controller: c, .. } => Some(c),
-            _ => None,
+            StateProj::Shutdown => None,
         }
     }
 }
@@ -378,6 +377,11 @@ impl<R: HasTimer, S: Stream, C: ChannelHandle<R>> ChannelControllerBuilder<R, S,
     }
 }
 
+/// Helper function to connect and create [`ChannelController`].
+///
+/// # Errors
+///
+/// Return error if it can't open stream.
 #[inline]
 pub async fn open<R: HasTimer + HasNetwork, S: Stream, C: ChannelHandle<R>>(
     rt: R,

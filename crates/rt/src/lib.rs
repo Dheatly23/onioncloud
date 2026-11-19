@@ -67,7 +67,6 @@ pub trait HasSpsc {
     /// # Panics
     ///
     /// Setting `cap` to zero may panics.
-    #[must_use]
     fn make_spsc<T: 'static + Send + Sync>(
         &self,
         cap: usize,
@@ -86,7 +85,6 @@ pub trait HasMpsc {
     /// # Panics
     ///
     /// Setting `cap` to zero may panics.
-    #[must_use]
     fn make_mpsc<T: 'static + Send + Sync>(
         &self,
         cap: usize,
@@ -109,7 +107,6 @@ pub trait HasNetwork {
     type Socket: Send + Sync + Socket;
 
     /// Connect to address.
-    #[must_use]
     fn connect<'a>(
         &'a self,
         addrs: &'a [SocketAddr],

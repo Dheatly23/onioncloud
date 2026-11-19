@@ -189,6 +189,7 @@ impl<C: ReadConfig> Reader<C> {
     /// - IO error happened.
     /// - Cell format error.
     /// - Socket is closed (EOF).
+    #[expect(clippy::too_many_lines)]
     pub fn read<R: Read>(&mut self, read: &mut R) -> Result<Option<Cell>, CellReadError> {
         loop {
             let buf = match &mut self.state {
@@ -200,9 +201,9 @@ impl<C: ReadConfig> Reader<C> {
                 State::Init => {
                     self.state = State::Header {
                         data: if self.config.is_circ_id_4bytes() {
-                            HeaderBuf::Large(Default::default())
+                            HeaderBuf::Large(HeaderLargeVariable::default())
                         } else {
-                            HeaderBuf::Small(Default::default())
+                            HeaderBuf::Small(HeaderSmallVariable::default())
                         },
                     };
                     self.off = 0;

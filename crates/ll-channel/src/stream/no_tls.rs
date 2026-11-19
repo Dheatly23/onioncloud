@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::io::{ErrorKind, Read, Result as IoResult, Write};
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::task::Poll::*;
+use std::task::Poll::{Pending, Ready};
 use std::task::{Context, Poll};
 
 use onioncloud_runtime::Socket;
@@ -41,42 +41,61 @@ const FLAG_READ: u8 = 1 << 0;
 const FLAG_WRITE: u8 = 1 << 1;
 
 impl<S> Read for StreamNoTls<S> {
-    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+    #[expect(clippy::cast_possible_truncation)]
+    fn read(&mut self, mut buf: &mut [u8]) -> IoResult<usize> {
         if buf.is_empty() {
             return Ok(0);
         } else if self.read_len == 0 {
-            return if self.read_ix & FLAG_CLOSED == 0 {
-                Err(ErrorKind::WouldBlock.into())
-            } else {
+            return if matches!(self.state, State::Closing) || self.read_ix & FLAG_CLOSED != 0 {
                 Ok(0)
+            } else {
+                Err(ErrorKind::WouldBlock.into())
             };
         }
 
         let i = (self.read_ix & !FLAG_CLOSED) as usize;
-        let n = buf.len().min(self.read_len as usize).min(128 - i);
+        let mut n = buf.len().min(self.read_len as usize).min(128 - i);
         buf[..n].copy_from_slice(&self.read_buf[i..i + n]);
+        buf = &mut buf[n..];
         self.read_ix = (self.read_ix & FLAG_CLOSED) | (((i + n) as u8) % 128);
         self.read_len -= n as u8;
+
+        if !buf.is_empty() && self.read_len > 0 {
+            let i = (self.read_ix & !FLAG_CLOSED) as usize;
+            let n_ = buf.len().min(self.read_len as usize).min(128 - i);
+            buf[..n_].copy_from_slice(&self.read_buf[i..i + n_]);
+            self.read_ix = (self.read_ix & FLAG_CLOSED) | (((i + n_) as u8) % 128);
+            self.read_len -= n_ as u8;
+            n += n_;
+        }
+
         Ok(n)
     }
 }
 
 impl<S> Write for StreamNoTls<S> {
-    fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
-        if buf.is_empty() {
+    #[expect(clippy::cast_possible_truncation)]
+    fn write(&mut self, mut buf: &[u8]) -> IoResult<usize> {
+        if buf.is_empty() || self.write_ix & FLAG_CLOSED != 0 {
             return Ok(0);
-        } else if self.write_len == 0 {
-            return if self.write_ix & FLAG_CLOSED == 0 {
-                Err(ErrorKind::WouldBlock.into())
-            } else {
-                Ok(0)
-            };
+        } else if self.write_len == 128 || matches!(self.state, State::Closing) {
+            return Err(ErrorKind::WouldBlock.into());
         }
 
         let i = (((self.write_ix & !FLAG_CLOSED) + self.write_len) % 128) as usize;
-        let n = buf.len().min(128 - self.write_len as usize).min(128 - i);
+        let mut n = buf.len().min(128 - self.write_len as usize).min(128 - i);
         self.write_buf[i..i + n].copy_from_slice(&buf[..n]);
+        buf = &buf[n..];
         self.write_len += n as u8;
+
+        if !buf.is_empty() && self.write_len != 128 {
+            let i = (((self.write_ix & !FLAG_CLOSED) + self.write_len) % 128) as usize;
+            let n_ = buf.len().min(128 - self.write_len as usize).min(128 - i);
+            self.write_buf[i..i + n_].copy_from_slice(&buf[..n_]);
+            self.write_len += n_ as u8;
+            n += n_;
+        }
+
         Ok(n)
     }
 
@@ -121,6 +140,7 @@ impl<S: Socket> Stream for StreamNoTls<S> {
         }
     }
 
+    #[expect(clippy::cast_possible_truncation)]
     fn poll_inner(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -207,6 +227,10 @@ impl<S: Socket> Stream for StreamNoTls<S> {
 
 impl<S: Socket> StreamNoTls<S> {
     /// Creates new stream.
+    ///
+    /// # Errors
+    ///
+    /// Errors if stream returns IO error.
     pub fn new(stream: S) -> IoResult<Self> {
         let peer_addr = stream.peer_addr()?;
         Ok(Self {

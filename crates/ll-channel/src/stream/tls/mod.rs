@@ -7,7 +7,7 @@ use std::future::poll_fn;
 use std::io::{Error as IoError, ErrorKind, IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::task::Poll::*;
+use std::task::Poll::{Pending, Ready};
 use std::task::{Context, Poll};
 
 use futures_io::{AsyncRead, AsyncWrite};

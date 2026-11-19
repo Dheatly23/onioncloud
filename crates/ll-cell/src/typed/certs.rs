@@ -109,6 +109,7 @@ impl Certs {
     /// # Errors
     ///
     /// Returns [`VariableCellTooLong`] if cell is too long.
+    #[expect(clippy::cast_possible_truncation)]
     pub fn try_from_iter<I, T>(it: I) -> Result<Self, VariableCellTooLong>
     where
         I: IntoIterator<Item = Cert<T>>,
@@ -116,8 +117,8 @@ impl Certs {
     {
         let mut v = vec![0u8];
         for c in it {
-            v[0] = v[0].checked_add(1).ok_or_else(|| VariableCellTooLong {
-                len: NonZeroUsize::new(65536).unwrap(),
+            v[0] = v[0].checked_add(1).ok_or(VariableCellTooLong {
+                len: const { NonZeroUsize::new(65536).unwrap() },
             })?;
 
             let s = &*c.data;
@@ -134,7 +135,7 @@ impl Certs {
             v.extend_from_slice(
                 CertDataHeader {
                     ty: c.ty,
-                    len: U16::new(s.len() as u16),
+                    len: U16::new(s.len() as _),
                 }
                 .as_bytes(),
             );

@@ -149,7 +149,9 @@ impl VariableCell {
 
     /// Try to cast into [`FixedCell`].
     ///
-    /// If cast fails, returns itself.
+    /// # Errors
+    ///
+    /// Returns itself if cast fails.
     pub fn try_into_fixed(self) -> Result<FixedCell, Self> {
         // Do the same thing as nightly Box::into_array
         if self.inner.len() == FIXED_CELL_SIZE {

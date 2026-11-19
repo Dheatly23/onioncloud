@@ -32,6 +32,7 @@ pub struct Create2 {
     cell: FixedCell,
 }
 
+#[expect(clippy::missing_fields_in_debug)]
 impl Debug for Create2 {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("Create2")
@@ -110,6 +111,7 @@ impl Create2 {
     ///
     /// Returns [`None`] if payload does not fit the cell.
     #[must_use]
+    #[expect(clippy::cast_possible_truncation)]
     pub fn new(circuit: NonZeroU32, mut cell: FixedCell, ty: u16, data: &[u8]) -> Option<Self> {
         if data.len() > FIXED_CELL_SIZE - 4 {
             return None;
@@ -206,6 +208,7 @@ pub struct Created2 {
     cell: FixedCell,
 }
 
+#[expect(clippy::missing_fields_in_debug)]
 impl Debug for Created2 {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("Created2")
@@ -283,6 +286,7 @@ impl Created2 {
     ///
     /// Returns [`None`] if payload does not fit the cell.
     #[must_use]
+    #[expect(clippy::cast_possible_truncation)]
     pub fn new(circuit: NonZeroU32, mut cell: FixedCell, data: &[u8]) -> Option<Self> {
         if data.len() > FIXED_CELL_SIZE - 2 {
             return None;
@@ -365,6 +369,7 @@ pub struct CreateFast {
     cell: FixedCell,
 }
 
+#[expect(clippy::missing_fields_in_debug)]
 impl Debug for CreateFast {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("CreateFast")
@@ -498,6 +503,7 @@ pub struct CreatedFast {
     cell: FixedCell,
 }
 
+#[expect(clippy::missing_fields_in_debug)]
 impl Debug for CreatedFast {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("CreatedFast")

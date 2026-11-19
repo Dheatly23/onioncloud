@@ -130,12 +130,15 @@ impl Versions {
     pub fn try_from_slice(data: &[u16]) -> Result<Self, VariableCellTooLong> {
         if data.len() > 32767 {
             return Err(VariableCellTooLong {
-                len: NonZeroUsize::new(data.len().saturating_mul(2)).unwrap(),
+                len: match NonZeroUsize::new(data.len().saturating_mul(2)) {
+                    Some(v) => v,
+                    None => unreachable!("data must not be empty"),
+                },
             });
         }
 
         let mut v = vec![0u8; data.len() * 2].into_boxed_slice();
-        assert_eq!(v.len(), data.len() * 2);
+        debug_assert_eq!(v.len(), data.len() * 2);
         for (i, &t) in data.iter().enumerate() {
             let j = i * 2;
             // SAFETY: Index is always within bound.

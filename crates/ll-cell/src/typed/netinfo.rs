@@ -227,6 +227,7 @@ impl Netinfo {
             t.data.rest_mut()
         }
 
+        #[expect(clippy::many_single_char_names)]
         fn append_addr<'b>(n: &mut u8, s: &'b mut [u8], a: IpAddr) -> Option<&'b mut [u8]> {
             *n = (*n).checked_add(1)?;
             let mut t = AddrData::mut_from_bytes(s).ok()?;

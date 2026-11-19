@@ -13,6 +13,7 @@ use std::ops::{Deref, DerefMut};
 
 use crate::cell::{Cell, CellTy};
 use crate::fixed::FixedCell;
+#[expect(clippy::wildcard_imports)]
 use crate::typed::*;
 
 pub use standard::StandardCellCache;

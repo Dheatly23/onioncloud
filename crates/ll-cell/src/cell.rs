@@ -234,14 +234,17 @@ impl Cell {
 /// **[`Self::try_from_cell`] should not mutate nor drop the cell.**
 /// If the cell does not match, it should return the cell back.
 /// This allows user to match for multiple types.
-///
-/// # Errors
-///
-/// It **should not** return error if the [`command`](`CellHeader::command`) ID does not match.
-/// If the command ID does not match, return `Ok(None)` instead.
 pub trait TryFromCell: Sized {
+    /// Error type.
     type Error;
 
+    /// Takes and cast from [`Cell`].
+    ///
+    /// # Errors
+    ///
+    /// Errors if cell format does not match.
+    /// It **should not** return error if the [`command`](`CellHeader::command`) ID does not match.
+    /// If the command ID does not match, return `Ok(None)` instead.
     fn try_from_cell(cell: &mut Option<Cell>) -> Result<Option<Self>, Self::Error>;
 }
 

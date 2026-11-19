@@ -61,12 +61,12 @@ where
 
     #[inline]
     fn cache_fixed_cell(&self, cell: FixedCell) {
-        <T as Deref>::Target::cache_fixed_cell(&**self, cell)
+        <T as Deref>::Target::cache_fixed_cell(&**self, cell);
     }
 
     #[inline]
     fn cache_variable_cell(&self, cell: VariableCell) {
-        <T as Deref>::Target::cache_variable_cell(&**self, cell)
+        <T as Deref>::Target::cache_variable_cell(&**self, cell);
     }
 }
 
@@ -146,6 +146,14 @@ impl<C: WriteConfig> Writer<C> {
     /// # Usage note
     ///
     /// **DO NOT** reuse [`Writer`] after it returns an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - IO error happened.
+    /// - Cell format error.
+    /// - Socket is closed (EOF).
+    #[expect(clippy::too_many_lines)]
     pub fn write<W: Write>(&mut self, write: &mut W) -> Result<bool, CellWriteError> {
         loop {
             let buf = match &self.state {
@@ -200,10 +208,9 @@ impl<C: WriteConfig> Writer<C> {
                             // Not reading anything yet.
                             self.state = State::Finished;
                             return Err(IoError::new(ErrorKind::UnexpectedEof, CellFinished).into());
-                        } else {
-                            self.state = State::IoErr;
-                            return Err(IoError::from(ErrorKind::UnexpectedEof).into());
                         }
+                        self.state = State::IoErr;
+                        return Err(IoError::from(ErrorKind::UnexpectedEof).into());
                     }
                     Ok(n) => n,
                     Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(false),
@@ -279,6 +286,7 @@ impl<C: WriteConfig> Writer<C> {
     /// # Panics
     ///
     /// Panics if circuit ID of the cell is bigger than 65535 and config uses 2 bytes ID.
+    #[expect(clippy::cast_possible_truncation)]
     pub fn maybe_receive(&mut self, f: impl FnOnce() -> Option<Cell>) -> bool {
         if !self.is_ready() {
             return false;

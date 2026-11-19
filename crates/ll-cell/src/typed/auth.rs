@@ -113,6 +113,7 @@ impl AuthChallenge {
     /// # Errors
     ///
     /// Returns [`VariableCellTooLong`] if cell is too long.
+    #[expect(clippy::cast_possible_truncation)]
     pub fn try_from_slice(
         challenge: [u8; 32],
         methods: &[u16],
@@ -125,9 +126,11 @@ impl AuthChallenge {
         }
 
         let mut v = vec![0u8; len].into_boxed_slice();
-        let t = AuthChallengeData::mut_from_bytes(&mut v).unwrap();
+        let Ok(t) = AuthChallengeData::mut_from_bytes_with_elems(&mut v, methods.len()) else {
+            unreachable!("byte slice should match the format");
+        };
         t.header.challenge = challenge;
-        t.header.n_methods.set(methods.len().try_into().unwrap());
+        t.header.n_methods.set(methods.len() as _);
         debug_assert_eq!(t.methods.len(), methods.len());
         for (i, &v) in methods.iter().enumerate() {
             // SAFETY: Length is already checked.
@@ -296,6 +299,7 @@ impl Authenticate {
     /// # Errors
     ///
     /// Returns [`VariableCellTooLong`] if cell is too long.
+    #[expect(clippy::cast_possible_truncation)]
     pub fn new(auth_ty: u16, payload: &[u8]) -> Result<Self, VariableCellTooLong> {
         let len = size_of::<AuthenticateHeader>().saturating_add(payload.len());
         if let Some(len) = NonZeroUsize::new(len)
@@ -305,9 +309,11 @@ impl Authenticate {
         }
 
         let mut v = vec![0u8; len].into_boxed_slice();
-        let t = AuthenticateData::mut_from_bytes(&mut v).unwrap();
+        let Ok(t) = AuthenticateData::mut_from_bytes_with_elems(&mut v, payload.len()) else {
+            unreachable!("byte slice should match the format");
+        };
         t.header.ty.set(auth_ty);
-        t.header.len.set(payload.len().try_into().unwrap());
+        t.header.len.set(payload.len() as _);
         t.data.copy_from_slice(payload);
 
         debug_assert!(Self::validate_cell(&v), "cell format should be valid");

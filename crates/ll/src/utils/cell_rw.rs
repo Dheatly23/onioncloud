@@ -88,6 +88,6 @@ impl<C: CellCache> WriteConfig for Config<C> {
 
     #[inline]
     fn cache_fixed_cell(&self, cell: FixedCell) {
-        ReadConfig::cache_fixed_cell(self, cell)
+        ReadConfig::cache_fixed_cell(self, cell);
     }
 }
