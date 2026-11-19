@@ -386,11 +386,11 @@ fn cast_relay(data: FixedCellData, cell: Cell) {
         let t = Relay::try_from_cell(&mut cell).unwrap().unwrap();
         assert_matches!(cell, None);
 
-        let s = data.0.data;
-        assert_eq!(t.as_ref(), s);
+        let s = &data.0.data;
+        assert_eq!(t.as_ref().data(), s);
 
         let cell = Cell::from(t);
-        assert_eq!(cell.header.circuit, 0);
+        assert_eq!(cell.header.circuit, data.0.circuit.get());
         assert_eq!(cell.header.command, Relay::ID);
         assert!(cell.is_fixed(), "cell is not fixed");
         assert_eq!(cell.data(), s);
@@ -412,11 +412,11 @@ fn cast_relay_early(data: FixedCellData, cell: Cell) {
         let t = RelayEarly::try_from_cell(&mut cell).unwrap().unwrap();
         assert_matches!(cell, None);
 
-        let s = data.0.data;
-        assert_eq!(t.as_ref(), s);
+        let s = &data.0.data;
+        assert_eq!(t.as_ref().data(), s);
 
         let cell = Cell::from(t);
-        assert_eq!(cell.header.circuit, 0);
+        assert_eq!(cell.header.circuit, data.0.circuit.get());
         assert_eq!(cell.header.command, RelayEarly::ID);
         assert!(cell.is_fixed(), "cell is not fixed");
         assert_eq!(cell.data(), s);
