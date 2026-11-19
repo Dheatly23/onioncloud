@@ -184,14 +184,26 @@ impl<C: WriteConfig> Writer<C> {
             let buf = &buf[self.off..];
             if !buf.is_empty() {
                 let n = match write.write(buf) {
-                    Ok(0) if self.off == 0 => {
-                        // Not reading anything yet.
-                        self.state = State::Finished;
-                        return Err(IoError::new(ErrorKind::UnexpectedEof, CellFinished).into());
-                    }
                     Ok(0) => {
-                        self.state = State::IoErr;
-                        return Err(IoError::from(ErrorKind::UnexpectedEof).into());
+                        if self.off == 0
+                            && !matches!(
+                                self.state,
+                                State::Fixed {
+                                    data: FixedData::Data,
+                                    ..
+                                } | State::Variable {
+                                    data: VariableData::Data,
+                                    ..
+                                }
+                            )
+                        {
+                            // Not reading anything yet.
+                            self.state = State::Finished;
+                            return Err(IoError::new(ErrorKind::UnexpectedEof, CellFinished).into());
+                        } else {
+                            self.state = State::IoErr;
+                            return Err(IoError::from(ErrorKind::UnexpectedEof).into());
+                        }
                     }
                     Ok(n) => n,
                     Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(false),
@@ -318,5 +330,184 @@ impl<C: WriteConfig> Writer<C> {
         self.off = 0;
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use test_log::test;
+    use tracing::instrument;
+
+    use crate::fixed::FIXED_CELL_SIZE;
+    use crate::utils::run_test;
+
+    struct Config;
+
+    impl WriteConfig for Config {}
+
+    #[test]
+    fn test_write_fixed() {
+        #[instrument]
+        fn test() {
+            let mut writer = Writer::new(Config);
+            assert!(writer.is_ready(), "writer is not ready");
+            assert!(!writer.is_finished(), "writer is finished");
+            assert!(
+                writer.maybe_receive(|| Some(Cell::new(
+                    CellHeader {
+                        command: 1,
+                        circuit: 0x101
+                    },
+                    FixedCell::from([1u8; FIXED_CELL_SIZE])
+                ))),
+                "writer does not receive cell"
+            );
+
+            let mut buf = [255; const { FIXED_CELL_SIZE + 3 }];
+            let mut w = &mut buf[..];
+            assert!(writer.write(&mut w).unwrap(), "write is not finished");
+            assert_eq!(w.len(), 0);
+            assert_eq!(buf, [1; const { FIXED_CELL_SIZE + 3 }]);
+
+            assert!(writer.is_ready(), "writer is not ready");
+            assert!(!writer.is_finished(), "writer is finished");
+            assert!(
+                writer.maybe_receive(|| Some(Cell::new(
+                    CellHeader {
+                        command: 1,
+                        circuit: 0x101
+                    },
+                    FixedCell::from([1u8; FIXED_CELL_SIZE])
+                ))),
+                "writer does not receive cell"
+            );
+            let mut w = &mut buf[..0];
+            let e = writer.write(&mut w).unwrap_err();
+            match e {
+                CellWriteError::Io(e) if e.kind() == ErrorKind::UnexpectedEof => (),
+                e => panic!("write error: {e:?}"),
+            }
+            assert!(!writer.is_ready(), "writer is ready");
+            assert!(writer.is_finished(), "writer is not finished");
+        }
+
+        run_test(test);
+    }
+
+    #[test]
+    fn test_write_variable() {
+        #[instrument]
+        fn test() {
+            let mut writer = Writer::new(Config);
+            assert!(writer.is_ready(), "writer is not ready");
+            assert!(!writer.is_finished(), "writer is finished");
+            assert!(
+                writer.maybe_receive(|| Some(Cell::new(
+                    CellHeader {
+                        command: 1,
+                        circuit: 0x101
+                    },
+                    VariableCell::empty()
+                ))),
+                "writer does not receive cell"
+            );
+
+            let mut buf = [255; const { 5 }];
+            let mut w = &mut buf[..];
+            assert!(writer.write(&mut w).unwrap(), "write is not finished");
+            assert_eq!(w.len(), 0);
+            assert_eq!(buf, [1, 1, 1, 0, 0]);
+
+            assert!(writer.is_ready(), "writer is not ready");
+            assert!(!writer.is_finished(), "writer is finished");
+            assert!(
+                writer.maybe_receive(|| Some(Cell::new(
+                    CellHeader {
+                        command: 1,
+                        circuit: 0x101
+                    },
+                    VariableCell::empty()
+                ))),
+                "writer does not receive cell"
+            );
+            let mut w = &mut buf[..0];
+            let e = writer.write(&mut w).unwrap_err();
+            match e {
+                CellWriteError::Io(e) if e.kind() == ErrorKind::UnexpectedEof => (),
+                e => panic!("write error: {e:?}"),
+            }
+            assert!(!writer.is_ready(), "writer is ready");
+            assert!(writer.is_finished(), "writer is not finished");
+        }
+
+        run_test(test);
+    }
+
+    #[test]
+    fn test_write_fixed_truncated() {
+        #[instrument]
+        fn test() {
+            let mut writer = Writer::new(Config);
+            assert!(writer.is_ready(), "writer is not ready");
+            assert!(!writer.is_finished(), "writer is finished");
+            assert!(
+                writer.maybe_receive(|| Some(Cell::new(
+                    CellHeader {
+                        command: 1,
+                        circuit: 0x101
+                    },
+                    FixedCell::from([1u8; FIXED_CELL_SIZE])
+                ))),
+                "writer does not receive cell"
+            );
+
+            let mut buf = [0; const { FIXED_CELL_SIZE + 2 }];
+            let mut w = &mut buf[..];
+            let e = writer.write(&mut w).unwrap_err();
+            match e {
+                CellWriteError::Io(e) if e.kind() == ErrorKind::UnexpectedEof => (),
+                e => panic!("write error: {e:?}"),
+            }
+            assert!(!writer.is_ready(), "writer is ready");
+            assert!(!writer.is_finished(), "writer is not finished");
+            assert_eq!(buf, [1; const { FIXED_CELL_SIZE + 2 }]);
+        }
+
+        run_test(test);
+    }
+
+    #[test]
+    fn test_write_variable_truncated() {
+        #[instrument]
+        fn test() {
+            let mut writer = Writer::new(Config);
+            assert!(writer.is_ready(), "writer is not ready");
+            assert!(!writer.is_finished(), "writer is finished");
+            assert!(
+                writer.maybe_receive(|| Some(Cell::new(
+                    CellHeader {
+                        command: 1,
+                        circuit: 0x101
+                    },
+                    VariableCell::empty()
+                ))),
+                "writer does not receive cell"
+            );
+
+            let mut buf = [0; const { 4 }];
+            let mut w = &mut buf[..];
+            let e = writer.write(&mut w).unwrap_err();
+            match e {
+                CellWriteError::Io(e) if e.kind() == ErrorKind::UnexpectedEof => (),
+                e => panic!("write error: {e:?}"),
+            }
+            assert!(!writer.is_ready(), "writer is ready");
+            assert!(!writer.is_finished(), "writer is not finished");
+            assert_eq!(buf, [1, 1, 1, 0]);
+        }
+
+        run_test(test);
     }
 }

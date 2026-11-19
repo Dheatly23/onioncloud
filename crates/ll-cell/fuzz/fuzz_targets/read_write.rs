@@ -174,11 +174,11 @@ fuzz_target!(|data: Data| {
     executor.runtime().spawn(async move {
         let mut read = SocketLimiterWrapper::new(
             PendingWrapper {
-                mask: read_mask,
+                mask: read_mask.clone(),
                 ix: 0,
                 inner: Cursor::new(&bytes[..]),
             },
-            read_limiter,
+            read_limiter.clone(),
         );
 
         let mut cells = VecDeque::new();
@@ -231,7 +231,14 @@ fuzz_target!(|data: Data| {
             off: 0,
         });
         assert!(writer.is_ready());
-        while writer.maybe_receive(|| cells.pop_front()) {
+        let mut i = 0;
+        while writer.maybe_receive(|| match cells.get(i) {
+            Some(c) => {
+                i += 1;
+                Some(c.clone())
+            }
+            None => None,
+        }) {
             let start = write.socket_mut().inner.position() as usize;
             poll_fn(|cx| {
                 match writer.write(&mut AsyncWrapper {
@@ -258,6 +265,49 @@ fuzz_target!(|data: Data| {
 
             writer.config.off = writer.config.off.saturating_add(1);
         }
+
+        let buf = &bytes[..write.socket_mut().inner.position() as usize];
+
+        drop((write, writer));
+
+        let mut read = SocketLimiterWrapper::new(
+            PendingWrapper {
+                mask: read_mask,
+                ix: 0,
+                inner: Cursor::new(buf),
+            },
+            read_limiter.clone(),
+        );
+
+        let mut reader = Reader::new(Config {
+            data: &config,
+            off: 0,
+        });
+        i = 0;
+        loop {
+            let r = poll_fn(|cx| {
+                match reader.read(&mut AsyncWrapper {
+                    inner: Pin::new(&mut read),
+                    cx,
+                }) {
+                    Ok(None) => Poll::Pending,
+                    Ok(Some(v)) => Poll::Ready(Ok(v)),
+                    Err(e) => Poll::Ready(Err(e)),
+                }
+            })
+            .await;
+
+            if let Err(CellReadError::Io(e)) = &r
+                && e.kind() == ErrorKind::UnexpectedEof
+            {
+                assert!(reader.is_finished(), "read is not finished");
+                break;
+            }
+            assert_eq!(cells[i], r.unwrap());
+            i += 1;
+            reader.config.off = reader.config.off.saturating_add(1);
+        }
+        assert_eq!(cells.len(), i);
     });
 
     executor.run();

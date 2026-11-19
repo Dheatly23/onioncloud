@@ -92,12 +92,12 @@ where
 
     #[inline]
     fn cache_fixed_cell(&self, cell: FixedCell) {
-        <T as Deref>::Target::cache_fixed_cell(&**self, cell)
+        <T as Deref>::Target::cache_fixed_cell(&**self, cell);
     }
 
     #[inline]
     fn cache_variable_cell(&self, cell: VariableCell) {
-        <T as Deref>::Target::cache_variable_cell(&**self, cell)
+        <T as Deref>::Target::cache_variable_cell(&**self, cell);
     }
 }
 
@@ -182,6 +182,13 @@ impl<C: ReadConfig> Reader<C> {
     /// # Usage note
     ///
     /// **DO NOT** reuse [`Reader`] after it returns an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - IO error happened.
+    /// - Cell format error.
+    /// - Socket is closed (EOF).
     pub fn read<R: Read>(&mut self, read: &mut R) -> Result<Option<Cell>, CellReadError> {
         loop {
             let buf = match &mut self.state {
@@ -220,14 +227,23 @@ impl<C: ReadConfig> Reader<C> {
             let buf = &mut buf[self.off..];
             if !buf.is_empty() {
                 let n = match read.read(buf) {
-                    Ok(0) if self.off == 0 => {
-                        // Not reading anything yet.
-                        self.state = State::Finished;
-                        return Err(IoError::new(ErrorKind::UnexpectedEof, CellFinished).into());
-                    }
                     Ok(0) => {
-                        self.state = State::IoErr;
-                        return Err(IoError::from(ErrorKind::UnexpectedEof).into());
+                        return Err(if matches!(
+                            self,
+                            Self {
+                                off: 0,
+                                state: State::Header { .. },
+                                ..
+                            }
+                        ) {
+                            // Not reading anything yet.
+                            self.state = State::Finished;
+                            IoError::new(ErrorKind::UnexpectedEof, CellFinished)
+                        } else {
+                            self.state = State::IoErr;
+                            IoError::from(ErrorKind::UnexpectedEof)
+                        }
+                        .into());
                     }
                     Ok(n) => n,
                     Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(None),
@@ -300,5 +316,90 @@ impl<C: ReadConfig> Reader<C> {
     /// Unfinished reads are treated as typical [`ErrorKind::UnexpectedEof`] instead of finished.
     pub fn is_finished(&self) -> bool {
         matches!(self.state, State::Finished)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use test_log::test;
+    use tracing::instrument;
+
+    use crate::fixed::FIXED_CELL_SIZE;
+    use crate::utils::run_test;
+
+    struct Config;
+
+    impl ReadConfig for Config {
+        fn cell_type(&self, header: &CellHeader) -> Option<CellType> {
+            match header.command {
+                0 => Some(CellType::Fixed),
+                1 => Some(CellType::Variable),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn test_read_fixed() {
+        #[instrument]
+        fn test() {
+            let mut buf: &[u8] = &[0; const { FIXED_CELL_SIZE + 3 }];
+
+            let mut reader = Reader::new(Config);
+            let _ = reader.read(&mut buf).unwrap().unwrap();
+        }
+
+        run_test(test);
+    }
+
+    #[test]
+    fn test_read_variable() {
+        #[instrument]
+        fn test() {
+            let mut buf: &[u8] = &[0, 0, 1, 0, 0];
+
+            let mut reader = Reader::new(Config);
+            let _ = reader.read(&mut buf).unwrap().unwrap();
+        }
+
+        run_test(test);
+    }
+
+    #[test]
+    fn test_read_fixed_truncated() {
+        #[instrument]
+        fn test() {
+            let mut buf: &[u8] = &[0; const { FIXED_CELL_SIZE + 2 }];
+
+            let mut reader = Reader::new(Config);
+            let e = reader.read(&mut buf).unwrap_err();
+            match e {
+                CellReadError::Io(e) if e.kind() == ErrorKind::UnexpectedEof => (),
+                e => panic!("read error: {e:?}"),
+            }
+            assert!(!reader.is_finished(), "read is finished");
+        }
+
+        run_test(test);
+    }
+
+    #[test]
+    fn test_read_variable_truncated() {
+        #[instrument]
+        fn test() {
+            let mut buf: &[u8] = &[0, 0, 1, 0, 1];
+
+            let mut reader = Reader::new(Config);
+            let e = reader.read(&mut buf).unwrap_err();
+            match e {
+                CellReadError::Io(e) if e.kind() == ErrorKind::UnexpectedEof => (),
+                e => panic!("read error: {e:?}"),
+            }
+            assert!(!reader.is_finished(), "read is finished");
+        }
+
+        run_test(test);
     }
 }

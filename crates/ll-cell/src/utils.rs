@@ -69,3 +69,15 @@ pub(crate) const fn base64u_encode(s: &[u8]) -> impl '_ + Debug {
 
     S(s)
 }
+
+#[cfg(test)]
+pub(crate) fn run_test(f: impl Fn() + Send + Sync + 'static) {
+    cfg_select! {
+        feature = "loom" => {
+            loom::model(f);
+        }
+        _ => {
+            f();
+        }
+    }
+}
