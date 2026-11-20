@@ -39,9 +39,3 @@ workspace = true
 features = [
   "trace",
 ]
-
-[features]
-check-clock-skew = []
-default = [
-  "check-clock-skew",
-]

@@ -1,50 +1,157 @@
-use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
-use std::io::{Read, Write};
-use std::marker::PhantomData;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::Error as AnyError;
-use humantime::format_duration;
 use onioncloud_ll::cell::cache::{CellCache, CellCacheExt};
 use onioncloud_ll::cell::cell::TryFromCell;
-use onioncloud_ll::cell::error::{
-    CellCastError, CellFormatError, CellIsFixed, CellIsVariable, CellReadError, CellWriteError,
-    NonZeroCircID, ZeroCircID,
-};
 use onioncloud_ll::cell::read::Reader;
 use onioncloud_ll::cell::typed::{AuthChallenge, Certs, Netinfo, Versions};
 use onioncloud_ll::cell::write::Writer;
-use onioncloud_ll::channel::error::{ChannelError, IoError, RustlsError};
 use onioncloud_ll::channel::handle::{ChannelHandle, Handle, Return};
-use onioncloud_ll::error_from_enum;
+use onioncloud_ll::utils::LinkVersion;
 use onioncloud_ll::utils::cell_rw::Config as RWConfig;
-use onioncloud_ll::utils::{LinkVersion, LinkVersionNegotiateError};
+use onioncloud_runtime::HasSpsc;
 use pin_project::pin_project;
-use thiserror::Error;
-use tracing::{info, instrument};
+use tracing::{Span, debug, info_span, trace};
+
+use crate::error::{ClientError, ClockSkewError, HandshakeErrorInner};
+use crate::utils::Timedelta;
+
+/// Circuit request channel buffer size.
+const CIRC_REQ_BUF: usize = 8;
+
+/// Configuration for [`ClientHandle`].
+///
+/// The default configuration is suitable for production system.
+#[derive(Debug)]
+#[must_use]
+pub struct ClientConfig<R, C> {
+    cache: C,
+    runtime: R,
+    config: InnerConfig,
+}
+
+#[derive(Debug)]
+struct InnerConfig {
+    check_clock_skew: bool,
+    check_certs: bool,
+}
+
+impl Default for ClientConfig<(), ()> {
+    fn default() -> Self {
+        Self {
+            cache: (),
+            runtime: (),
+            config: InnerConfig {
+                check_clock_skew: true,
+                check_certs: true,
+            },
+        }
+    }
+}
+
+impl<R, C> ClientConfig<R, C> {
+    /// Sets runtime.
+    #[inline]
+    pub fn runtime<R2>(self, runtime: R2) -> ClientConfig<R2, C> {
+        ClientConfig {
+            cache: self.cache,
+            runtime,
+            config: self.config,
+        }
+    }
+
+    /// Sets cache.
+    #[inline]
+    pub fn cache<C2>(self, cache: C2) -> ClientConfig<R, C2> {
+        ClientConfig {
+            cache,
+            runtime: self.runtime,
+            config: self.config,
+        }
+    }
+
+    /// Sets clock skew check.
+    ///
+    /// If enabled, checks clock skew and returns error if clock skews from relay.
+    ///
+    /// Disable this for test environment.
+    #[inline]
+    pub fn check_clock_skew(mut self, enable: bool) -> Self {
+        self.config.check_clock_skew = enable;
+        self
+    }
+
+    /// Sets clock skew check.
+    ///
+    /// If enabled, checks CERTS cell certificates.
+    ///
+    /// Disable this for test environment.
+    #[inline]
+    pub fn check_certs(mut self, enable: bool) -> Self {
+        self.config.check_certs = enable;
+        self
+    }
+}
+
+impl<R, C> ClientConfig<&'_ R, C>
+where
+    R: HasSpsc,
+    C: CellCache + Clone,
+{
+    /// Builds [`ClientHandle`].
+    ///
+    /// Returns [`ClientHandle`] and circuit request sender.
+    /// Use it to open new circuit.
+    pub fn build(self) -> (ClientHandle<R, C>, <R as HasSpsc>::Sender<CircRequest>) {
+        let (send, recv) = self.runtime.make_spsc(CIRC_REQ_BUF);
+        let handle = ClientHandle {
+            inner: None,
+            span: None,
+            cache: self.cache,
+            recv,
+            config: self.config,
+        };
+        (handle, send)
+    }
+}
 
 /// Channel handle for client.
 #[pin_project(project = ClientHandleProj)]
-#[derive(Debug)]
-pub struct ClientHandle<R, C: CellCache> {
+pub struct ClientHandle<R: HasSpsc, C: CellCache> {
     cache: C,
-    inner: Option<Inner<R, C>>,
-
-    phantom: PhantomData<R>,
+    #[pin]
+    recv: R::Receiver<CircRequest>,
+    config: InnerConfig,
+    inner: Option<Inner<C>>,
+    span: Option<Span>,
 }
 
-struct Inner<R, C: CellCache> {
+impl<R, C> Debug for ClientHandle<R, C>
+where
+    R: HasSpsc,
+    C: CellCache + Debug,
+    <R as HasSpsc>::Receiver<CircRequest>: Debug,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("ClientHandle")
+            .field("inner", &self.inner)
+            .field("config", &self.config)
+            .field("cache", &self.cache)
+            .field("recv", &self.recv)
+            .finish_non_exhaustive()
+    }
+}
+
+struct Inner<C: CellCache> {
     timeout: Instant,
     state: State,
     reader: Reader<RWConfig<C>>,
     writer: Writer<RWConfig<C>>,
-
-    phantom: PhantomData<R>,
 }
 
-impl<R: Debug, C: CellCache + Debug> Debug for Inner<R, C> {
+impl<C: CellCache + Debug> Debug for Inner<C> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("Inner")
             .field("state", &self.state)
@@ -65,26 +172,35 @@ enum State {
 const FLAG_READ_HANDSHAKE_CERTS: u8 = 1 << 0;
 const FLAG_READ_HANDSHAKE_AUTH_CHALLENGE: u8 = 1 << 1;
 
-impl<R, C: CellCache + Clone> ChannelHandle<R> for ClientHandle<R, C> {
+impl<R: HasSpsc, C: CellCache + Clone> ChannelHandle<R> for ClientHandle<R, C> {
     type Error = ClientError;
 
-    #[instrument(name = "ClientHandle::handle", skip_all)]
+    #[expect(clippy::too_many_lines)]
     fn handle(self: Pin<&mut Self>, mut args: Handle<R>) -> Result<Return, Self::Error> {
+        let ClientHandleProj {
+            cache,
+            recv,
+            config,
+            inner,
+            span,
+        } = self.project();
+        let cache = &*cache;
+        let config = &*config;
+        let _g = span
+            .get_or_insert_with(|| info_span!("ClientHandle::handle"))
+            .enter();
+
         if args.is_timeout() {
-            info!("Channel handshake timeouts, shutting down");
+            debug!("Channel handshake timeouts, shutting down");
             return Ok(Return::new(&args).with_shutdown());
         }
 
-        let ClientHandleProj { cache, inner, .. } = self.project();
-        let cache = &*cache;
         let this = inner.get_or_insert_with(|| {
             let mut this = Inner {
                 timeout: args.time(),
                 state: State::WriteVersions,
                 reader: Reader::new(RWConfig::new(cache.clone())),
                 writer: Writer::new(RWConfig::new(cache.clone())),
-
-                phantom: PhantomData,
             };
             if !this.writer.maybe_receive(|| {
                 Some(LinkVersion::make_versions(LinkVersion::MIN, LinkVersion::MAX).into())
@@ -95,13 +211,15 @@ impl<R, C: CellCache + Clone> ChannelHandle<R> for ClientHandle<R, C> {
         });
 
         loop {
+            trace!(state = ?this.state, "handle inner loop");
             match &mut this.state {
                 State::WriteVersions => {
-                    if this.writer.write(&mut args)? {
-                        this.state = State::ReadVersions;
-                    } else {
+                    if !this.writer.write(&mut args)? {
                         break;
                     }
+
+                    debug!("sent VERSIONS cell");
+                    this.state = State::ReadVersions;
                 }
                 State::ReadVersions => {
                     let mut cell = cache.cache_b(this.reader.read(&mut args)?);
@@ -111,26 +229,33 @@ impl<R, C: CellCache + Clone> ChannelHandle<R> for ClientHandle<R, C> {
                                 id: cell.header.command.into(),
                             }
                             .into());
-                        } else {
-                            break;
                         }
+                        break;
                     };
+                    trace!("received VERSIONS cell");
 
                     let lv =
                         LinkVersion::versions_negotiate(LinkVersion::MIN, LinkVersion::MAX, &cell)?;
+                    debug!(linkver = lv.0, "version negotiated");
                     this.reader.config.set_link_version(lv);
                     this.writer.config.set_link_version(lv);
+
                     this.state = State::ReadHandshake { flags: 0 };
                 }
                 State::ReadHandshake { flags } => {
-                    let mut cell = cache.cache_b(this.reader.read(&mut args)?);
+                    let cell @ Some(_) = this.reader.read(&mut args)? else {
+                        break;
+                    };
+                    let mut cell = cache.cache_b(cell);
+
                     if let Some(c) = Netinfo::try_from_cell(&mut cell)? {
                         drop(cell);
                         let c = cache.cache_b(c);
+                        trace!("received NETINFO cell");
 
-                        if cfg!(feature = "check-clock-skew") {
+                        if config.check_clock_skew {
                             let stamp =
-                                SystemTime::UNIX_EPOCH + Duration::from_secs(c.timestamp() as _);
+                                SystemTime::UNIX_EPOCH + Duration::from_secs(c.timestamp().into());
                             let delta = match stamp.duration_since(SystemTime::now()) {
                                 Ok(v) => Timedelta::Pos(v),
                                 Err(v) => Timedelta::Neg(v.duration()),
@@ -149,8 +274,23 @@ impl<R, C: CellCache + Clone> ChannelHandle<R> for ClientHandle<R, C> {
                             return Err(HandshakeErrorInner::NetinfoPeerAddrMismatch.into());
                         }
 
+                        debug!("done reading peer authentication cells");
                         this.state = State::WriteNetinfo;
-                    } else if let Some(cell) = Certs::try_from_cell(&mut cell)? {
+
+                        assert!(
+                            this.writer.maybe_receive(|| {
+                                match Netinfo::new(cache.get_cached(), 0, args.peer_addr().ip(), [])
+                                {
+                                    Ok(v) => Some(v.into()),
+                                    Err(_) => unreachable!("netinfo creation failed"),
+                                }
+                            }),
+                            "cannot write NETINFO cell"
+                        );
+                    } else if let Some(c) = Certs::try_from_cell(&mut cell)? {
+                        drop(cell);
+                        trace!("received CERTS cell");
+
                         if *flags & FLAG_READ_HANDSHAKE_CERTS != 0 {
                             return Err(HandshakeErrorInner::DuplicateCell {
                                 id: Certs::ID.into(),
@@ -158,38 +298,33 @@ impl<R, C: CellCache + Clone> ChannelHandle<R> for ClientHandle<R, C> {
                             .into());
                         }
                         *flags |= FLAG_READ_HANDSHAKE_CERTS;
-                    } else if let Some(cell) = AuthChallenge::try_from_cell(&mut cell)? {
+                    } else if let Some(c) = AuthChallenge::try_from_cell(&mut cell)? {
+                        drop(cell);
+                        trace!("received AUTH_CHALLENGE cell");
+
                         if *flags & FLAG_READ_HANDSHAKE_AUTH_CHALLENGE != 0 {
                             return Err(HandshakeErrorInner::DuplicateCell {
-                                id: Certs::ID.into(),
+                                id: AuthChallenge::ID.into(),
                             }
                             .into());
                         }
                         *flags |= FLAG_READ_HANDSHAKE_AUTH_CHALLENGE;
-                    } else {
+                    } else if let Some(cell) = &*cell {
                         return Err(HandshakeErrorInner::UnexpectedCell {
-                            id: (*cell)
-                                .as_ref()
-                                .expect("cell should not be taken")
-                                .header
-                                .command
-                                .into(),
+                            id: cell.header.command.into(),
                         }
                         .into());
-                    }
-                }
-                State::WriteNetinfo => {
-                    this.writer.maybe_receive(|| {
-                        match Netinfo::new(cache.get_cached(), 0, args.peer_addr().ip(), []) {
-                            Ok(v) => Some(v.into()),
-                            Err(_) => unreachable!("netinfo creation failed"),
-                        }
-                    });
-                    if this.writer.write(&mut args)? {
-                        this.state = State::Main;
                     } else {
                         break;
                     }
+                }
+                State::WriteNetinfo => {
+                    if !this.writer.write(&mut args)? {
+                        break;
+                    }
+
+                    debug!("sent NETINFO cell. Handshake finished");
+                    this.state = State::Main;
                 }
                 State::Main => break,
             }
@@ -199,138 +334,19 @@ impl<R, C: CellCache + Clone> ChannelHandle<R> for ClientHandle<R, C> {
     }
 }
 
-#[derive(Debug)]
-enum Timedelta {
-    Neg(Duration),
-    Pos(Duration),
-}
-
-impl Display for Timedelta {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(
-            f,
-            "{} in the {}",
-            format_duration(self.get_dur()),
-            match self {
-                Self::Neg(_) => "past",
-                Self::Pos(_) => "future",
-            }
+impl<R: HasSpsc, C: CellCache> ClientHandle<R, C> {
+    /// Checks if handshake has finished.
+    #[must_use]
+    pub fn handshake_finished(&self) -> bool {
+        matches!(
+            self.inner,
+            Some(Inner {
+                state: State::Main,
+                ..
+            })
         )
     }
 }
 
-impl Timedelta {
-    fn get_dur(&self) -> Duration {
-        let (Self::Neg(dur) | Self::Pos(dur)) = self;
-        *dur
-    }
-}
-
-/// Error type for [`ClientHandle`].
-#[derive(Error, Debug)]
-#[error(transparent)]
-#[non_exhaustive]
-pub enum ClientError {
-    Any(#[from] AnyError),
-    Io(#[from] IoError),
-    Rustls(#[from] RustlsError),
-    LinkVersionNegotiate(#[from] LinkVersionNegotiateError),
-    CellFormat(#[from] CellFormatError),
-    NonZeroCircID(#[from] NonZeroCircID),
-    ZeroCircID(#[from] ZeroCircID),
-    CellIsFixed(#[from] CellIsFixed),
-    CellIsVariable(#[from] CellIsVariable),
-    Handshake(#[from] HandshakeError),
-    ClockSkew(#[from] ClockSkewError),
-}
-
-error_from_enum! {
-    ClientError {
-        else v => Self::Any(v.into()),
-        ChannelError => [Io, Rustls],
-        CellReadError => [Io, CellFormatError],
-        CellWriteError => [Io, CellFormatError],
-        CellCastError => [CellFormatError, NonZeroCircID, ZeroCircID, CellIsFixed, CellIsVariable],
-    }
-}
-
-#[derive(Error, Debug)]
-#[error("channel handshake error: {err}")]
-pub struct HandshakeError {
-    #[source]
-    err: HandshakeErrorInner,
-}
-
-impl From<HandshakeErrorInner> for ClientError {
-    fn from(err: HandshakeErrorInner) -> Self {
-        HandshakeError { err }.into()
-    }
-}
-
-#[derive(Error, Debug)]
-enum HandshakeErrorInner {
-    #[error("expected VERSIONS cell, got cell {id}")]
-    ExpectVersions { id: CellID },
-    #[error("got unexpected cell {id}")]
-    UnexpectedCell { id: CellID },
-    #[error("got duplicate cell {id}")]
-    DuplicateCell { id: CellID },
-    #[error("NETINFO peer address does not match actual connected address")]
-    NetinfoPeerAddrMismatch,
-}
-
-struct CellID(u8);
-
-impl From<u8> for CellID {
-    fn from(v: u8) -> Self {
-        Self(v)
-    }
-}
-
-impl Debug for CellID {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        let id = match self.0 {
-            Versions::ID => "VERSIONS",
-            Certs::ID => "CERTS",
-            _ => return Display::fmt(&self.0, f),
-        };
-        Display::fmt(id, f)
-    }
-}
-
-impl Display for CellID {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        Debug::fmt(self, f)
-    }
-}
-
-#[derive(Error, Debug)]
-#[error("clock skew detected! (system clock skews by {delta})")]
-pub struct ClockSkewError {
-    delta: Timedelta,
-}
-
-impl ClockSkewError {
-    /// Gets clock skew.
-    ///
-    /// To get which direction it is, use [`Self::is_skew_past`] or [`Self::is_skew_future`].
-    #[inline]
-    #[must_use]
-    pub fn skew(&self) -> Duration {
-        self.delta.get_dur()
-    }
-
-    /// Checks if clock skews to the past.
-    #[inline]
-    #[must_use]
-    pub fn is_skew_past(&self) -> bool {
-        matches!(self.delta, Timedelta::Neg(_))
-    }
-
-    /// Checks if clock skews to the future.
-    #[inline]
-    #[must_use]
-    pub fn is_skew_future(&self) -> bool {
-        matches!(self.delta, Timedelta::Pos(_))
-    }
-}
+/// Circuit open request.
+pub struct CircRequest;
