@@ -1,5 +1,9 @@
 //! Protocol versions.
 
+use std::hash::{Hash, Hasher};
+use std::borrow::Borrow;
+use std::cmp::{PartialEq, PartialOrd, Ordering};
+
 #[cfg(feature = "cell")]
 use onioncloud_ll_cell::typed::Versions;
 use thiserror::Error;
@@ -7,8 +11,36 @@ use thiserror::Error;
 /// Newtype for link protocol version.
 ///
 /// See also: [spec](https://spec.torproject.org/tor-spec/negotiating-channels.html#VERSIONS-cells).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LinkVersion(pub u16);
+
+impl Borrow<u16> for LinkVersion {
+    #[inline]
+    fn borrow(&self) -> &u16 {
+        &self.0
+    }
+}
+
+impl Hash for LinkVersion {
+    #[inline]
+    fn hash(&self, state: &mut impl Hasher) {
+        self.0.hash(state);
+    }
+}
+
+impl PartialEq<u16> for LinkVersion {
+    #[inline]
+    fn eq(&self, other: &u16) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialOrd<u16> for LinkVersion {
+    #[inline]
+    fn partial_cmp(&self, other: &u16) -> Option<Ordering> {
+        self.0.partial_cmp(other)
+    }
+}
 
 impl From<LinkVersion> for u16 {
     #[inline]
@@ -21,7 +53,7 @@ impl LinkVersion {
     /// Minimum supported link protocol version.
     pub const MIN: Self = Self(3);
     /// Maximum supported link protocol version.
-    pub const MAX: Self = Self(3);
+    pub const MAX: Self = Self(5);
 
     /// Returns `true` if circuit ID should be 4 bytes.
     #[inline]
