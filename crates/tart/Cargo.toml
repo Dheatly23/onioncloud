@@ -26,12 +26,6 @@ features = [
 workspace = true
 optional = true
 
-[dependencies.tracing-subscriber]
-workspace = true
-features = [
-  "env-filter",
-]
-
 [dev-dependencies.test-log]
 workspace = true
 features = [

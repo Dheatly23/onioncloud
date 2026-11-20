@@ -470,10 +470,8 @@ name = "onioncloud-ll-channel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64ct",
  "futures-io",
  "once_cell",
- "onioncloud-ll-cell",
  "onioncloud-runtime",
  "onioncloud-tart",
  "pin-project",
@@ -527,10 +525,7 @@ name = "onioncloud-ml-channel-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64ct",
- "futures-io",
  "humantime",
- "once_cell",
  "onioncloud-ll",
  "onioncloud-runtime",
  "onioncloud-tart",
@@ -569,7 +564,6 @@ dependencies = [
  "slab",
  "test-log",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
