@@ -1,8 +1,8 @@
 //! Protocol versions.
 
-use std::hash::{Hash, Hasher};
 use std::borrow::Borrow;
-use std::cmp::{PartialEq, PartialOrd, Ordering};
+use std::cmp::{Ordering, PartialEq, PartialOrd};
+use std::hash::{Hash, Hasher};
 
 #[cfg(feature = "cell")]
 use onioncloud_ll_cell::typed::Versions;
@@ -23,7 +23,7 @@ impl Borrow<u16> for LinkVersion {
 
 impl Hash for LinkVersion {
     #[inline]
-    fn hash(&self, state: &mut impl Hasher) {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.hash(state);
     }
 }
