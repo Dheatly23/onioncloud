@@ -624,7 +624,6 @@ dependencies = [
  "base64ct",
  "ed25519-dalek",
  "onioncloud-ll-cell",
- "onioncloud-tart",
  "test-log",
  "thiserror",
  "tracing",

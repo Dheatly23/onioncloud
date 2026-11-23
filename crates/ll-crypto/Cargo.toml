@@ -14,7 +14,6 @@ thiserror.workspace = true
 zerocopy.workspace = true
 
 [dev-dependencies]
-onioncloud-tart.workspace = true
 tracing.workspace = true
 
 [dev-dependencies.test-log]
@@ -22,3 +21,6 @@ workspace = true
 features = [
   "trace",
 ]
+
+[features]
+test-keys = []

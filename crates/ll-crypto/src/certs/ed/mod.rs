@@ -7,15 +7,16 @@ use std::cmp::PartialEq;
 use std::hash::{Hash, Hasher};
 use std::mem::size_of_val;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
+use std::time::{Duration, SystemTime};
 
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use zerocopy::byteorder::big_endian::{U16, U32};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, SplitAt, Unaligned};
 
 use crate::Ed25519PublicKey;
 use crate::error::{CertFormatError, CertValidateError};
 
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, SplitAt)]
 #[repr(C)]
 struct EdCertHead {
     version: u8,
@@ -152,6 +153,13 @@ impl<'a> EdCert<'a> {
         self.msg.exp.get()
     }
 
+    /// Gets expiration time.
+    #[inline]
+    #[must_use]
+    pub fn expiry_time(&self) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_hours(self.expiry().into())
+    }
+
     /// Gets cerificate key material.
     #[inline]
     #[must_use]
@@ -167,7 +175,7 @@ impl<'a> EdCert<'a> {
     ///
     /// # Errors
     ///
-    /// Returns error if signature verification errors.
+    /// Returns error if signature verification fails.
     ///
     /// # Panics
     ///
@@ -178,11 +186,14 @@ impl<'a> EdCert<'a> {
             self.ix != usize::MAX && self.n == 0,
             "invalid certificate format"
         );
-        let Ok(tail) = EdCertTail::ref_from_bytes(&self.msg.rest[self.ix..]) else {
+        let Some(s) = self.msg.split_at(self.ix) else {
             panic!("invalid certificate format");
         };
-        let b = self.msg.as_bytes();
-        pk.verify_strict(&b[..b.len() - 64], &Signature::from_bytes(tail))
+        let (head, tail) = s.via_immutable();
+        let Ok(tail) = EdCertTail::ref_from_bytes(tail) else {
+            panic!("invalid certificate format");
+        };
+        pk.verify(head.as_bytes(), &Signature::from_bytes(tail))
             .map_err(CertValidateError::from)
     }
 
@@ -394,5 +405,80 @@ impl EdCertExtFlags {
     #[must_use]
     pub fn is_required(self) -> bool {
         self & Self::REQUIRED != 0
+    }
+}
+
+#[cfg(all(test, feature = "test-keys"))]
+mod tests {
+    use super::*;
+
+    use test_log::test;
+    use tracing::{info, instrument};
+
+    use ed25519_dalek::Signer;
+
+    use crate::certs::ed::ext::{SignedWithEd25519Key, TryFromExt};
+    use crate::test_keys::test_ed25519_keypair;
+
+    #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+    #[repr(C)]
+    struct EdCertHeadOnly {
+        version: u8,
+        ty: u8,
+        exp: U32,
+        kty: u8,
+        key: Ed25519PublicKey,
+        n_ext: u8,
+    }
+
+    #[test]
+    fn test_cert_validation() {
+        #[instrument]
+        fn test() {
+            // SAFETY: We're in unit test.
+            let (sk, pk) = unsafe { test_ed25519_keypair() };
+
+            info!("creating certificate");
+            let mut buf = Vec::new();
+            buf.extend_from_slice(
+                EdCertHeadOnly {
+                    version: 1,
+                    ty: 4,
+                    exp: 0.into(),
+                    kty: 1,
+                    key: [123; 32],
+                    n_ext: 1,
+                }
+                .as_bytes(),
+            );
+            SignedWithEd25519Key::from_pk(pk.as_bytes()).write_bytes(&mut buf);
+            buf.extend_from_slice(&sk.sign(&buf).to_bytes());
+
+            info!("validating certificate");
+
+            let mut cert = EdCert::try_from(&buf[..]).unwrap();
+
+            assert_eq!(cert.cert_ty(), EdCertType::IDENTITY_V_SIGNING);
+            assert_eq!(cert.key_ty(), EdCertKeyType::ED25519);
+            assert_eq!(cert.expiry(), 0);
+            assert_eq!(*cert.key(), [123; 32]);
+
+            info!("validating extensions");
+
+            for ext in &mut cert {
+                let ext = ext.unwrap();
+                if let Some(ext) = SignedWithEd25519Key::try_from_ext(&ext).unwrap() {
+                    assert_eq!(ext.key(), pk.as_bytes());
+                } else {
+                    panic!("unknown extension {}", ext.ty());
+                }
+            }
+
+            info!("validating signature");
+
+            cert.verify(&pk).unwrap();
+        }
+
+        test();
     }
 }
