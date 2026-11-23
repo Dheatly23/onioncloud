@@ -1,5 +1,7 @@
 //! Defines Ed25519 certificate format.
 
+pub mod ext;
+
 use std::borrow::Borrow;
 use std::cmp::PartialEq;
 use std::hash::{Hash, Hasher};
