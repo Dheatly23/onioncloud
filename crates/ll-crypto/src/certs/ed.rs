@@ -1,3 +1,5 @@
+//! Defines Ed25519 certificate format.
+
 use std::borrow::Borrow;
 use std::cmp::PartialEq;
 use std::hash::{Hash, Hasher};
@@ -46,7 +48,7 @@ type EdCertTail = [u8; 64];
 /// # Example
 ///
 /// ```no_run
-/// # use onioncloud_ll_crypto::certs::EdCert;
+/// # use onioncloud_ll_crypto::certs::ed::EdCert;
 /// # use ed25519_dalek::VerifyingKey;
 /// fn verify_cert(bytes: &[u8], pk: &VerifyingKey) {
 ///     // Cast
