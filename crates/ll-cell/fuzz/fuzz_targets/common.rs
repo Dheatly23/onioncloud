@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use std::mem::size_of;
+use std::mem::{size_of, size_of_val};
 
 use arbitrary::{Arbitrary, Result as ArbResult, Unstructured};
 use onioncloud_ll_cell::cell::{Cell, CellHeader};
