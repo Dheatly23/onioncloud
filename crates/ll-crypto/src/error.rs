@@ -1,6 +1,6 @@
 //! Error types
 
-use ed25519_dalek::SignatureError;
+use signature::Error as SignatureError;
 use thiserror::Error;
 
 #[derive(Error, Debug, Default)]

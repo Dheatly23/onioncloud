@@ -9,7 +9,8 @@ use std::mem::size_of_val;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
 use std::time::{Duration, SystemTime};
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
+use signature::Verifier;
 use zerocopy::byteorder::big_endian::{U16, U32};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, SplitAt, Unaligned};
 
@@ -415,7 +416,7 @@ mod tests {
     use test_log::test;
     use tracing::{info, instrument};
 
-    use ed25519_dalek::Signer;
+    use signature::Signer;
 
     use crate::certs::ed::ext::{SignedWithEd25519Key, TryFromExt};
     use crate::test_keys::test_ed25519_keypair;

@@ -11,6 +11,7 @@ base64ct.workspace = true
 ed25519-dalek.workspace = true
 onioncloud-ll-cell.workspace = true
 thiserror.workspace = true
+signature.workspace = true
 zerocopy.workspace = true
 
 [dev-dependencies]

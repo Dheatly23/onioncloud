@@ -624,8 +624,21 @@ dependencies = [
  "base64ct",
  "ed25519-dalek",
  "onioncloud-ll-cell",
+ "signature",
  "test-log",
  "thiserror",
+ "tracing",
+ "zerocopy",
+]
+
+[[package]]
+name = "onioncloud-ll-crypto-fuzz"
+version = "0.0.0"
+dependencies = [
+ "arbitrary",
+ "libfuzzer-sys",
+ "onioncloud-ll-crypto",
+ "signature",
  "tracing",
  "zerocopy",
 ]

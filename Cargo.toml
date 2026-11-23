@@ -7,6 +7,7 @@ members = [
   "crates/ll-channel",
   "crates/ll-channel/fuzz",
   "crates/ll-crypto",
+  "crates/ll-crypto/fuzz",
   "crates/ll-relay-cell",
   "crates/ll-relay-cell/fuzz",
   "crates/ml-channel-client",
@@ -55,6 +56,7 @@ scopeguard = "1"
 sha1 = "0.10"
 sha2 = "0.10"
 sha3 = "0.10"
+signature = "2.2"
 slab = "0.4"
 subtle = "2"
 test-log = "0.2"

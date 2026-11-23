@@ -1,0 +1,29 @@
+[package]
+name = "onioncloud-ll-crypto-fuzz"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary.workspace = true
+libfuzzer-sys.workspace = true
+signature.workspace = true
+zerocopy.workspace = true
+
+[dependencies.onioncloud-ll-crypto]
+workspace = true
+features = ["test-keys"]
+
+[dependencies.tracing]
+workspace = true
+features = ["max_level_off"]
+
+[[bin]]
+name = "ed25519"
+path = "fuzz_targets/ed25519.rs"
+test = false
+doc = false
+bench = false
