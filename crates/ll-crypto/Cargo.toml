@@ -11,6 +11,7 @@ base64ct.workspace = true
 digest.workspace = true
 ed25519-dalek.workspace = true
 onioncloud-ll-cell.workspace = true
+sha1.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 signature.workspace = true

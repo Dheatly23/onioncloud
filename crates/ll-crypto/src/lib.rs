@@ -12,6 +12,8 @@ pub use ed25519_dalek::{SigningKey as EdSigningKey, VerifyingKey as EdVerifyingK
 #[doc(no_inline)]
 pub use rsa::{PrivateKey as RsaPrivateKey, PublicKey as RsaPublicKey};
 #[doc(no_inline)]
+pub use sha1::Sha1;
+#[doc(no_inline)]
 pub use sha2::Sha256;
 #[doc(no_inline)]
 pub use signature::{Signer, Verifier};

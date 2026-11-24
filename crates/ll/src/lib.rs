@@ -17,6 +17,7 @@ macro_rules! feat_import {
 feat_import! {
     "cell" => onioncloud_ll_cell as cell,
     "channel" => onioncloud_ll_channel as channel,
+    "crypto" => onioncloud_ll_crypto as crypto,
     "relay-cell" => onioncloud_ll_relay_cell as relay_cell,
 }
 
