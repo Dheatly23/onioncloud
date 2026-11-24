@@ -2,7 +2,7 @@
 
 pub mod certs;
 pub mod error;
-#[cfg(feature = "test-keys")]
+#[cfg(any(test, feature = "test-keys"))]
 pub mod test_keys;
 
 #[doc(no_inline)]

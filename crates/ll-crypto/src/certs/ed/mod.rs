@@ -9,13 +9,11 @@ use std::mem::size_of_val;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
 use std::time::{Duration, SystemTime};
 
-use ed25519_dalek::{Signature, VerifyingKey};
-use signature::Verifier;
 use zerocopy::byteorder::big_endian::{U16, U32};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, SplitAt, Unaligned};
 
-use crate::EdPublicKey;
 use crate::error::{CertFormatError, CertValidateError};
+use crate::{EdPublicKey, EdVerifyingKey, Verifier};
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, SplitAt)]
 #[repr(C)]
@@ -45,16 +43,15 @@ type EdCertTail = [u8; 64];
 /// # Validation Procedure
 ///
 /// 1. Cast from byte slice using [`TryFrom`].
-/// 2. Check certificate type and certificate key type.
+/// 2. Check certificate type, certificate key type, and expiry.
 /// 3. Iterate through all extensions.
 /// 4. Verify signature with [`verify`].
 ///
 /// # Example
 ///
 /// ```no_run
-/// # use onioncloud_ll_crypto::certs::ed::EdCert;
-/// # use ed25519_dalek::VerifyingKey;
-/// fn verify_cert(bytes: &[u8], pk: &VerifyingKey) {
+/// # use onioncloud_ll_crypto::{certs::ed::EdCert, EdVerifyingKey};
+/// fn verify_cert(bytes: &[u8], pk: &EdVerifyingKey) {
 ///     // Cast
 ///     let mut cert = EdCert::try_from(bytes).unwrap();
 ///
@@ -182,7 +179,7 @@ impl<'a> EdCert<'a> {
     ///
     /// Panics if there are extension to be parsed or it's format is invalid.
     #[inline]
-    pub fn verify(&self, pk: &VerifyingKey) -> Result<(), CertValidateError> {
+    pub fn verify(&self, pk: &EdVerifyingKey) -> Result<(), CertValidateError> {
         assert!(
             self.ix != usize::MAX && self.n == 0,
             "invalid certificate format"
@@ -194,7 +191,7 @@ impl<'a> EdCert<'a> {
         let Ok(tail) = EdCertTail::ref_from_bytes(tail) else {
             panic!("invalid certificate format");
         };
-        pk.verify(head.as_bytes(), &Signature::from_bytes(tail))
+        pk.verify(head.as_bytes(), &tail.into())
             .map_err(CertValidateError::from)
     }
 
@@ -409,15 +406,14 @@ impl EdCertExtFlags {
     }
 }
 
-#[cfg(all(test, feature = "test-keys"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     use test_log::test;
     use tracing::{info, instrument};
 
-    use signature::Signer;
-
+    use crate::Signer;
     use crate::certs::ed::ext::{SignedWithEd25519Key, TryFromExt};
     use crate::test_keys::test_ed25519_keypair;
 
