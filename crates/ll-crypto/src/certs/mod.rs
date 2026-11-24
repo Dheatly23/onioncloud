@@ -4,3 +4,4 @@
 //! - [Ed25519 certificate format](https://spec.torproject.org/cert-spec.html).
 
 pub mod ed;
+pub mod rsa;
