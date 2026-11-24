@@ -5,7 +5,7 @@ mod common;
 use std::mem::size_of;
 
 use libfuzzer_sys::fuzz_target;
-use onioncloud_ll_crypto::Ed25519PublicKey;
+use onioncloud_ll_crypto::EdPublicKey;
 use onioncloud_ll_crypto::certs::ed::EdCert;
 use signature::Signer;
 use zerocopy::byteorder::big_endian::{U16, U32};
@@ -19,7 +19,7 @@ struct CertHead {
     ty: u8,
     exp: U32,
     kty: u8,
-    key: Ed25519PublicKey,
+    key: EdPublicKey,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]

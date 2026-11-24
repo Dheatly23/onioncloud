@@ -6,7 +6,7 @@ use zerocopy::byteorder::big_endian::U16;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned, transmute};
 
 use super::EdCertExt;
-use crate::Ed25519PublicKey;
+use crate::EdPublicKey;
 use crate::error::CertFormatError;
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -30,14 +30,14 @@ pub trait TryFromExt<'a>: Sized {
 
 /// Embedded public key that signs this certificate.
 #[derive(Clone)]
-pub struct SignedWithEd25519Key<'a>(&'a Ed25519PublicKey);
+pub struct SignedWithEd25519Key<'a>(&'a EdPublicKey);
 
 impl<'a> TryFromExt<'a> for SignedWithEd25519Key<'a> {
     fn try_from_ext(ext: &EdCertExt<'a>) -> Result<Option<Self>, CertFormatError> {
         if ext.ty() != Self::ID {
             return Ok(None);
         }
-        match <&Ed25519PublicKey>::try_from(ext.data()) {
+        match <&EdPublicKey>::try_from(ext.data()) {
             Ok(v) => Ok(Some(Self(v))),
             Err(_) => Err(CertFormatError),
         }
@@ -47,17 +47,17 @@ impl<'a> TryFromExt<'a> for SignedWithEd25519Key<'a> {
 impl<'a> SignedWithEd25519Key<'a> {
     const ID: u8 = 4;
 
-    /// Creates new [`SignedWithEd25519Key`] from [`Ed25519PublicKey`].
+    /// Creates new [`SignedWithEd25519Key`] from [`EdPublicKey`].
     #[inline]
     #[must_use]
-    pub fn from_pk(key: &'a Ed25519PublicKey) -> Self {
+    pub fn from_pk(key: &'a EdPublicKey) -> Self {
         Self(key)
     }
 
     /// Gets embedded public key.
     #[inline]
     #[must_use]
-    pub fn key(&self) -> &'a Ed25519PublicKey {
+    pub fn key(&self) -> &'a EdPublicKey {
         self.0
     }
 

@@ -14,7 +14,7 @@ use signature::Verifier;
 use zerocopy::byteorder::big_endian::{U16, U32};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, SplitAt, Unaligned};
 
-use crate::Ed25519PublicKey;
+use crate::EdPublicKey;
 use crate::error::{CertFormatError, CertValidateError};
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, SplitAt)]
@@ -24,7 +24,7 @@ struct EdCertHead {
     ty: u8,
     exp: U32,
     kty: u8,
-    key: Ed25519PublicKey,
+    key: EdPublicKey,
     n_ext: u8,
     rest: [u8],
 }
@@ -164,7 +164,7 @@ impl<'a> EdCert<'a> {
     /// Gets cerificate key material.
     #[inline]
     #[must_use]
-    pub fn key(&self) -> &'a Ed25519PublicKey {
+    pub fn key(&self) -> &'a EdPublicKey {
         &self.msg.key
     }
 
@@ -428,7 +428,7 @@ mod tests {
         ty: u8,
         exp: U32,
         kty: u8,
-        key: Ed25519PublicKey,
+        key: EdPublicKey,
         n_ext: u8,
     }
 

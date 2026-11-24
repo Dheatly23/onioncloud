@@ -6,4 +6,4 @@ pub mod error;
 pub mod test_keys;
 
 /// Ed25519 public key.
-pub type Ed25519PublicKey = [u8; 32];
+pub type EdPublicKey = [u8; 32];
