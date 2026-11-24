@@ -17,6 +17,12 @@ zerocopy.workspace = true
 workspace = true
 features = ["test-keys"]
 
+[dependencies.rsa]
+workspace = true
+features = [
+  "pkcs1v15"
+]
+
 [dependencies.tracing]
 workspace = true
 features = ["max_level_off"]
@@ -24,6 +30,13 @@ features = ["max_level_off"]
 [[bin]]
 name = "ed25519"
 path = "fuzz_targets/ed25519.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rsa"
+path = "fuzz_targets/rsa.rs"
 test = false
 doc = false
 bench = false

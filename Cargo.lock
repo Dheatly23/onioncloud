@@ -710,6 +710,7 @@ dependencies = [
  "arbitrary",
  "libfuzzer-sys",
  "onioncloud-ll-crypto",
+ "rsa",
  "signature",
  "tracing",
  "zerocopy",
