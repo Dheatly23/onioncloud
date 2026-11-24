@@ -32,29 +32,16 @@ static PREFIX: &[u8] = b"Tor TLS RSA/Ed25519 cross-certificate";
 /// # Validation Procedure
 ///
 /// 1. Cast from byte slice using [`TryFrom`].
-/// 2. Check expiry and expiry.
-/// 3. Iterate through all extensions.
-/// 4. Verify signature with [`verify`].
+/// 2. Check certified key and expiry.
+/// 3. Verify signature with [`verify`].
 ///
 /// # Example
 ///
 /// ```no_run
-/// # use onioncloud_ll_crypto::certs::rsa::RsaCert;
-/// # use ed25519_dalek::VerifyingKey;
-/// fn verify_cert(bytes: &[u8], pk: &VerifyingKey) {
+/// # use onioncloud_ll_crypto::{RsaPublicKey, certs::rsa::RsaCert};
+/// fn verify_cert(bytes: &[u8], pk: &RsaPublicKey) {
 ///     // Cast
-///     let mut cert = EdCert::try_from(bytes).unwrap();
-///
-///     // Check extensions
-///     for ext in &mut cert {
-///         let ext = ext.unwrap();
-///
-///         // Do the processing ...
-///
-///         if ext.flags().is_required() {
-///             panic!("extension is required but unrecognized!");
-///         }
-///     }
+///     let mut cert = RsaCert::try_from(bytes).unwrap();
 ///
 ///     // Verify
 ///     cert.verify(pk).unwrap();
