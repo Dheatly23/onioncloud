@@ -112,3 +112,54 @@ impl<'a> RsaCert<'a> {
         .map_err(|_| CertValidateError)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use test_log::test;
+    use tracing::{info, instrument};
+
+    use crate::test_keys::test_rsa_keypair;
+
+    #[test]
+    fn test_cert_validation() {
+        #[instrument]
+        fn test() {
+            // SAFETY: We're in unit test.
+            let (sk, pk) = unsafe { test_rsa_keypair() };
+
+            info!("creating certificate");
+            let mut buf = Vec::new();
+            buf.extend_from_slice(
+                RsaCertHead {
+                    key: [123; 32],
+                    exp: 0.into(),
+                }
+                .as_bytes(),
+            );
+            let mut hasher = Sha256::new();
+            hasher.update(PREFIX);
+            hasher.update(&buf);
+            let sig = sk
+                .sign(Pkcs1v15Sign::new_unprefixed(), &hasher.finalize())
+                .unwrap();
+            buf.push(sig.len().try_into().unwrap());
+            buf.extend_from_slice(&sig);
+            drop(sig);
+
+            info!("validating certificate");
+
+            let cert = RsaCert::try_from(&buf[..]).unwrap();
+
+            assert_eq!(cert.expiry(), 0);
+            assert_eq!(*cert.key(), [123; 32]);
+
+            info!("validating signature");
+
+            cert.verify(&pk).unwrap();
+        }
+
+        test();
+    }
+}

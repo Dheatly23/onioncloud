@@ -10,7 +10,7 @@ pub use digest::Digest;
 #[doc(no_inline)]
 pub use ed25519_dalek::{SigningKey as EdSigningKey, VerifyingKey as EdVerifyingKey};
 #[doc(no_inline)]
-pub use rsa::PublicKey as RsaPublicKey;
+pub use rsa::{PrivateKey as RsaPrivateKey, PublicKey as RsaPublicKey};
 #[doc(no_inline)]
 pub use sha2::Sha256;
 #[doc(no_inline)]
