@@ -20,7 +20,6 @@ mod versions;
 
 #[cfg(feature = "crypto")]
 pub use extract_rsa::*;
-pub use hex::fmt_hex;
 pub use versions::*;
 
 /// Relay ID/fingerprint.
