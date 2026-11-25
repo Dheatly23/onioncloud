@@ -1,7 +1,20 @@
 [workspace]
 resolver = "3"
 members = [
-  "crates/*",
+  "crates/ll",
+  "crates/ll/fuzz",
+  "crates/ll-cell",
+  "crates/ll-cell/fuzz",
+  "crates/ll-channel",
+  "crates/ll-channel/fuzz",
+  "crates/ll-crypto",
+  "crates/ll-crypto/fuzz",
+  "crates/ll-relay-cell",
+  "crates/ll-relay-cell/fuzz",
+  "crates/ml-channel-client",
+  "crates/rt",
+  "crates/tart",
+  "crates/tart/fuzz",
 ]
 
 [workspace.package]
@@ -20,28 +33,35 @@ cipher = "0.4"
 clap = "4"
 crossbeam-queue = "0.3"
 ctr = "0.9"
-digest = "0.10"
+digest = "0.11"
 flume = "0.12"
 futures-channel = "0.3"
 futures-core = "0.3"
 futures-io = "0.3"
 futures-sink = "0.3"
 http-body-util = "0.1"
+humantime = "2"
 hyper = "1"
+libfuzzer-sys = "0.4"
 loom = "0.7"
 memchr = "2"
 num-traits = "0.2"
 parking_lot = "0.12"
 pin-project = "1"
+pkcs1 = "0.8"
+pkcs8 = "0.11"
 proptest = "1"
 proptest-state-machine = "0.7"
-rand = "0.8"
-rsa = "0.9"
+rand = "0.10"
+rsa = "0.10"
 rustls-webpki = "0.103"
+rustls-pki-types = "1.16"
 scopeguard = "1"
-sha1 = "0.10"
-sha2 = "0.10"
-sha3 = "0.10"
+sha1 = "0.11"
+sha2 = "0.11"
+sha3 = "0.11"
+signature = "3.0"
+slab = "0.4"
 subtle = "2"
 test-log = "0.2"
 thiserror = "2"
@@ -53,6 +73,12 @@ zerocopy = "0.8"
 version = "1"
 features = [
   "backtrace",
+]
+
+[workspace.dependencies.arbitrary]
+version = "1"
+features = [
+  "derive",
 ]
 
 [workspace.dependencies.chrono]
@@ -71,12 +97,11 @@ features = [
 ]
 
 [workspace.dependencies.ed25519-dalek]
-version = "2"
+version = "3"
 default-features = false
 features = [
   "fast",
   "rand_core",
-  "std",
 ]
 
 [workspace.dependencies.futures-util]
@@ -132,3 +157,36 @@ features = [
   "precomputed-tables",
   "static_secrets",
 ]
+
+[workspace.dependencies.onioncloud-ll]
+version = "0.1.0"
+path = "crates/ll"
+
+[workspace.dependencies.onioncloud-ll-cell]
+version = "0.1.0"
+path = "crates/ll-cell"
+
+[workspace.dependencies.onioncloud-ll-channel]
+version = "0.1.0"
+path = "crates/ll-channel"
+
+[workspace.dependencies.onioncloud-ll-crypto]
+version = "0.1.0"
+path = "crates/ll-crypto"
+
+[workspace.dependencies.onioncloud-ll-relay-cell]
+version = "0.1.0"
+path = "crates/ll-relay-cell"
+
+[workspace.dependencies.onioncloud-ml-channel-client]
+version = "0.1.0"
+path = "crates/ml-channel-client"
+
+[workspace.dependencies.onioncloud-runtime]
+version = "0.1.0"
+path = "crates/rt"
+default-features = false
+
+[workspace.dependencies.onioncloud-tart]
+version = "0.1.0"
+path = "crates/tart"

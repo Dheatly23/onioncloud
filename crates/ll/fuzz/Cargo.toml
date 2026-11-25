@@ -1,0 +1,29 @@
+[package]
+name = "onioncloud-ll-fuzz"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary.workspace = true
+libfuzzer-sys.workspace = true
+signature.workspace = true
+zerocopy.workspace = true
+
+[dependencies.onioncloud-ll]
+workspace = true
+features = []
+
+[dependencies.tracing]
+workspace = true
+features = ["max_level_off"]
+
+[[bin]]
+name = "hex"
+path = "fuzz_targets/hex.rs"
+test = false
+doc = false
+bench = false

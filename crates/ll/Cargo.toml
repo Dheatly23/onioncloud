@@ -1,0 +1,60 @@
+[package]
+name = "onioncloud-ll"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64ct.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dependencies.onioncloud-ll-cell]
+workspace = true
+optional = true
+
+[dependencies.onioncloud-ll-channel]
+workspace = true
+optional = true
+
+[dependencies.onioncloud-ll-crypto]
+workspace = true
+optional = true
+
+[dependencies.onioncloud-ll-relay-cell]
+workspace = true
+optional = true
+
+[dependencies.pkcs1]
+workspace = true
+optional = true
+
+[dependencies.pkcs8]
+workspace = true
+optional = true
+
+[dependencies.rustls-pki-types]
+workspace = true
+optional = true
+
+[dependencies.rustls-webpki]
+workspace = true
+optional = true
+
+[features]
+cell = ["dep:onioncloud-ll-cell"]
+channel = ["dep:onioncloud-ll-channel"]
+crypto = [
+  "dep:onioncloud-ll-crypto",
+  "dep:pkcs1",
+  "dep:pkcs8",
+  "dep:rustls-pki-types",
+  "dep:rustls-webpki",
+]
+relay-cell = ["dep:onioncloud-ll-relay-cell"]
+
+[lints.rust.unexpected_cfgs]
+level = "deny"
+check-cfg = ["cfg(fuzzing)"]
