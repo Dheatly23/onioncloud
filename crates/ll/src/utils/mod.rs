@@ -5,9 +5,10 @@ mod hex;
 #[cfg(fuzzing)]
 pub mod hex;
 
+use std::debug_assert_matches;
 use std::fmt::{Display, Formatter, Result as FmtResult};
-use std::str::{from_utf8_unchecked, from_utf8};
-use std::mem::{transmute,MaybeUninit};
+use std::mem::{MaybeUninit, transmute};
+use std::str::{from_utf8, from_utf8_unchecked};
 
 use base64ct::{Base64, Encoding};
 
@@ -44,13 +45,13 @@ pub const fn print_hex(s: &[u8]) -> impl '_ + Display {
 
     impl Display for S<'_> {
         fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-            let mut a = [const{MaybeUninit::<u8>::uninit()};256];
+            let mut a = [const { MaybeUninit::<u8>::uninit() }; 256];
 
             for s in self.0.chunks(128) {
                 let a = &mut a[..s.len() * 2];
                 hex::fmt_hex(a, s);
                 // SAFETY: Array is initialized.
-                let s = unsafe { transmute::<&[MaybeUninit<u8>],&[u8]>(a)};
+                let s = unsafe { transmute::<&[MaybeUninit<u8>], &[u8]>(a) };
                 debug_assert_matches!(from_utf8(s), Ok(_));
                 // SAFETY: Hex string is ASCII.
                 let s = unsafe { from_utf8_unchecked(s) };
@@ -80,10 +81,10 @@ pub const fn print_relay_id(key: &RelayId) -> impl '_ + Display {
 
     impl Display for S<'_> {
         fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-            let mut a = [const{MaybeUninit::<u8>::uninit()}; 40];
+            let mut a = [const { MaybeUninit::<u8>::uninit() }; 40];
             hex::fmt_hex(&mut a, self.0);
             // SAFETY: Array is initialized.
-            let s = unsafe { transmute::<&[MaybeUninit<u8>],&[u8]>(&a)};
+            let s = unsafe { transmute::<&[MaybeUninit<u8>], &[u8]>(&a) };
             debug_assert_matches!(from_utf8(s), Ok(_));
             // SAFETY: Hex string is ASCII.
             let s = unsafe { from_utf8_unchecked(s) };

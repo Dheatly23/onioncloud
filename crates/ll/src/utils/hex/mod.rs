@@ -6,7 +6,6 @@ pub mod usimd;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub mod x86;
 
-use std::ptr::{from_mut, from_ref};
 use std::mem::MaybeUninit;
 
 /// Helper trait for dispatching implementation.
