@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "crates/ll",
+  "crates/ll/fuzz",
   "crates/ll-cell",
   "crates/ll-cell/fuzz",
   "crates/ll-channel",

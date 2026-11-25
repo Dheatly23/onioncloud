@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64ct.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
@@ -53,3 +54,7 @@ crypto = [
   "dep:rustls-webpki",
 ]
 relay-cell = ["dep:onioncloud-ll-relay-cell"]
+
+[lints.rust.unexpected_cfgs]
+level = "deny"
+check-cfg = ["cfg(fuzzing)"]

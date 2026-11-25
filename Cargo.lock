@@ -622,6 +622,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 name = "onioncloud-ll"
 version = "0.1.0"
 dependencies = [
+ "base64ct",
  "onioncloud-ll-cell",
  "onioncloud-ll-channel",
  "onioncloud-ll-crypto",
@@ -717,6 +718,18 @@ dependencies = [
  "libfuzzer-sys",
  "onioncloud-ll-crypto",
  "rsa",
+ "signature",
+ "tracing",
+ "zerocopy",
+]
+
+[[package]]
+name = "onioncloud-ll-fuzz"
+version = "0.0.0"
+dependencies = [
+ "arbitrary",
+ "libfuzzer-sys",
+ "onioncloud-ll",
  "signature",
  "tracing",
  "zerocopy",
